@@ -638,7 +638,6 @@ def make_model(
     *,
     mlp_type="mlp_v1",
     edge_embedding=None,
-    multi_cutoff=None,
     scatter_norm=None,
 ):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
@@ -663,7 +662,6 @@ def make_model(
     config["edge_update"]["type"] = "element2"
     config["radial_basis"]["hidden"] = [4]
     config["radial_basis"]["apply_cutoff"] = False
-    config["radial_basis"]["multi_cutoff"] = multi_cutoff
     if scatter_norm is not None:
         config["atomic_basis"]["scatter_norm"] = scatter_norm
     if edge_embedding is not None:
@@ -764,92 +762,11 @@ def test_element_edge_convolution(interaction, embedding, double_precision, monk
         torch.testing.assert_close(gradient(actual), grad, rtol=1e-8, atol=1e-10)
 
 
-@pytest.mark.parametrize(
-    "interaction,embedding,norm",
-    [
-        ("cgtp", "element", "cutoff"),
-        ("o2_cgtp", "element2", "cutoff"),
-        ("co3", "element2", "density"),
-        ("nonlinear_ictd", "element", "cutoff"),
-        ("cgtp", None, "sqrt_avg_num_neighbors"),
-        ("cgtp", None, "cutoff"),
-    ],
-)
-def test_multi_cutoff_interaction(
-    interaction, embedding, norm, double_precision, monkeypatch
-):
-    from equivariantx.ops import config as eqx_config
-
-    def build(multi_cutoff):
-        torch.manual_seed(31)
-        return make_model(
-            interaction,
-            mlp_type="mlp_v2" if embedding is None else "mlp_v1",
-            edge_embedding=embedding,
-            multi_cutoff=multi_cutoff,
-            scatter_norm=norm,
-        ).train()
-
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
-    original, single, model = (
-        build(multi_cutoff) for multi_cutoff in (None, [4.0], [1.2, 4.0])
-    )
-    assert {
-        key.replace(
-            ".representation.radial_basis.",
-            ".representation.multi_cutoff_radial_basis.0.",
-        )
-        for key in original.state_dict()
-    } == single.state_dict().keys()
-    keys = ("energy", "forces", "stress")
-    before, after = evaluate(original), evaluate(single)
-    for key in keys:
-        torch.testing.assert_close(after[key], before[key], rtol=1e-10, atol=1e-11)
-    rep = model.readout_fn.representation
-    single_radial = original.readout_fn.representation.interactions[0].edge_info
-    branches = rep.interactions[0].edge_info.networks
-    torch.testing.assert_close(
-        branches[0].mlp[-1].weight,
-        single_radial.mlp[-1].weight * len(branches) ** -0.5,
-    )
-    parameters = [p for layer in rep.interactions for p in layer.edge_info.parameters()]
-    if embedding is not None:
-        old = original.readout_fn.representation.edge_embedding
-        assert {n: p.shape for n, p in rep.edge_embedding.named_parameters()} == {
-            n: p.shape for n, p in old.named_parameters()
-        }
-        with torch.no_grad():
-            for p in rep.edge_embedding.parameters():
-                p.normal_(std=0.2)
-                parameters.append(p)
-    if norm == "density":
-        with torch.no_grad():
-            for layer in rep.interactions:
-                layer.scatter_norm.beta.fill_(0.3)
-
-    def evaluate_gradients():
-        out = evaluate(model)
-        loss = sum(out[key].square().sum() for key in keys)
-        return tuple(out[key] for key in keys), torch.autograd.grad(loss, parameters)
-
-    expected = evaluate_gradients()
-    monkeypatch.setenv("TACE_USE_EQX", "1")
-    budget = eqx_config.RADIAL_PROJECT_MAX_BYTES
-    for memory_first, limit in (("0", budget), ("1", budget), ("1", 1)):
-        monkeypatch.setenv("TACE_MEMORY_FIRST", memory_first)
-        monkeypatch.setattr(eqx_config, "RADIAL_PROJECT_MAX_BYTES", limit)
-        torch.testing.assert_close(
-            evaluate_gradients(), expected, rtol=1e-8, atol=1e-10
-        )
-
-
 @pytest.mark.parametrize("embedding", ["element", "element2"])
-def test_multi_cutoff_scatter_weights(embedding, double_precision, monkeypatch):
+def test_cutoff_element_weights(embedding, double_precision, monkeypatch):
     monkeypatch.delenv("TACE_USE_EQX", raising=False)
     torch.manual_seed(26)
-    model = make_model(
-        edge_embedding=embedding, multi_cutoff=[1.2, 4.0], scatter_norm="cutoff"
-    )
+    model = make_model(edge_embedding=embedding, scatter_norm="cutoff")
     rep = model.readout_fn.representation
     with torch.no_grad():
         for table in rep.edge_embedding.parameters():
@@ -857,22 +774,18 @@ def test_multi_cutoff_scatter_weights(embedding, double_precision, monkeypatch):
     expected = {}
 
     def reference(layer, args, kwargs):
-        features, cutoffs = kwargs["multi_radial"]
-        target = args[6][1]
+        features, index, cutoff = args[4], args[6], args[7]
+        target = index[1]
         others = (target[:, None] == target) & ~torch.eye(
             target.numel(), device=target.device, dtype=torch.bool
         )
-        amplitudes = cutoffs / (1 + others.to(cutoffs) @ cutoffs.square()).sqrt()
-        radial = sum(
-            net(f) * amplitudes[:, s : s + 1]
-            for s, (net, f) in enumerate(zip(layer.edge_info.networks, features))
-        )
+        amplitude = cutoff / (1 + others.to(cutoff) @ cutoff.square()).sqrt()
         tables, (src, dst) = kwargs["element"]
         a, b = tables if isinstance(tables, tuple) else (tables, tables)
-        expected[layer.rejector] = radial + amplitudes[:, -1:] * (
-            (a[src] + b[dst]) * 0.5
+        expected[layer.rejector] = amplitude * (
+            layer.edge_info(features) + 0.5 * (a[src] + b[dst])
         )
-        torch.testing.assert_close(kwargs["message_cutoff"], amplitudes)
+        torch.testing.assert_close(kwargs["message_cutoff"], amplitude)
         if layer is rep.interactions[-1]:
             kwargs["message_cutoff"] = None  # Standalone interaction path.
 
@@ -884,52 +797,6 @@ def test_multi_cutoff_scatter_weights(embedding, double_precision, monkeypatch):
         layer.rejector.register_forward_pre_hook(check)
     evaluate(model)
     assert not expected
-
-
-def test_multi_cutoff_support_and_envelopes(double_precision):
-    model = make_model(edge_embedding="element2", multi_cutoff=[2, 4]).readout_fn
-    config = deepcopy(model.model_config)
-    config["atomic_basis"]["type"] = ["cgtp", "so2"]
-    with pytest.raises(ValueError, match="multi_cutoff requires"):
-        SphericalTACE(**config)
-    rep = model.representation
-    layer = rep.interactions[0]
-    assert not hasattr(rep, "radial_basis")
-    assert [b.cutoff_fn.cutoff.item() for b in rep.multi_cutoff_radial_basis] == [2, 4]
-    radii = torch.tensor(
-        [1.7, 2.0, 2.3, 3.8, 4.0, 4.3], device=DEVICE, requires_grad=True
-    )
-    idx = torch.arange(radii.numel(), device=DEVICE) % 2
-    index = torch.stack((idx, 1 - idx))
-    types = torch.tensor([0, 2], device=DEVICE)
-    features, cutoffs = zip(
-        *(
-            b(radii[:, None], types, index, rep.atomic_numbers)
-            for b in rep.multi_cutoff_radial_basis
-        )
-    )
-    envelopes = torch.cat(cutoffs, -1)
-    a, b = rep.edge_embedding.layer_weights(0)
-    a = torch.ones_like(a)
-    b = torch.arange(b.numel(), device=DEVICE).reshape_as(b).to(a)
-    src, dst = types[index]
-    weights = layer._conv_weights((features, envelopes, None), ((a, b), (src, dst)))
-    radial = layer.edge_info
-    outer = cutoffs[-1] * (radial.networks[-1](features[-1]) + 0.5 * (a[src] + b[dst]))
-    short = (weights - outer).sum(-1)
-    all_scales = weights.sum(-1)
-    for order in range(3):
-        torch.testing.assert_close(
-            short[1:], torch.zeros_like(short[1:]), rtol=0, atol=1e-12
-        )
-        torch.testing.assert_close(
-            all_scales[-2:], torch.zeros_like(all_scales[-2:]), rtol=0, atol=1e-12
-        )
-        if order < 2:
-            short = torch.autograd.grad(short.sum(), radii, create_graph=True)[0]
-            all_scales = torch.autograd.grad(
-                all_scales.sum(), radii, create_graph=True
-            )[0]
 
 
 @pytest.mark.parametrize("product", ["nonlinear_cgtp", "nonlinear_ictd"])

@@ -81,10 +81,11 @@ def activation_slope(layer, value):
     raise ValueError(f"Unsupported radial jet activation: {type(layer).__name__}")
 
 
-def hidden_jets(representation, networks, basis_fn, radius, node_type, edge_index):
+def hidden_jets(representation, networks, radius, node_type, edge_index):
     """Evaluate analytic scalar-radius JVPs without dual-tensor shape guards."""
     embedding = representation.edge_embedding
     length = radius.detach()
+    basis_fn = representation.radial_basis
     basis, _ = basis_fn(length, node_type, edge_index, representation.atomic_numbers)
     basis = basis.to(representation.model_dtype)
     slope = bessel_slope(basis_fn, length).to(basis)

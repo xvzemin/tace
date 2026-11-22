@@ -81,7 +81,7 @@ class CutoffScatterNorm(IdentityScatterNorm):
     def edge_weights(
         edge_cutoff: torch.Tensor | None, target: torch.Tensor, num_nodes: int
     ) -> torch.Tensor:
-        """Normalize each cutoff column over the other edges entering the same node."""
+        """Normalize the edge cutoff against the other edges entering the same node."""
         if edge_cutoff is None:
             raise ValueError(
                 "scatter_norm='cutoff' requires radial_basis.apply_cutoff=false."

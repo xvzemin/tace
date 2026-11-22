@@ -47,7 +47,6 @@ DEFAULT_MODEL_CONFIG = {
     "radial_basis": {
         "bias": False,
         "radial_basis": "j0",
-        "multi_cutoff": None,
         "num_radial_basis": 8,
         "num_mag_radial_basis": 10,
         "distance_transform": None,
@@ -210,23 +209,9 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
             "layer_norm.final_norm_type='const_norm' is not supported. "
             "Use 'const_norm' only for layer_norm.pre_norm_type."
         )
-    multi_cutoff = radial["multi_cutoff"]
-    if multi_cutoff is not None and (
-        not isinstance(multi_cutoff, list)
-        or not multi_cutoff
-        or any(
-            isinstance(r, bool)
-            or not isinstance(r, Real)
-            or not math.isfinite(r)
-            or r <= 0
-            for r in multi_cutoff
-        )
-        or any(a >= b for a, b in zip(multi_cutoff, multi_cutoff[1:]))
-        or multi_cutoff[-1] != cfg["cutoff"]
-    ):
+    if "multi_cutoff" in radial:
         raise ValueError(
-            "radial_basis.multi_cutoff must be a nonempty list of positive, "
-            "strictly increasing radii ending at model.config.cutoff."
+            "Unsupported option radial_basis.multi_cutoff. Set model.config.cutoff instead."
         )
     if "mlp_type" in radial:
         raise ValueError("Set model.config.mlp_type instead of radial_basis.mlp_type.")
@@ -241,7 +226,6 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Element path embeddings require edge_update.type='identity'.")
     if radial["apply_cutoff"] is not False:
         for enabled, option in (
-            (multi_cutoff is not None, "radial_basis.multi_cutoff"),
             (element_paths, f"edge_embedding.type='{embedding}'"),
             (atomic_basis["scatter_norm"] == "cutoff", "scatter_norm='cutoff'"),
         ):

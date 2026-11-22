@@ -230,6 +230,8 @@ def test_universal_invariant_mlp_configuration(mlp_type):
         ({"mlp_type": "mlp_v2"}, "model.config.mlp_type"),
         ({"mlp_norm": "unknown"}, "mlp_norm"),
         ({"mlp_norm": "none"}, "mlp_norm"),
+        ({"multi_cutoff": [2.0, 6.0]}, "multi_cutoff"),
+        ({"multi_cutoff": None}, "multi_cutoff"),
     ],
 )
 def test_radial_mlp_configuration_errors(options, match):
@@ -243,39 +245,6 @@ def test_unknown_model_mlp_type(mlp_type):
 
     with pytest.raises(ValueError, match="mlp_type"):
         check_model_config({"mlp_type": mlp_type})
-
-
-def test_multi_cutoff_configuration():
-    from tace.models.spherical.default import check_model_config
-
-    assert DEFAULT_MODEL_CONFIG["radial_basis"]["multi_cutoff"] is None
-    for multi_cutoff in (
-        3,
-        [],
-        [3, 2, 6],
-        [2, 2, 6],
-        [1, 5],
-        [0, 6],
-        [True, 6],
-        [float("nan"), 6],
-    ):
-        with pytest.raises(ValueError, match="strictly increasing radii"):
-            check_model_config(
-                {
-                    "cutoff": 6,
-                    "radial_basis": {
-                        "multi_cutoff": multi_cutoff,
-                        "apply_cutoff": False,
-                    },
-                }
-            )
-    for options in ({}, {"apply_cutoff": True}, {"apply_cutoff": None}):
-        with pytest.raises(
-            ValueError, match="multi_cutoff requires radial_basis.apply_cutoff=false"
-        ):
-            check_model_config(
-                {"cutoff": 6, "radial_basis": {"multi_cutoff": [2, 6], **options}}
-            )
 
 
 def test_model_config_defaults():

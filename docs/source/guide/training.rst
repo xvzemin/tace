@@ -29,8 +29,7 @@ overrides:
     tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uu_o2
 
 This entry uses one worker per visible CUDA device, FP32 model weights and
-TF32 matrix multiplication. The radial basis can use a single cutoff or
-``radial_basis.multi_cutoff``. The command ``tace-train-oamv2`` is equivalent.
+TF32 matrix multiplication. The command ``tace-train-oamv2`` is equivalent.
 Use ``uv_o2`` for a radial weight followed by a local Linear–Gate–Linear
 map, or ``uu_o2`` for a single externally weighted channelwise linear map.
 ``model.config.mmax`` limits the retained local orders. Set

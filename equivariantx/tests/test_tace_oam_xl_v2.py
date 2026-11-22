@@ -49,56 +49,22 @@ from equivariantx.ops.common.channel_product import channel_product
 
 
 @pytest.mark.parametrize(
-    "device,radial_mode,scatter_norm,multi_cutoff,conditioning,projection,topology",
+    "device,radial_mode,scatter_norm,conditioning,projection,topology",
     [
-        ("cpu", "stream", "density", None, "linear", "individual", "directed"),
-        ("cpu", "stream", "cutoff", [4.0], "element", "individual", "directed"),
-        ("cpu", "stream", "cutoff", [2.5, 4.0], "element2", "individual", "pairs"),
-        ("cpu", "stream", "density", [2.0, 4.0, 6.0], "linear", "individual", "empty"),
-        ("cpu", "materialize", "density", [2.5, 4.0], "linear", "composed", "pairs"),
-        ("cpu", "materialize", "cutoff", [2.5, 4.0], "element2", "batched", "pairs"),
-        ("cpu", "materialize", "density", None, "linear", "split", "directed"),
-        ("cpu", "materialize", "density", [2.5, 4.0], "linear", "split", "directed"),
-        ("cpu", "materialize", "density", None, "linear", "jet", "directed"),
-        ("cpu", "materialize", "cutoff", [2.5, 4.0], "element", "jet", "directed"),
-        ("cuda", "materialize", "density", None, "linear", "individual", "directed"),
-        ("cuda", "materialize", "cutoff", [4.0], "element", "individual", "directed"),
-        (
-            "cuda",
-            "materialize",
-            "density",
-            [2.5, 4.0],
-            "element2",
-            "individual",
-            "pairs",
-        ),
-        (
-            "cuda",
-            "materialize",
-            "cutoff",
-            [2.5, 4.0],
-            "element2",
-            "individual",
-            "pairs",
-        ),
-        (
-            "cuda",
-            "materialize",
-            "density",
-            [2.0, 4.0, 6.0],
-            "linear",
-            "individual",
-            "directed",
-        ),
-        (
-            "cuda",
-            "materialize",
-            "density",
-            [2.0, 4.0, 6.0],
-            "linear",
-            "individual",
-            "empty",
-        ),
+        ("cpu", "stream", "density", "linear", "individual", "directed"),
+        ("cpu", "stream", "cutoff", "element", "individual", "directed"),
+        ("cpu", "stream", "cutoff", "element2", "individual", "pairs"),
+        ("cpu", "stream", "density", "linear", "individual", "empty"),
+        ("cpu", "materialize", "density", "linear", "composed", "pairs"),
+        ("cpu", "materialize", "cutoff", "element2", "batched", "pairs"),
+        ("cpu", "materialize", "density", "linear", "split", "directed"),
+        ("cpu", "materialize", "density", "linear", "jet", "directed"),
+        ("cpu", "materialize", "cutoff", "element", "jet", "directed"),
+        ("cuda", "materialize", "density", "linear", "individual", "directed"),
+        ("cuda", "materialize", "cutoff", "element", "individual", "directed"),
+        ("cuda", "materialize", "density", "element2", "individual", "pairs"),
+        ("cuda", "materialize", "cutoff", "element2", "individual", "pairs"),
+        ("cuda", "materialize", "density", "linear", "individual", "empty"),
     ],
 )
 def test_conversion_checkpoint_and_mixed_derivatives(
@@ -106,7 +72,6 @@ def test_conversion_checkpoint_and_mixed_derivatives(
     radial_mode,
     scatter_norm,
     device,
-    multi_cutoff,
     conditioning,
     projection,
     topology,
@@ -116,7 +81,6 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         radial_mode,
         scatter_norm,
         device,
-        multi_cutoff,
         conditioning,
         projection,
         topology,
@@ -126,24 +90,23 @@ def test_conversion_checkpoint_and_mixed_derivatives(
 
 @pytest.mark.parametrize("interaction", ["uv_o2", "uu_o2"])
 @pytest.mark.parametrize(
-    "device,cutoffs,embedding,degree,radial_mode",
+    "device,embedding,degree,radial_mode",
     [
-        ("cpu", None, "linear", 1, "materialize"),
-        ("cpu", [2.5, 4.0], "element", 1, "stream"),
-        ("cuda", [2.5, 4.0], "element2", 1, "materialize"),
-        ("cuda", None, "element2", 4, "materialize"),
-        ("cuda", [2.5, 4.0], "element2", 1, "stream"),
+        ("cpu", "linear", 1, "materialize"),
+        ("cpu", "element", 1, "stream"),
+        ("cuda", "element2", 1, "materialize"),
+        ("cuda", "element2", 4, "materialize"),
+        ("cuda", "element2", 1, "stream"),
     ],
 )
 def test_local_conversion(
-    monkeypatch, interaction, device, cutoffs, embedding, degree, radial_mode
+    monkeypatch, interaction, device, embedding, degree, radial_mode
 ):
     check_conversion(
         monkeypatch,
         radial_mode,
         "cutoff",
         device,
-        cutoffs,
         embedding,
         "individual",
         "pairs",
@@ -162,7 +125,6 @@ def test_mixed_local_conversion(monkeypatch, modes):
         "materialize",
         "density",
         "cpu",
-        [2.5, 4.0],
         "element2",
         "batched",
         "pairs",
@@ -175,7 +137,6 @@ def check_conversion(
     radial_mode,
     scatter_norm,
     device,
-    multi_cutoff,
     conditioning,
     projection,
     topology,
@@ -209,7 +170,7 @@ def check_conversion(
             Lmax=degree,
             lmax=degree,
             mmax=degree,
-            cutoff=multi_cutoff[-1] if multi_cutoff else 4.0,
+            cutoff=4.0,
             max_neighbors=None,
             mlp_type="mlp_v2",
         )
@@ -217,9 +178,7 @@ def check_conversion(
             "element2" if conditioning == "linear" else "identity"
         )
         config["edge_embedding"]["type"] = conditioning
-        config["radial_basis"].update(
-            hidden=[4, 4], bias=True, apply_cutoff=False, multi_cutoff=multi_cutoff
-        )
+        config["radial_basis"].update(hidden=[4, 4], bias=True, apply_cutoff=False)
         config["atomic_basis"].update(type=interaction, scatter_norm=scatter_norm)
         if interaction == "uv_o2" or (
             isinstance(interaction, list) and "uv_o2" in interaction
@@ -310,9 +269,6 @@ def check_conversion(
             "ptr": torch.tensor([0, 3, 4]),
             "fidelity_idx": torch.zeros(2, dtype=torch.int64),
         }
-        if multi_cutoff and len(multi_cutoff) == 3:
-            data["positions"][1, 0] = 1.2
-            data["positions"][2, 1] = 4.7
         if topology == "empty":
             data["edge_index"] = data["edge_index"][:, :0]
             data["edge_shifts"] = data["edge_shifts"][:0]
@@ -343,16 +299,6 @@ def check_conversion(
                 )
                 output["forces"] = output["forces"][: data["positions"].shape[0]]
             results.append((output, gradients))
-        if multi_cutoff and len(multi_cutoff) > 1 and topology != "empty":
-            for scale in range(len(multi_cutoff)):
-                selected = [
-                    gradient
-                    for name, gradient in zip(original, results[1][1])
-                    if f"edge_info.networks.{scale}." in name and gradient is not None
-                ]
-                assert selected and any(
-                    gradient.abs().max() > 0 for gradient in selected
-                )
         for name in targets:
             torch.testing.assert_close(
                 results[0][0][name], results[1][0][name], rtol=1e-10, atol=1e-11

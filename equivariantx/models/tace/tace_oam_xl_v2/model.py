@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import torch
 from torch.nn import functional as F
 
-from equivariantx.conv.radial import MultiCutoffRadial
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.ops.common.weights import ConvolutionWeights
 
@@ -300,50 +299,32 @@ def grouped_projections(
     return outputs
 
 
-def radial_networks(head):
-    return head.networks if isinstance(head, MultiCutoffRadial) else (head,)
-
-
-def project_radial(networks, hidden, envelopes, materialize, affine):
+def project_radial(network, features, materialize, affine):
     """Return edge features and their shared input-by-output projection."""
-    if len(networks) == 1:
-        last = networks[0].mlp[-1]
-        features, weight = hidden[0], last.get_weight()
-        if materialize and affine:
-            result = (
-                features @ weight
-                if last.bias is None
-                else torch.addmm(last.bias, features, weight)
-            )
-            return result, result.new_empty((0, result.shape[-1]))
-        if last.bias is not None:
-            features = torch.cat((features, torch.ones_like(features[:, :1])), -1)
-            weight = torch.cat((weight, last.bias.unsqueeze(0)), 0)
-    else:
-        blocks, matrices = [], []
-        for index, (network, value) in enumerate(zip(networks, hidden)):
-            last = network.mlp[-1]
-            envelope = envelopes[:, index : index + 1]
-            blocks.append(value * envelope)
-            matrices.append(last.get_weight())
-            if last.bias is not None:
-                blocks.append(envelope)
-                matrices.append(last.bias.unsqueeze(0))
-        features, weight = torch.cat(blocks, -1), torch.cat(matrices, 0)
+    last = network.mlp[-1]
+    weight = last.get_weight()
+    if materialize and affine:
+        result = (
+            features @ weight
+            if last.bias is None
+            else torch.addmm(last.bias, features, weight)
+        )
+        return result, result.new_empty((0, result.shape[-1]))
+    if last.bias is not None:
+        features = torch.cat((features, torch.ones_like(features[:, :1])), -1)
+        weight = torch.cat((weight, last.bias.unsqueeze(0)), 0)
     if materialize:
         features = features @ weight
         weight = features.new_empty((0, features.shape[-1]))
     return features, weight
 
 
-def add_element_weights(features, projection, table, endpoints, envelope, materialize):
-    """Add the mean of the endpoint path weights, using the outer cutoff."""
+def add_element_weights(features, projection, table, endpoints, materialize):
+    """Add the mean of the endpoint path weights."""
     source, target = endpoints
     left, right = table if isinstance(table, tuple) else (table, table)
     if materialize:
         offset = left[source] + right[target]
-        if envelope is not None:
-            offset = offset * envelope
         return torch.add(features, offset.to(features), alpha=0.5), projection
     elements = torch.arange(left.size(0), device=source.device)
     a = (source[:, None] == elements).to(features)
@@ -352,8 +333,6 @@ def add_element_weights(features, projection, table, endpoints, envelope, materi
         lookup, weights = torch.cat((a, b), -1), torch.cat((left, right))
     else:
         lookup, weights = a + b, left
-    if envelope is not None:
-        lookup = lookup * envelope
     return torch.cat((features, lookup * 0.5), -1), torch.cat(
         (projection, weights.to(projection))
     )
@@ -493,51 +472,29 @@ class Representation(torch.nn.Module):
                 edge_index[:, representatives],
                 graph.edge_length[representatives],
             )
-        radial_bases = (
-            (self.radial_basis,)
-            if self.multi_cutoff_radial_basis is None
-            else self.multi_cutoff_radial_basis
+        basis, cutoff = self.radial_basis(
+            length, node_type, radial_index, self.atomic_numbers
         )
-        radial_inputs = [
-            basis(length, node_type, radial_index, self.atomic_numbers)
-            for basis in radial_bases
-        ]
-        multi_cutoff = len(radial_inputs) > 1
-        cutoff = radial_inputs[-1][1]
-        bases = [value.to(self.model_dtype) for value, _ in radial_inputs]
+        basis = basis.to(self.model_dtype)
         direction = graph.edge_vector / graph.edge_length.clamp_min(1e-12)
         attrs = (
             self.o3_angular_basis(direction).to(self.model_dtype)
             if self.use_o3_angular_basis
             else None
         )
-        envelopes = (
-            torch.cat([c for _, c in radial_inputs], dim=-1) if multi_cutoff else cutoff
-        )
         if self.use_cutoff_scatter_norm:
             norm = self.interactions[0].scatter_norm
-            if radial_map is not None:
-                envelopes = envelopes[radial_map]
-            envelopes = norm.edge_weights(envelopes, edge_index[1], node_type.size(0))
-        if envelopes is not None:
-            envelopes = envelopes.to(self.model_dtype)
-        uv_envelopes = (
-            MultiCutoffRadial.relative_envelopes(envelopes)
-            if multi_cutoff and "uv_o2" in self.interaction_modes
-            else None
-        )
-        message_cutoff = None if multi_cutoff else envelopes
-        if (
-            radial_map is not None
-            and message_cutoff is not None
-            and not self.use_cutoff_scatter_norm
-        ):
-            message_cutoff = message_cutoff[radial_map]
+            message_cutoff = norm.edge_weights(
+                cutoff if radial_map is None else cutoff[radial_map],
+                edge_index[1],
+                node_type.size(0),
+            ).to(self.model_dtype)
         cutoff = cutoff.to(self.model_dtype) if cutoff is not None else None
-        basis = bases[-1] if radial_map is None else bases[-1][radial_map]
         edge_cutoff = (
             cutoff if cutoff is None or radial_map is None else cutoff[radial_map]
         )
+        if not self.use_cutoff_scatter_norm:
+            message_cutoff = edge_cutoff
         local_frame = (
             self.o2_angular_basis.forward_packed(
                 graph.edge_vector, method=self.frame_method
@@ -547,18 +504,15 @@ class Representation(torch.nn.Module):
             else None
         )
         nodes = self.node_embedding(
-            node_type, basis, edge_index, attrs, edge_cutoff, local_frame, local_frame
+            node_type,
+            basis if radial_map is None else basis[radial_map],
+            edge_index,
+            attrs,
+            edge_cutoff,
+            local_frame,
+            local_frame,
         )
-        radials = [
-            self.edge_embedding(
-                nodes,
-                node_type,
-                basis,
-                radial_index,
-                None if c is None else c.to(self.model_dtype),
-            )
-            for basis, (_, c) in zip(bases, radial_inputs)
-        ]
+        radial = self.edge_embedding(nodes, node_type, basis, radial_index, cutoff)
         frame = None
         if self.angular_mode == "aligned":
             frame = packed_frame(self.frame_source.frame, direction).to(
@@ -597,21 +551,12 @@ class Representation(torch.nn.Module):
             node_type[radial_index[0]],
             node_type[radial_index[1]],
         )
-        pair_head = radial_map is not None and not (
-            multi_cutoff and self.use_cutoff_scatter_norm
-        )
         compressed_radial = (
-            pair_head
+            radial_map is not None
             and self.edge_mode == "scheduled"
             and not self.has_local_interactions
             and nodes.is_cuda
             and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1"
-        )
-        directed_head = radial_map is not None and not pair_head
-        head_endpoints = (
-            (node_type[edge_index[0]], node_type[edge_index[1]])
-            if directed_head
-            else (source_types, target_types)
         )
         radial_jet = self.training and os.environ.get("EQX_XL_RADIAL_JET", "0") == "1"
         if radial_jet and self.radial_projection != "individual":
@@ -622,71 +567,48 @@ class Representation(torch.nn.Module):
             and hasattr(self.edge_embedding, "radial_proj")
             else None
         )
-        networks = [radial_networks(layer.edge_info) for layer in self.interactions]
-        hidden = []
-        projected = None
-        batch_heads = self.radial_projection in ("batched", "split")
-        for scale, branch in enumerate(zip(*networks)):
-            if radial_jet:
-                from .radial_jet import AttachRadialJet, hidden_jets
+        networks = [layer.edge_info for layer in self.interactions]
+        if radial_jet:
+            from .radial_jet import AttachRadialJet, hidden_jets
 
-                values, slopes = hidden_jets(
-                    self, branch, radial_bases[scale], length, node_type, radial_index
-                )
-                values = [
-                    AttachRadialJet.apply(x, slope, length)
-                    for x, slope in zip(values, slopes)
-                ]
-            else:
-                values = grouped_networks(
-                    branch,
-                    self.edge_updates,
-                    radials[scale],
-                    source_types,
-                    target_types,
-                    hidden=True,
-                    embedding=embedding,
-                    basis=bases[scale],
-                )
-            if batch_heads:
-                values = grouped_projections(
-                    branch,
-                    self.edge_updates,
-                    values,
-                    radials[scale],
-                    source_types,
-                    target_types,
-                    self.radial_projection,
-                )
-            if directed_head:
-                values = [value[radial_map] for value in values]
-            if batch_heads:
-                if multi_cutoff:
-                    values = [
-                        value
-                        * (uv_envelopes if kind == "uv_o2" else envelopes)[
-                            :, scale : scale + 1
-                        ]
-                        for kind, value in zip(self.interaction_modes, values)
-                    ]
-                projected = (
-                    values
-                    if projected is None
-                    else [a + b for a, b in zip(projected, values)]
-                )
-            else:
-                hidden.append(values)
+            values, slopes = hidden_jets(self, networks, length, node_type, radial_index)
+            hidden = [
+                AttachRadialJet.apply(value, slope, length)
+                for value, slope in zip(values, slopes)
+            ]
+        else:
+            hidden = grouped_networks(
+                networks,
+                self.edge_updates,
+                radial,
+                source_types,
+                target_types,
+                hidden=True,
+                embedding=embedding,
+                basis=basis,
+            )
+        projected = None
+        if self.radial_projection in ("batched", "split"):
+            projected = grouped_projections(
+                networks,
+                self.edge_updates,
+                hidden,
+                radial,
+                source_types,
+                target_types,
+                self.radial_projection,
+            )
         density = None
         if not self.use_cutoff_scatter_norm:
             densities = grouped_networks(
                 [layer.scatter_norm.edge_density for layer in self.interactions],
                 self.edge_updates,
-                radials[-1],
+                radial,
                 source_types,
                 target_types,
                 hidden=False,
                 embedding=embedding,
-                basis=bases[-1],
+                basis=basis,
             )
             edge_density = torch.cat(
                 [torch.tanh(value.square()) for value in densities], dim=-1
@@ -711,7 +633,6 @@ class Representation(torch.nn.Module):
         for index, (inter, product) in enumerate(zip(self.interactions, self.products)):
             packed_message = False
             mode = self.interaction_modes[index]
-            local_uv = multi_cutoff and mode == "uv_o2"
             res_bb = inter.resnetBB(nodes) if hasattr(inter, "resnetBB") else None
             res_ba = inter.resnetBA(nodes) if hasattr(inter, "resnetBA") else None
             associate_norm = os.environ.get("EQX_XL_ASSOCIATE_NORM", "0") == "1"
@@ -733,8 +654,7 @@ class Representation(torch.nn.Module):
             else:
                 features, projection = project_radial(
                     networks[index],
-                    [scale[index] for scale in hidden],
-                    uv_envelopes if local_uv else envelopes,
+                    hidden[index],
                     self.radial_mode == "materialize",
                     self.affine_radial,
                 )
@@ -743,20 +663,15 @@ class Representation(torch.nn.Module):
                     features,
                     projection,
                     self.edge_embedding.layer_weights(index),
-                    head_endpoints,
-                    envelopes[:, -1:] if multi_cutoff and not local_uv else None,
+                    (source_types, target_types),
                     self.radial_mode == "materialize",
                 )
-            if pair_head and not compressed_radial:
+            if radial_map is not None and not compressed_radial:
                 features = features[radial_map]
             if mode in ("uv_o2", "uu_o2"):
                 rejector = inter.rejector
                 envelope = message_cutoff
-                if local_uv:
-                    envelope = envelopes[:, -1:]
-                    if pair_head:
-                        envelope = envelope[radial_map]
-                elif envelope is None:
+                if envelope is None:
                     envelope = nodes.new_ones((1, 1))
                 if mode == "uv_o2":
                     from tace.models.spherical.o2 import uv_convolution
@@ -940,10 +855,7 @@ def validate(source):
             raise ValueError(
                 "Expected identity or element2 geometry-only edge conditioning"
             )
-        if any(
-            type(network).__name__ != "MLPV2"
-            for network in radial_networks(inter.edge_info)
-        ):
+        if type(inter.edge_info).__name__ != "MLPV2":
             raise ValueError("Expected MLPV2 radial networks")
         if type(inter.scatter_norm).__name__ not in (
             "DensityScatterNorm",
