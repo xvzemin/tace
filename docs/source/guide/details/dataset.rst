@@ -159,9 +159,10 @@ Training filters
 ----------------
 
 ``dataset.filter`` selects complete training graphs without rewriting the cache.
-It is disabled by default. When enabled, ``max_edges`` defaults to 24,000,
-the other numeric bounds default to ``null``, and ``drop_isolated`` defaults
-to ``false``. A structure must satisfy every enabled filter.
+It is disabled by default. When enabled, omitted or ``null`` numeric bounds
+impose no limit, and ``drop_isolated`` defaults to ``false``. A structure must
+satisfy every specified bound. For example, to keep graphs with at most
+24,000 directed edges:
 
 .. code-block:: yaml
 

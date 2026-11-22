@@ -167,7 +167,7 @@ dataset:
   # Compression level and LMDB transaction/shard limits are internal, not YAML options.
   filter: # train only; statistics, validation and test use the complete data
     enabled: false
-    max_edges: null # inclusive edge limit; null disables; omitted default is 24000 when filtering is enabled
+    max_edges: null # inclusive directed-edge limit; omit or set to null for no limit
     max_atoms: null # inclusive atom-count limit; null disables
     min_covalent_ratio: 0.5 # minimum distance / (R_cov_i + R_cov_j); null disables
     drop_isolated: true # require a neighbor for each atom in multi-atom structures
@@ -425,6 +425,7 @@ model:
     atomic_basis:
       # Magnetic UV-O2 uses uv_o2_mag. Interaction choices can change the model architecture.
       type: cgtp # str or per-layer list: cgtp, o2_cgtp, so2, uv_o2, uu_o2, uv_o2_mag
+      bias: true
       l1l2: null # [null, <=], restriction for each layer
       scatter_norm: avg_num_neighbors  # [null, avg_num_neighbors, sqrt_avg_num_neighbors, density, cutoff]
       nonlinear: gate # [null, gate]
@@ -438,6 +439,7 @@ model:
 
     product_basis:
       type: cgtp # str or per-layer list: cgtp, nonlinear_cgtp, mace
+      bias: true
       l1l2: null  # [null, <=]
       correlation: 2 # (int) 3 is recommended for 2 layer, 2 is  is recommended for > 2 layer
       return_components: null # [null, list(int)], if not specify, last layer will only return target weight

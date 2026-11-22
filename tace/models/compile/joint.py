@@ -234,6 +234,15 @@ class JointTraining:
         from .artifact import JointArtifactCache
 
         backend = getattr(model.readout_fn, "compile_backend", "inductor")
+        compile_options = (
+            dict(
+                inductor_options(shape_padding=model.shape_padding),
+                inplace_buffers=True,
+                keep_static_cubin_raw=True,
+            )
+            if backend == "inductor"
+            else None
+        )
         runtime_values = tuple(
             data[key].detach().contiguous() for key in self.keys
         ) + tuple(value.detach() for value in state)
@@ -247,11 +256,7 @@ class JointTraining:
                 entries=entries,
                 values=runtime_values,
                 dynamic_axes=dynamic_axes,
-                options=dict(
-                    inductor_options(),
-                    inplace_buffers=True,
-                    keep_static_cubin_raw=True,
-                ),
+                options=compile_options,
             )
             if backend == "inductor"
             else None
@@ -316,13 +321,7 @@ class JointTraining:
                         graph,
                         [node.meta["val"].detach() for node in placeholders],
                         dynamic_shapes="from_graph",
-                        options={
-                            "config_patches": dict(
-                                inductor_options(),
-                                inplace_buffers=True,
-                                keep_static_cubin_raw=True,
-                            )
-                        },
+                        options={"config_patches": compile_options},
                         donate_graph_module=True,
                     )
             else:

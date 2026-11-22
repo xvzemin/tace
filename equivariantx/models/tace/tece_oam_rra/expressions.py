@@ -116,17 +116,17 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
     descriptions = {entry[0]: entry[1:] for entry in linears}
 
     def linear(name, features):
-        weight_slot, bias_slot, nw, nb, paths = descriptions[name]
-        weight, bias = values[8 + weight_slot], values[8 + bias_slot]
+        weight_slot, bias_slot, _, _, paths = descriptions[name]
+        weight = values[8 + weight_slot]
         outputs, start_bias = [], 0
         for start, dim, ni, no, offset, scale in paths:
             matrix = program.scale(program.slice(weight, offset, ni * no), scale)
             result = program.matmul(
                 program.slice(features, start, dim * ni), matrix, dim, ni, no
             )
-            if dim == 1:
+            if dim == 1 and bias_slot is not None:
                 result = program.binary(
-                    "add", result, program.slice(bias, start_bias, no)
+                    "add", result, program.slice(values[8 + bias_slot], start_bias, no)
                 )
                 start_bias += no
             outputs.append(result)

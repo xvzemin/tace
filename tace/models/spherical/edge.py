@@ -55,7 +55,7 @@ class LinearEdgeEmbedding(EdgeEmbedding):
         self.radial_proj = e3nnLinear(
             f"{self.num_radial_basis}x0e",
             f"{self.num_channel}x0e",
-            bias=self.bias,
+            bias=self.use_bias,
         )
 
     def forward(
@@ -90,7 +90,7 @@ class NonLinearEdgeEmbedding(EdgeEmbedding):
         self.radial_proj = e3nnLinear(
             f"{self.num_radial_basis}x0e",
             f"{self.num_channel}x0e",
-            bias=self.bias,
+            bias=self.use_bias,
         )
 
         self.act1 = Activation(self.radial_proj.irreps_out, [torch.nn.SiLU()])

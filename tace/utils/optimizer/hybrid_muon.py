@@ -99,6 +99,7 @@ from __future__ import (
 )
 
 import math
+from copy import deepcopy
 from dataclasses import (
     dataclass,
 )
@@ -841,6 +842,21 @@ class HybridMuonOptimizer(Optimizer):
         self._adam_signature: _GradientSignature | None = None
         self._per_parameter_adam_clock = False
         self._step_config: tuple[Any, ...] | None = None
+
+    def shard(self) -> Optimizer:
+        """Partition optimizer state across initialized distributed workers.
+
+        Returns the original optimizer outside a multi-process group. Call before
+        the first step and pass the returned optimizer to the learning rate scheduler.
+        """
+        dist = torch.distributed
+        if (
+            not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_world_size() == 1
+        ):
+            return self
+        return ShardedMuon(self)
 
     def _matches_adam_pattern(self, param_name: str | None) -> bool:
         """Return whether the full parameter name contains one of ``adam_patterns``."""
@@ -2223,3 +2239,156 @@ class HybridMuonOptimizer(Optimizer):
                     muon_apply_deltas.append(orth_slice.reshape(entry["param"].shape))
 
             self._apply_param_deltas(muon_apply_params, muon_apply_deltas, lr_device)
+
+
+class ShardedMuon(Optimizer):
+    """Use one standard ZeRO partition per original parameter dtype."""
+
+    def __init__(self, original: HybridMuonOptimizer):
+        from torch.distributed.optim import ZeroRedundancyOptimizer
+
+        if type(original) is not HybridMuonOptimizer or original.state:
+            raise ValueError("Wrap the original Muon before its first update")
+        groups = [
+            dict(group, params=list(group["params"])) for group in original.param_groups
+        ]
+        super().__init__(groups, dict(original.defaults))
+        named = [
+            (name, p)
+            for group in groups
+            for p in group["params"]
+            if (name := original._param_name_map.get(id(p))) is not None
+        ]
+        options = dict(
+            original.defaults,
+            named_parameters=named,
+            flash_muon=original._use_flash,
+            use_foreach=original._use_foreach,
+            adam_patterns=original._adam_patterns,
+        )
+        dtypes = list(
+            dict.fromkeys(p.dtype for group in groups for p in group["params"])
+        )
+        self.parts = []
+        self.checkpoint_group = None
+        for dtype in dtypes:
+            selected = [
+                dict(group, params=[p for p in group["params"] if p.dtype == dtype])
+                for group in groups
+            ]
+            optimizer = ZeroRedundancyOptimizer(
+                selected,
+                optimizer_class=HybridMuonOptimizer,
+                parameters_as_bucket_view=True,
+                **options,
+            )
+            # ZeRO copies constructor kwargs into every parameter group. The
+            # local Muon already extracted the names; retaining the live model
+            # here would serialize the entire model in each optimizer shard.
+            optimizer.defaults.pop("named_parameters", None)
+            for group in (*optimizer.param_groups, *optimizer.optim.param_groups):
+                group.pop("named_parameters", None)
+            self.parts.append(optimizer)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for optimizer in self.parts:
+            for source, target in zip(self.param_groups, optimizer.param_groups):
+                target.update(
+                    {key: value for key, value in source.items() if key != "params"}
+                )
+            optimizer.step()
+        return loss
+
+    @staticmethod
+    def independent_clocks(state):
+        """Preserve each owner's Adam clock when ZeRO merges parameter groups."""
+        result = dict(
+            state, state={index: dict(value) for index, value in state["state"].items()}
+        )
+        for group in state["param_groups"]:
+            for index in group["params"]:
+                value = result["state"].get(index, {})
+                if "exp_avg" in value and "bias_correction1" not in value:
+                    value["bias_correction1"] = 1 - group["beta1_pow_device"]
+                    value["bias_correction2"] = 1 - group["beta2_pow_device"]
+        return result
+
+    def consolidate_state_dict(self, to=0):
+        from torch import distributed as dist
+
+        if self.checkpoint_group is None:
+            self.checkpoint_group = dist.new_group(backend="gloo")
+
+        def host(value):
+            if isinstance(value, torch.Tensor):
+                return value.detach().cpu().clone()
+            if isinstance(value, dict):
+                return {key: host(item) for key, item in value.items()}
+            if isinstance(value, (tuple, list)):
+                return type(value)(host(item) for item in value)
+            return value
+
+        for optimizer in self.parts:
+            optimizer._sync_param_groups(
+                optimizer.param_groups, optimizer.optim.param_groups
+            )
+            local = host(self.independent_clocks(optimizer.optim.state_dict()))
+            states = [None] * dist.get_world_size() if dist.get_rank() == to else None
+            dist.gather_object(local, states, dst=to, group=self.checkpoint_group)
+            dist.barrier(group=self.checkpoint_group)
+            optimizer._all_state_dicts = states if states is not None else []
+
+    def state_dict(self):
+        result = super().state_dict()
+        indices = {
+            id(parameter): index
+            for group, saved in zip(self.param_groups, result["param_groups"])
+            for parameter, index in zip(group["params"], saved["params"])
+        }
+        for optimizer in self.parts:
+            state = optimizer.state_dict()
+            for group, saved in zip(optimizer.param_groups, state["param_groups"]):
+                for parameter, index in zip(group["params"], saved["params"]):
+                    if index in state["state"]:
+                        result["state"][indices[id(parameter)]] = state["state"][index]
+        return result
+
+    def load_state_dict(self, state):
+        state = self.independent_clocks(state)
+        groups = [
+            {
+                key: value
+                for key, value in group.items()
+                if key not in ("lr_device", "beta1_pow_device", "beta2_pow_device")
+            }
+            for group in state["param_groups"]
+        ]
+        super().load_state_dict(dict(state={}, param_groups=groups))
+        indices = {
+            id(parameter): index
+            for group, saved in zip(self.param_groups, groups)
+            for parameter, index in zip(group["params"], saved["params"])
+        }
+        for optimizer in self.parts:
+            part = dict(state={}, param_groups=[])
+            offset = 0
+            for group, saved in zip(optimizer.param_groups, groups):
+                part["param_groups"].append(
+                    dict(
+                        saved, params=list(range(offset, offset + len(group["params"])))
+                    )
+                )
+                for parameter in group["params"]:
+                    index = indices[id(parameter)]
+                    if index in state["state"]:
+                        part["state"][offset] = state["state"][index]
+                    offset += 1
+            optimizer.load_state_dict(deepcopy(part))
+            # ZeRO loads state directly. Invoke the original optimizer's restore
+            # hook too, to restore its CUDA clocks and invalidate captured updates.
+            optimizer.optim.load_state_dict(optimizer.optim.state_dict())

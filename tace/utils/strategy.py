@@ -1,15 +1,26 @@
 """Gradient synchronization for models with coordinate derivatives."""
 
+import os
+
 import torch
 from lightning.pytorch.strategies import DDPStrategy
 
 
 def is_rank_0():
     """Return whether the current process is rank zero or runs without DDP."""
-    return (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_initialized()
-        or torch.distributed.get_rank() == 0
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+    if "RANK" in os.environ:
+        return int(os.environ["RANK"]) == 0
+    return all(
+        int(os.environ.get(name, 0)) == 0
+        for name in (
+            "NODE_RANK",
+            "GROUP_RANK",
+            "LOCAL_RANK",
+            "SLURM_PROCID",
+            "JSM_NAMESPACE_RANK",
+        )
     )
 
 

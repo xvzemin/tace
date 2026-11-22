@@ -104,7 +104,9 @@ class ExponentialMovingAverage:
                 shadows, values = groups.setdefault(key, ([], []))
                 shadows.append(s_param)
                 values.append(param)
-            for shadows, values in groups.values():
+            for (device, _, source, _), (shadows, values) in groups.items():
+                if source != device:
+                    values = [param.to(device) for param in values]
                 # Keep the original subtraction/multiplication order and rounding.
                 # Grouping avoids launching three kernels for every parameter.
                 tmp = torch._foreach_sub(shadows, values)
@@ -137,7 +139,10 @@ class ExponentialMovingAverage:
                 `ExponentialMovingAverage` was initialized will be used.
         """
         parameters = self._get_parameters(parameters)
-        self.collected_params = [param.clone() for param in parameters]
+        self.collected_params = [
+            param.detach().to(device=shadow.device, copy=True)
+            for param, shadow in zip(parameters, self.shadow_params)
+        ]
 
     def restore(
         self, parameters: Optional[Iterable[torch.nn.Parameter]] = None
@@ -163,6 +168,7 @@ class ExponentialMovingAverage:
         parameters = self._get_parameters(parameters)
         for c_param, param in zip(self.collected_params, parameters):
             param.data.copy_(c_param.data)
+        self.collected_params = None
 
     @contextlib.contextmanager
     def average_parameters(

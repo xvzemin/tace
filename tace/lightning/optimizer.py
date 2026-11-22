@@ -11,6 +11,7 @@ import torch
 from e3nn.nn import BatchNorm
 
 from equivariantx.nn import MergeRmsNorm
+from equivariantx.utils.autograd import clip_gradient_norm as clip_gradient_norm
 from tace.models.blocks import ScaleShift
 from tace.models.linear import (
     ElementEmbedding,

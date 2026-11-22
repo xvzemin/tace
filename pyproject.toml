@@ -99,6 +99,8 @@ Homepage = "https://github.com/xvzemin/tace"
 
 [project.scripts]
 tace-train = "tace.scripts.train:main"
+tace-train-oamv2 = "tace.scripts.train_oamv2:main"
+tace-train-oam-v2 = "tace.scripts.train_oamv2:main"
 tace-eval = "tace.scripts.eval:main"
 tace-clean = "tace.scripts.clean:main"
 tace-split = "tace.scripts.split:main"

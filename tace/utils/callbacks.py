@@ -4,6 +4,7 @@
 ################################################################################
 
 import logging
+import weakref
 
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.trainer.states import TrainerFn
@@ -67,19 +68,35 @@ class EMACallback(Callback):
         self.use_num_updates = use_num_updates
         self.device = device
         self.ema = None
+        self.owner = None
+        self.pending_state = None
 
-    def on_fit_start(self, trainer, pl_module):
+    def initialize(self, pl_module):
+        """Bind the average to the active model after checkpoint restoration."""
+        if self.ema is not None and self.owner() is pl_module:
+            return
         self.ema = ExponentialMovingAverage(
             pl_module.model.parameters(),
             self.decay,
             self.use_num_updates,
         )
+        self.owner = weakref.ref(pl_module)
+        if self.pending_state is not None:
+            self.ema.load_state_dict(self.pending_state)
+            self.pending_state = None
         self.ema.to(self.device or pl_module.device)
 
+    def on_train_start(self, trainer, pl_module):
+        self.initialize(pl_module)
+        self.last_step = trainer.global_step
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        self.ema.update()
+        if trainer.global_step != self.last_step:
+            self.ema.update()
+            self.last_step = trainer.global_step
 
     def on_validation_start(self, trainer, pl_module):
+        self.initialize(pl_module)
         self.ema.store()
         self.ema.copy_to()
 
@@ -87,8 +104,7 @@ class EMACallback(Callback):
         self.ema.restore()
 
     def on_test_start(self, trainer, pl_module):
-        self.ema.store()
-        self.ema.copy_to()
+        self.on_validation_start(trainer, pl_module)
 
     def on_test_end(self, trainer, pl_module):
         self.ema.restore()
@@ -98,5 +114,5 @@ class EMACallback(Callback):
             checkpoint["ema_state_dict"] = self.ema.state_dict()
 
     def on_load_checkpoint(self, trainer, pl_module, checkpoint):
-        if self.ema and "ema_state_dict" in checkpoint:
-            self.ema.load_state_dict(checkpoint["ema_state_dict"])
+        self.ema = None
+        self.pending_state = checkpoint.get("ema_state_dict")

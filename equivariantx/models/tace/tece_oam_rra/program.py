@@ -57,7 +57,7 @@ def metadata(module):
             (
                 name,
                 names.index(name + ".weight"),
-                names.index(name + ".bias"),
+                names.index(name + ".bias") if linear.bias_numel else None,
                 linear.weight_numel,
                 linear.bias_numel,
                 paths,

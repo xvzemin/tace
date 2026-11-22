@@ -35,7 +35,7 @@ class NodeEmbedding(torch.nn.Module):
         self.num_elements = num_elements
         self.num_radial_basis = num_radial_basis
         self.num_channel = num_channel
-        self.bias = bias
+        self.use_bias = bias
         self.Lmax = Lmax
         self.lmax = lmax
         self.avg_num_neighbors = avg_num_neighbors
@@ -87,7 +87,7 @@ class EdgeEmbedding(torch.nn.Module):
         self.num_elements = num_elements
         self.num_radial_basis = num_radial_basis
         self.num_channel = num_channel
-        self.bias = bias
+        self.use_bias = bias
 
         self._setup()
 
@@ -365,8 +365,8 @@ class Product(torch.nn.Module):
         irreps_in: o3.Irreps,
         correlation: list[int],
         l1l2: Union[str, None],
-        bias: bool,
-        nonlinear: Union[str, None],
+        bias: bool = True,
+        nonlinear: Union[str, None] = None,
         scalar_act: Union[str, None] = None,
         stochastic_depth: float = 0.0,
         use_first_dropout: bool = False,

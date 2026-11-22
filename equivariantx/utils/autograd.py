@@ -1,6 +1,55 @@
-"""Gradient selection for registered tensor operators."""
+"""Gradient selection and reduction utilities."""
 
 import torch
+
+
+@torch.no_grad()
+def clip_gradient_norm(parameters, maximum):
+    """Clip parameter gradients in-place to a global L2 norm.
+
+    Parameters
+    ----------
+    parameters : iterable of torch.nn.Parameter
+        Parameters with optional gradients.
+    maximum : float
+        Nonnegative upper bound on the gradient norm.
+
+    Returns
+    -------
+    torch.Tensor
+        The global norm before clipping.
+    """
+    if maximum < 0:
+        raise ValueError("maximum must be nonnegative")
+    groups = {}
+    for parameter in parameters:
+        grad = parameter.grad
+        if grad is not None:
+            groups.setdefault((grad.device, grad.dtype), []).append(grad)
+    if not groups:
+        return torch.tensor(0.0)
+    device = next(iter(groups))[0]
+    norms = [
+        n.to(device)
+        for values in groups.values()
+        for n in torch._foreach_norm(values, 2)
+    ]
+    total = torch.linalg.vector_norm(torch.stack(norms))
+    if not bool(total.isfinite()):
+        # Individual finite FP32 components can overflow during the sum of squares.
+        accumulation_device = "cpu" if device.type == "mps" else device
+        norms = [
+            torch.linalg.vector_norm(
+                g.cpu() if g.device.type == "mps" else g, dtype=torch.float64
+            ).to(accumulation_device)
+            for values in groups.values()
+            for g in values
+        ]
+        total = torch.linalg.vector_norm(torch.stack(norms))
+    coefficient = (float(maximum) / (total + 1e-6)).clamp(max=1.0)
+    for (device, dtype), values in groups.items():
+        torch._foreach_mul_(values, coefficient.to(device=device, dtype=dtype))
+    return total
 
 
 def forward_ad_active():

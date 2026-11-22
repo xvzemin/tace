@@ -9,6 +9,9 @@ Although the O(2)/SO(2) interaction variants are theoretically more advantageous
 at large angular momentum, they currently have fewer operator-fusion options and
 are therefore not the default recommendation.
 
+``atomic_basis.bias`` enables scalar biases in the interaction's linear maps
+(default: ``true``). Bias-free maps remain bias-free. The radial MLP is
+controlled separately by ``radial_basis.bias``.
 
 .. _radial-mlp:
 

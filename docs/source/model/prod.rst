@@ -5,6 +5,10 @@ The following modules implement many-body expansions using different strategies.
 We recommend using ``CgtpACE`` in practice. For other ACE variants, interested
 users are encouraged to refer to the source code for further exploration.
 
+``product_basis.bias`` enables scalar biases in the product's linear maps
+(default: ``true``), independently of ``atomic_basis.bias`` and
+``readout_emlp.bias``.
+
 .. autoclass:: tace.models.spherical.prod.CgtpACE
    :no-members:
    :show-inheritance:

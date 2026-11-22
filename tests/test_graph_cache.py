@@ -981,13 +981,14 @@ def test_compressed_graph_records_reject_corruption():
     [
         (None, list(range(7))),
         ({"enabled": False, "max_edges": 1}, list(range(7))),
-        ({"enabled": True}, [0, 2, 3, 4, 5, 6]),
+        ({"enabled": True}, list(range(7))),
+        ({"enabled": True, "max_edges": 24000}, [0, 2, 3, 4, 5, 6]),
         ({"enabled": True, "max_edges": 24001}, list(range(7))),
         ({"enabled": True, "max_edges": None}, list(range(7))),
         ({"enabled": True, "max_edges": None, "drop_isolated": False}, list(range(7))),
         ({"enabled": True, "max_forces": 5}, [0, 2, 6]),
-        ({"enabled": True, "max_energy_per_atom": -1}, [0, 3, 6]),
-        ({"enabled": True, "max_stress": 5}, [0, 2, 6]),
+        ({"enabled": True, "max_energy_per_atom": -1}, [0, 1, 3, 6]),
+        ({"enabled": True, "max_stress": 5}, [0, 1, 2, 6]),
         ({"enabled": True, "max_atoms": 1}, [6]),
         ({"enabled": True, "max_edges": 1}, [4, 6]),
         (

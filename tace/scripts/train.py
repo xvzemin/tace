@@ -27,7 +27,7 @@ from tace.dataset.statistics import (
     missing_model_statistics,
     prepare_atomic_energies,
 )
-from tace.lightning.lit_model import finetune, load_tace
+from tace.lightning.lit_model import LightningWrapperModel, finetune, load_tace
 from tace.lightning.torch_model import create_model
 from tace.lightning.trainer import train
 from tace.utils.cfg import deep_convert, register_resolvers, save_full_cfg
@@ -44,6 +44,13 @@ register_resolvers()
 
 def initialize(cfg):
     cfg = deep_convert(cfg)
+    if cfg.get("resume_from_model") and cfg.get("finetune_from_model"):
+        raise ValueError("Choose either resume_from_model or finetune_from_model")
+    for key in ("resume_from_model", "finetune_from_model"):
+        if cfg.get(key):
+            path = Path(hydra.utils.to_absolute_path(str(Path(cfg[key]).expanduser())))
+            if key == "resume_from_model" or path.is_file():
+                cfg[key] = str(path)
     set_logger(cfg["misc"].get("log_level", "info"))
     if cfg["misc"].get("ignore_warning", True):
         try:
@@ -164,7 +171,7 @@ def build(cfg: DictConfig):
             cfg["resume_from_model"],
             device="cpu",
             strict=True,
-            use_ema=True,
+            use_ema=False,
             dtype=cfg["dtype"]["model"],
         )
         statistics = model.readout_fn.statistics
@@ -195,18 +202,30 @@ def build(cfg: DictConfig):
     return cfg, statistics, target_property, embedding_property, model, datamodule
 
 
-@hydra.main(version_base="1.3", config_path=str(Path.cwd()), config_name="tace")
-def main(cfg: DictConfig):
+def training_cli(task):
+    """Load a training configuration from the invocation directory."""
+    return hydra.main(
+        version_base="1.3", config_path=str(Path.cwd()), config_name="tace"
+    )(task)
+
+
+def train_from_config(cfg: DictConfig, module_type=LightningWrapperModel):
+    """Build the dataset and run the shared fit and test lifecycle."""
     cfg, statistics, target_property, embedding_property, model, datamodule = build(cfg)
-    train_arguments = {
-        "cfg": cfg,
-        "statistics": statistics,
-        "target_property": target_property,
-        "embedding_property": embedding_property,
-        "model": model,
-        "datamodule": datamodule,
-    }
-    train(**train_arguments)
+    train(
+        cfg=cfg,
+        statistics=statistics,
+        model=model,
+        datamodule=datamodule,
+        target_property=target_property,
+        embedding_property=embedding_property,
+        module_type=module_type,
+    )
+
+
+@training_cli
+def main(cfg: DictConfig):
+    train_from_config(cfg)
 
 
 if __name__ == "__main__":

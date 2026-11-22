@@ -5,10 +5,11 @@ buffers belong to each shape bucket; temporary allocations share one graph
 pool. The optimizer and all training state updates remain outside capture.
 """
 
-from collections import OrderedDict
-from contextlib import nullcontext, contextmanager
 import gc
+import logging
 import os
+from collections import OrderedDict
+from contextlib import contextmanager, nullcontext
 
 import torch
 
@@ -42,42 +43,42 @@ class CapturedTraining:
             key for key in loss_fn.loss_property if key in ("stress", "virials")
         ]
         self.workspace = workspace
-        self.pool = torch.cuda.graph_pool_handle()
+        self.memory_pool = torch.cuda.MemPool()
+        self.pool = self.memory_pool.id
         self.stream = torch.cuda.Stream()
         self.entries = OrderedDict()
         self.maximum = maximum
-        self.warmed = {}
+        self.warmups = 0
+        self.pool_resets = 0
         self.captures = 0
         self.programs = {}
         if maximum < 1:
             raise ValueError("The graph cache must hold at least one entry")
 
     def __call__(self, batch):
-        from tace.utils.loss.common import prepare_tensor_loss_counts
-        from tace.models.compile.joint import JointTraining
         from torch._inductor import config
+
+        from tace.models.compile.joint import JointTraining
+        from tace.utils.loss.common import prepare_tensor_loss_counts
+
+        from .extensions import extension_identity
         from .precision import validate_call
         from .program import MixedGradientPass
-        from .extensions import extension_identity
 
         validate_call(batch)
         extension_identity()
+        # The distributed loss counts must be prepared exactly once per step,
+        # including ranks whose graph signature is already cached.
         batch = prepare_tensor_loss_counts(
             self.adapter.prepare_property_data(batch), self.properties
         )
         signature = tuple(
-            (k, tuple(v.shape), v.dtype, tuple(v.stride()))
-            if torch.is_tensor(v)
-            else (k, repr(v))
-            for k, v in sorted(batch.items())
+            (key, tuple(value.shape), value.dtype, tuple(value.stride()))
+            if torch.is_tensor(value)
+            else (key, repr(value))
+            for key, value in sorted(batch.items())
         )
         if signature not in self.entries:
-            # Host-side loss-count preparation remains outside the captured
-            # program, including its distributed count reduction when enabled.
-            # Compile directly from already prepared counts. Calling the public
-            # forward_loss here would conditionally run another all_reduce and
-            # deadlock ranks observing different new capacities. Final partial
-            # batches get their own structure-count contract; none are dropped.
             contract = (
                 batch["ptr"].numel(),
                 tuple(sorted(batch)),
@@ -94,69 +95,76 @@ class CapturedTraining:
                     )
             program = self.programs[contract]
             static = {
-                k: v.clone() if torch.is_tensor(v) else v for k, v in batch.items()
+                key: value.clone() if torch.is_tensor(value) else value
+                for key, value in batch.items()
             }
-            policy = (
-                contract,
-                batch["positions"].shape[0] >= 64,
-                batch["edge_index"].shape[1] >= 1024,
-            )
-            if policy not in self.warmed:
-                self.stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self.stream):
-                    warm = program(static)
-                torch.cuda.current_stream().wait_stream(self.stream)
-                spec = (
-                    {k: (tuple(v.shape), v.dtype) for k, v in warm[0].items()},
-                    warm[1].dtype,
+            device = batch["positions"].device
+            current = torch.cuda.current_stream(device)
+            self.stream.wait_stream(current)
+            for attempt in range(2):
+                try:
+                    # Warmup and capture share a pool, but older graphs pin its
+                    # address ranges. A larger shape can need a fresh pool.
+                    with (
+                        capture_lifetime(),
+                        torch.cuda.stream(self.stream),
+                        torch.cuda.use_mem_pool(self.memory_pool, device),
+                        self.plan_scope(),
+                    ):
+                        predictions, loss = program(static)
+                        spec = {
+                            key: (tuple(value.shape), value.dtype)
+                            for key, value in predictions.items()
+                        }
+                        loss_dtype = loss.dtype
+                        del predictions, loss
+                    break
+                except torch.OutOfMemoryError:
+                    if attempt or not self.entries:
+                        raise
+                # Leave the exception handler first so its traceback releases
+                # temporary tensors. Parameters and optimizer state stay live.
+                torch.cuda.synchronize(device)
+                self.entries.clear()
+                gc.collect()
+                self.memory_pool = torch.cuda.MemPool()
+                self.pool = self.memory_pool.id
+                torch.cuda.empty_cache()
+                self.pool_resets += 1
+                logging.info(
+                    "Released cached CUDA Graphs for a larger training workspace"
                 )
-                del warm
-                self.warmed[policy] = spec
-            spec = self.warmed[policy]
-            outputs = {}
-            for key, (shape, dtype) in spec[0].items():
-                shape = list(shape)
-                if key in ("forces", "node_energy"):
-                    shape[0] = batch["positions"].shape[0]
-                elif key in ("energy", "stress", "virials"):
-                    shape[0] = batch["ptr"].numel() - 1
-                else:
-                    raise ValueError(f"Unsupported captured property: {key}")
-                outputs[key] = torch.empty(
-                    shape, dtype=dtype, device=batch["positions"].device
-                )
-            loss_buffer = torch.empty(
-                (), dtype=spec[1], device=batch["positions"].device
-            )
-            if os.environ.get("EQX_XL_LT_RADIAL", "0") == "1":
-                from equivariantx.models.tace.tace_oam_xl_v2.lt_matrix import (
-                    warm_capacity,
-                )
-
-                self.stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self.stream):
-                    warm_capacity(
-                        batch["edge_index"].shape[1], batch["positions"].device
-                    )
-                torch.cuda.current_stream().wait_stream(self.stream)
+            self.stream.synchronize()
+            self.warmups += 1
+            outputs = {
+                key: torch.empty(shape, dtype=dtype, device=device)
+                for key, (shape, dtype) in spec.items()
+            }
+            loss_buffer = torch.empty((), dtype=loss_dtype, device=device)
             graph = torch.cuda.CUDAGraph()
+            # DataLoader pin-memory threads allocate independently of this graph.
             with (
                 capture_lifetime(),
-                torch.cuda.graph(graph, stream=self.stream, pool=self.pool),
+                torch.cuda.graph(
+                    graph,
+                    stream=self.stream,
+                    pool=self.memory_pool,
+                    capture_error_mode="thread_local",
+                ),
                 self.plan_scope(),
             ):
                 predictions, loss = program(static)
                 self.workspace.attach_loss(loss)
-                mask = tuple(p.grad is not None for p in self.workspace.parameters)
+                mask = tuple(
+                    parameter.grad is not None
+                    for parameter in self.workspace.parameters
+                )
                 torch._foreach_copy_(
-                    list(outputs.values()), [predictions[k] for k in outputs]
+                    list(outputs.values()), [predictions[key] for key in outputs]
                 )
                 loss_buffer.copy_(loss.detach())
-                result = outputs, loss_buffer
-            # Do not retain a separate 450 MB parameter-gradient output tuple
-            # for every shape. All captures write the existing flat workspace.
-            del loss, predictions
-            self.entries[signature] = (static, graph, result, mask)
+            del predictions, loss
+            self.entries[signature] = (static, graph, (outputs, loss_buffer), mask)
             self.captures += 1
             while len(self.entries) > self.maximum:
                 self.entries.popitem(last=False)

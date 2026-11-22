@@ -81,59 +81,78 @@ def activation_slope(layer, value):
     raise ValueError(f"Unsupported radial jet activation: {type(layer).__name__}")
 
 
-def hidden_jets(representation, basis_fn, radius, node_type, edge_index):
+def hidden_jets(representation, networks, basis_fn, radius, node_type, edge_index):
     """Evaluate analytic scalar-radius JVPs without dual-tensor shape guards."""
     embedding = representation.edge_embedding
-    if type(embedding).__name__ != "LinearEdgeEmbedding":
-        raise ValueError("Radial jets currently require LinearEdgeEmbedding")
-    projection = embedding.radial_proj
-    if len(projection.weight) != 1 or len(projection.linear.instructions) != 1:
-        raise ValueError("Expected one scalar radial embedding matrix")
     length = radius.detach()
     basis, _ = basis_fn(length, node_type, edge_index, representation.atomic_numbers)
     basis = basis.to(representation.model_dtype)
     slope = bessel_slope(basis_fn, length).to(basis)
-    weight = projection.weight[0] * projection.linear.instructions[0].path_weight
-    radial, radial_slope = basis @ weight, slope @ weight
-    if projection.bias is not None:
-        radial = radial + projection.bias
-    sequences = [
-        tuple(layer.edge_info.mlp)[:-1] for layer in representation.interactions
-    ]
+    if type(embedding).__name__ == "LinearEdgeEmbedding":
+        projection = embedding.radial_proj
+        weight = projection.scalar_matrix()
+        radial, radial_slope = basis @ weight, slope @ weight
+        if projection.bias is not None:
+            radial = radial + projection.bias
+    elif not hasattr(embedding, "radial_proj"):
+        radial, radial_slope = basis, slope
+    else:
+        raise ValueError("Radial jets require identity or linear radial embedding")
+    sequences = [tuple(network.mlp)[:-1] for network in networks]
     if not sequences or any(len(layers) != len(sequences[0]) for layers in sequences):
         raise ValueError("Radial jets require matching hidden MLP stages")
+    updates = representation.edge_updates
+    source_types, target_types = node_type[edge_index[0]], node_type[edge_index[1]]
+    if not sequences[0]:
+        values = [
+            torch.cat(
+                (
+                    radial,
+                    update.target_embedding(target_types),
+                    update.source_embedding(source_types),
+                ),
+                -1,
+            )
+            if hasattr(update, "source_embedding")
+            else radial
+            for update in updates
+        ]
+        slopes = [
+            torch.nn.functional.pad(
+                radial_slope, (0, value.shape[-1] - radial_slope.shape[-1])
+            )
+            for value in values
+        ]
+        return values, slopes
     first = [layers[0] for layers in sequences]
     if any(type(layer).__name__ != "mlpLinear" for layer in first):
         raise ValueError("Radial jets require a linear first hidden stage")
     weights = torch.stack([layer.get_weight() for layer in first])
-    updates = representation.edge_updates
-    target_embedding = torch.stack(
-        [update.target_embedding.weight for update in updates]
-    )
-    source_embedding = torch.stack(
-        [update.source_embedding.weight for update in updates]
-    )
-    width, elements = radial.shape[-1], target_embedding.shape[-1]
+    width = radial.shape[-1]
     radial_weight = weights[:, :width]
     values = torch.matmul(radial.unsqueeze(0), radial_weight)
     tangents = torch.matmul(radial_slope.unsqueeze(0), radial_weight)
     if first[0].bias is not None:
         values = values + torch.stack([layer.bias for layer in first])[:, None, :]
-    source_types, target_types = node_type[edge_index[0]], node_type[edge_index[1]]
-    values = (
-        values
-        + torch.bmm(target_embedding, weights[:, width : width + elements])[
-            :, target_types
-        ]
-    )
-    values = (
-        values
-        + torch.bmm(source_embedding, weights[:, width + elements :])[:, source_types]
-    )
+    if hasattr(updates[0], "source_embedding"):
+        target_embedding = torch.stack(
+            [update.target_embedding.weight for update in updates]
+        )
+        source_embedding = torch.stack(
+            [update.source_embedding.weight for update in updates]
+        )
+        split = width + target_embedding.shape[-1]
+        values = (
+            values
+            + torch.bmm(target_embedding, weights[:, width:split])[:, target_types]
+        )
+        values = (
+            values + torch.bmm(source_embedding, weights[:, split:])[:, source_types]
+        )
     for stage in range(1, len(sequences[0])):
         layers = [sequence[stage] for sequence in sequences]
         layer = layers[0]
-        if any(type(item) != type(layer) for item in layers):
+        if any(type(item) is not type(layer) for item in layers):
             raise ValueError("Radial jets require matching hidden stage types")
         if type(layer).__name__ == "mlpLinear":
             weights = torch.stack([item.get_weight() for item in layers])
@@ -142,6 +161,12 @@ def hidden_jets(representation, basis_fn, radius, node_type, edge_index):
                 values = (
                     values + torch.stack([item.bias for item in layers])[:, None, :]
                 )
+        elif isinstance(layer, (torch.nn.LayerNorm, torch.nn.RMSNorm)):
+            normalized = [
+                torch.func.jvp(item, (x,), (dx,))
+                for item, x, dx in zip(layers, values.unbind(0), tangents.unbind(0))
+            ]
+            values, tangents = (torch.stack(part) for part in zip(*normalized))
         else:
             if any(tuple(item.parameters()) for item in layers):
                 raise ValueError("Parameterized radial jet activations are unsupported")

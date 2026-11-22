@@ -35,6 +35,7 @@ from tace.dataset.quantity import KeySpecification
 from tace.dataset.statistics import statistics_devices
 from tace.dataset.store import write_graphs
 from tace.models.blocks import ScaleShift
+from tace.utils.cfg import save_full_cfg
 
 from .testing import file_digest, file_snapshot
 
@@ -51,6 +52,35 @@ def statistics_progress(monkeypatch):
 
     monkeypatch.setattr(statistics_module, "tqdm", record)
     return bars
+
+
+def test_training_yaml_only_written_by_global_rank_zero(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in (
+        "RANK",
+        "NODE_RANK",
+        "GROUP_RANK",
+        "LOCAL_RANK",
+        "SLURM_PROCID",
+        "JSM_NAMESPACE_RANK",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def write():
+        save_full_cfg({"seed": 42})
+        statistics_module.log_statistics_to_yaml([{"num_atoms": 2}])
+
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    for name in ("RANK", "NODE_RANK", "SLURM_PROCID"):
+        monkeypatch.setenv(name, "1")
+        write()
+        assert not list(tmp_path.iterdir())
+        monkeypatch.delenv(name)
+    write()
+    assert {p.name for p in tmp_path.iterdir()} == {
+        "_full_config.yaml",
+        "statistics_0.yaml",
+    }
 
 
 def test_raw_and_statistics_cache_dependencies_are_separate(tmp_path, monkeypatch):

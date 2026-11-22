@@ -118,7 +118,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
             ]
         )
         self.node_embedding = ElementEmbedding(
-            self.num_elements, self.num_channel, bias=self.bias
+            self.num_elements, self.num_channel, bias=self.use_bias
         )
         input_dim = self.num_radial_basis + (
             2 * self.num_channel if self.element_dependent else 0
@@ -136,7 +136,7 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
                 *self.radial_mlp,
                 len(self.irreps_out) * self.num_channel,
             ],
-            bias=self.bias,
+            bias=self.use_bias,
             layer_norm=radial_norm == "layer_norm",
             rms_norm=radial_norm == "rms_norm",
         )

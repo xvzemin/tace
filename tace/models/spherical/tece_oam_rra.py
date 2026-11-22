@@ -56,6 +56,8 @@ class Convolution(torch.nn.Module):
         Node layout transforms. The output transform provides ``inverse``.
     scalar_act, tensor_act : torch.nn.Module
         Already-scaled scalar and gate activations, used without renormalization.
+    use_bias : bool
+        Add biases to invariant scalar outputs of the local linear maps.
 
     Notes
     -----
@@ -81,6 +83,8 @@ class Convolution(torch.nn.Module):
         reshape_out,
         scalar_act,
         tensor_act,
+        *,
+        use_bias: bool = True,
     ):
         super().__init__()
         self.mmax, self.lmax = mmax, lmax
@@ -155,13 +159,13 @@ class Convolution(torch.nn.Module):
         self.linear_up = o2.Linear(
             self.irreps_in,
             list(zip(orders, widths)),
-            biases=True,
+            biases=use_bias,
             backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.linear_down = o2.Linear(
             self.irreps_hidden,
             node_irreps,
-            biases=True,
+            biases=use_bias,
             backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
 
@@ -227,7 +231,7 @@ class Convolution(torch.nn.Module):
             self.linear_coefs = o2.Linear(
                 [self.irreps_in[0]],
                 [(o2.Irrep(0, 1), self.ece.weight_numel)],
-                biases=True,
+                biases=use_bias,
                 backend="cuda"
                 if acceleration_enabled("eqx", kernel="linear")
                 else "torch",
@@ -300,7 +304,7 @@ class Convolution(torch.nn.Module):
             self.query_proj = o2.Linear(
                 node_irreps,
                 node_irreps,
-                biases=True,
+                biases=use_bias,
                 backend="cuda"
                 if acceleration_enabled("eqx", kernel="linear")
                 else "torch",
@@ -308,7 +312,7 @@ class Convolution(torch.nn.Module):
             self.key_proj = o2.Linear(
                 node_irreps,
                 node_irreps,
-                biases=True,
+                biases=use_bias,
                 backend="cuda"
                 if acceleration_enabled("eqx", kernel="linear")
                 else "torch",
@@ -316,7 +320,7 @@ class Convolution(torch.nn.Module):
             self.radial_proj = o2.Linear(
                 [(o2.Irrep(0, 1), num_radial_basis)],
                 [(o2.Irrep(0, 1), 2 * num_head)],
-                biases=True,
+                biases=use_bias,
                 backend="cuda"
                 if acceleration_enabled("eqx", kernel="linear")
                 else "torch",
@@ -657,6 +661,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             edge_ace_hidden=self.edge_ace_hidden,
             gate_m0=False,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
+            use_bias=self.use_bias,
             reshape_in=LayoutTransform(self.irreps_in),
             reshape_out=LayoutTransform(
                 o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])

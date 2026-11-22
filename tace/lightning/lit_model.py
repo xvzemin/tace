@@ -39,7 +39,7 @@ from tace.utils.precision import (
 from ..utils.loss.dens import add_gaussian_noise_to_position
 from .lora import to_lora_model
 from .loss_skip import LossSkipController
-from .optimizer import get_optimizer_param_groups
+from .optimizer import clip_gradient_norm, get_optimizer_param_groups
 from .torch_model import create_model
 
 
@@ -224,6 +224,24 @@ class LightningWrapperModel(L.LightningModule):
         loss = self._shared_step(batch, batch_idx, "train")
         return loss
 
+    def configure_gradient_clipping(
+        self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None
+    ):
+        """Keep global norm clipping finite for large coordinate-loss gradients."""
+        if (
+            gradient_clip_algorithm in (None, "norm")
+            and gradient_clip_val is not None
+            and gradient_clip_val > 0
+        ):
+            clip_gradient_norm(
+                (p for group in optimizer.param_groups for p in group["params"]),
+                gradient_clip_val,
+            )
+        else:
+            super().configure_gradient_clipping(
+                optimizer, gradient_clip_val, gradient_clip_algorithm
+            )
+
     def validation_step(self, batch, batch_idx):
         with torch.enable_grad():
             output = self._shared_step(batch, batch_idx, "val")
@@ -320,7 +338,9 @@ class LightningWrapperModel(L.LightningModule):
         else:
             self.sync_dist = False
 
-    def configure_optimizers(self):
+    def configure_optimizers(self, *, shard_muon: bool = False):
+        """Build the optimizer and attach its scheduler after optional sharding."""
+        from tace.utils.optimizer import HybridMuonOptimizer
 
         optimizer_cfg = copy.deepcopy(self.cfg["optimizer"])
 
@@ -333,7 +353,9 @@ class LightningWrapperModel(L.LightningModule):
         module = importlib.import_module(module_path)
         OptimizerClass = getattr(module, class_name)
 
-        hybrid_muon = OptimizerClass.__module__ == "tace.utils.optimizer.hybrid_muon"
+        hybrid_muon = inspect.isclass(OptimizerClass) and issubclass(
+            OptimizerClass, HybridMuonOptimizer
+        )
         default_weight_decay = (
             inspect.signature(OptimizerClass).parameters["weight_decay"].default
             if hybrid_muon
@@ -354,12 +376,13 @@ class LightningWrapperModel(L.LightningModule):
                 ],
                 **optimizer_cfg,
             )
+            if shard_muon:
+                optimizer = optimizer.shard()
         else:
             optimizer = OptimizerClass(
                 params=param_groups,
                 **optimizer_cfg,
             )
-
         if "scheduler" not in self.cfg:
             return {"optimizer": optimizer}
 

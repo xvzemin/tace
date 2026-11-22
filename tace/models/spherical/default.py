@@ -65,6 +65,7 @@ DEFAULT_MODEL_CONFIG = {
     },
     "atomic_basis": {
         "type": "cgtp",
+        "bias": True,
         "l1l2": None,
         "scatter_norm": "avg_num_neighbors",
         "nonlinear": "gate",
@@ -88,6 +89,7 @@ DEFAULT_MODEL_CONFIG = {
     },
     "product_basis": {
         "type": "cgtp",
+        "bias": True,
         "l1l2": None,
         "correlation": 2,
         "return_components": None,

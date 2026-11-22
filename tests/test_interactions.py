@@ -605,8 +605,11 @@ def test_tece_state_dict(device, mmax, ece, gate_m0, double_precision):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("edges", [0, 7, 65, 257, 1025])
-def test_tece_streaming_derivatives(monkeypatch, device, edges):
+@pytest.mark.parametrize(
+    "edges,use_bias",
+    [(0, True), (7, True), (7, False), (65, True), (257, True), (1025, True)],
+)
+def test_tece_streaming_derivatives(monkeypatch, device, edges, use_bias):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     from equivariantx.models.tace.tece_oam_rra.interaction import stream
@@ -643,6 +646,7 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges):
         LayoutTransform(irreps),
         torch.nn.SiLU(),
         torch.nn.Sigmoid(),
+        use_bias=use_bias,
     ).to(device=device, dtype=torch.float64)
     with torch.no_grad():
         module.radial_proj.weight.normal_(std=0.1)

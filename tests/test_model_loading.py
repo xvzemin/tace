@@ -1027,13 +1027,15 @@ def test_mlp_v2_element_export_roundtrip(elements, tmp_path, double_precision):
             )
 
 
-def test_legacy_mlp_defaults(tmp_path, double_precision):
+def test_legacy_model_defaults(tmp_path, double_precision):
     model = make_model()
     path = tmp_path / "legacy.pt"
     export_tace(model, str(path))
     checkpoint = torch.load(path, weights_only=False)
     del checkpoint["cfg"]["mlp_type"]
     del checkpoint["cfg"]["radial_basis"]["mlp_norm"]
+    del checkpoint["cfg"]["atomic_basis"]["bias"]
+    del checkpoint["cfg"]["product_basis"]["bias"]
     torch.save(checkpoint, path)
     restored = load_tace(path, device=DEVICE, dtype=torch.float64).eval()
     for name, value in model.state_dict().items():
@@ -1042,6 +1044,59 @@ def test_legacy_mlp_defaults(tmp_path, double_precision):
         actual, expected = evaluate(restored, fidelity), evaluate(model, fidelity)
         for key in ("energy", "forces", "stress"):
             torch.testing.assert_close(actual[key], expected[key], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "variant,interaction_bias,product_bias",
+    [
+        ("nonlinear_cgtp", False, True),
+        ("nonlinear_ictd", True, False),
+        ("uv_o2_mag", False, True),
+        ("so2", False, False),
+    ],
+)
+def test_interaction_product_bias(
+    variant, interaction_bias, product_bias, double_precision
+):
+    reference = make_model(variant)
+    cfg = deepcopy(reference.readout_fn.model_config)
+    cfg["atomic_basis"]["bias"] = interaction_bias
+    cfg["product_basis"]["bias"] = product_bias
+    model = create_model(cfg, cfg["statistics"], cfg["target_property"], [])
+    model = configure_model_precision(model, torch.float64, device=DEVICE).eval()
+    rep = model.readout_fn.representation
+    for layer in rep.interactions:
+        for linear in (layer.linear_up, layer.linear_down, layer.linear_nonlinearity):
+            if not isinstance(linear, torch.nn.Identity):
+                assert (linear.bias is not None) == interaction_bias
+    for block in rep.products:
+        assert (block.linear.bias is not None) == product_bias
+    if variant in ("so2", "uv_o2_mag"):
+        for linear in rep.interactions[-1].rejector.modules():
+            if isinstance(linear, o2.Linear):
+                assert bool(linear.bias_numel) == interaction_bias
+
+    # A bias-free model must equal the same model with those offsets set to zero.
+    original = dict(reference.named_parameters())
+    kept = dict(model.named_parameters())
+    removed = original.keys() - kept.keys()
+    assert all(
+        name.startswith(
+            ("readout_fn.representation.interactions.", "readout_fn.representation.products.")
+        )
+        and name.endswith(".bias")
+        for name in removed
+    )
+    for name, enabled in (("interactions", interaction_bias), ("products", product_bias)):
+        assert any(f".{name}." in key for key in removed) == (not enabled)
+    with torch.no_grad():
+        for name, param in kept.items():
+            param.copy_(original[name])
+        for name in removed:
+            original[name].zero_()
+    expected, actual = evaluate(reference), evaluate(model)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key])
 
 
 def test_matrix_weights(double_precision):
@@ -1857,3 +1912,90 @@ def test_ema_checkpoint_resume_and_restore(tmp_path, use_num_updates):
             raise RuntimeError("validation failed")
     for parameter, original in zip(restored_parameters, originals):
         torch.testing.assert_close(parameter, original, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA required"
+            ),
+        ),
+    ],
+)
+def test_ema_callback_training_and_standalone_evaluation(tmp_path, accelerator):
+    import lightning as L
+    from torch.utils.data import DataLoader
+
+    from tace.utils.callbacks import EMACallback
+
+    class Model(L.LightningModule):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Linear(1, 1, bias=False)
+            torch.nn.init.ones_(self.model.weight)
+
+        def training_step(self, batch, batch_idx):
+            return self.model(batch).square().mean()
+
+        def validation_step(self, batch, batch_idx):
+            self.log("weight", self.model(batch).mean())
+
+        test_step = validation_step
+
+        def configure_optimizers(self):
+            return torch.optim.SGD(self.parameters(), lr=0.1)
+
+    def trainer(callback, epochs=1):
+        return L.Trainer(
+            accelerator=accelerator,
+            devices=1,
+            callbacks=[callback],
+            max_epochs=epochs,
+            accumulate_grad_batches=2,
+            logger=False,
+            enable_checkpointing=False,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            default_root_dir=tmp_path,
+        )
+
+    data = DataLoader(torch.ones(4, 1), batch_size=1)
+    model, callback = (
+        Model(),
+        EMACallback(decay=0.5, use_num_updates=False, device="cpu"),
+    )
+    fit = trainer(callback)
+    fit.fit(model, train_dataloaders=data)
+    # Two optimizer steps: raw weights 1 -> .8 -> .64, EMA 1 -> .9 -> .77.
+    assert fit.global_step == 2
+    assert model.model.weight.item() == pytest.approx(0.64)
+    assert callback.ema.shadow_params[0].item() == pytest.approx(0.77)
+    path = tmp_path / "ema.ckpt"
+    fit.save_checkpoint(path)
+
+    fresh = Model()
+    eval_ema = EMACallback(device="cpu")
+    evaluation = trainer(eval_ema)
+    for evaluate in (evaluation.validate, evaluation.test):
+        result = evaluate(fresh, dataloaders=data, ckpt_path=path, verbose=False)
+        assert result[0]["weight"] == pytest.approx(0.77)
+        assert fresh.model.weight.item() == pytest.approx(0.64)
+        assert eval_ema.ema.collected_params is None
+
+    resume_ema = EMACallback(device="cpu")
+    resumed = trainer(resume_ema, epochs=2)
+    resumed.fit(fresh, train_dataloaders=data, ckpt_path=path)
+    expected = (0.77 + 0.64 * 0.8) * 0.5
+    expected = (expected + 0.64 * 0.8**2) * 0.5
+    assert resume_ema.ema.shadow_params[0].item() == pytest.approx(expected)
+
+    weights = torch.load(path, weights_only=False)
+    del weights["ema_state_dict"]
+    raw = tmp_path / "raw.ckpt"
+    torch.save(weights, raw)
+    result = evaluation.test(fresh, dataloaders=data, ckpt_path=raw, verbose=False)
+    assert result[0]["weight"] == pytest.approx(0.64)

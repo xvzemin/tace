@@ -1461,6 +1461,7 @@ def test_hybrid_muon_checkpoint(dtype, use_foreach):
 
 def test_hybrid_muon_parameter_groups():
     optimizer = HybridMuonOptimizer([{"params": []}])
+    assert optimizer.shard() is optimizer
     optimizer.step()
     params = [torch.nn.Parameter(torch.ones(3)) for _ in range(2)]
     for param in params:
@@ -1633,3 +1634,48 @@ def test_hybrid_muon_cuda_graph(dtype, use_foreach):
         if step == 20:
             assert not optimizer._graphs
     assert len(optimizer._graphs) == 2
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("scale", [0.0, 1.0, 1e20, 1e30, float("inf"), float("nan")])
+def test_global_gradient_clipping(device, scale):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from types import SimpleNamespace
+
+    from tace.lightning.lit_model import LightningWrapperModel
+
+    torch.manual_seed(19)
+    parameters = [
+        torch.nn.Parameter(torch.zeros(128, 128, device=device)),
+        torch.nn.Parameter(torch.zeros(17, device=device, dtype=torch.float64)),
+    ]
+    overflow = scale in (1e20, 1e30)
+    reference = []
+    for parameter in parameters:
+        parameter.grad = torch.randn_like(parameter) * scale
+        value = torch.nn.Parameter(
+            parameter.detach().double() if overflow else parameter.detach()
+        )
+        value.grad = parameter.grad.to(value).clone()
+        reference.append(value)
+    torch.nn.utils.clip_grad_norm_(reference, 10.0)
+    parameters.append(torch.nn.Parameter(torch.zeros(1, device=device)))
+    optimizer = torch.optim.SGD(parameters, lr=0.1)
+    LightningWrapperModel.configure_gradient_clipping(
+        SimpleNamespace(), optimizer, 10.0, "norm"
+    )
+    for actual, expected in zip(parameters, reference):
+        torch.testing.assert_close(
+            actual.grad,
+            expected.grad.to(actual),
+            rtol=2e-7 if overflow else 0,
+            atol=0,
+            equal_nan=True,
+        )
+    assert parameters[-1].grad is None
+    if overflow:
+        norm = torch.linalg.vector_norm(
+            torch.stack([p.grad.double().norm() for p in parameters[:-1]])
+        )
+        torch.testing.assert_close(norm, norm.new_tensor(10.0))

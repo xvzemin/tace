@@ -149,6 +149,7 @@ class O3CgtpInteraction(Interaction):
             o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out]),
             self.irreps_out,
             gate_m0=self.gate_m0,
+            bias=self.use_bias,
             scalar_act=self.scalar_act,
             tensor_act=self.tensor_act,
         )

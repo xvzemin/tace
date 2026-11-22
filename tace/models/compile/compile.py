@@ -58,6 +58,7 @@ def trace_and_compile(
     inputs: Sequence[torch.Tensor],
     *,
     backend: str,
+    shape_padding: bool = True,
 ) -> tuple[Callable, tuple[str, ...], tuple[str, ...]]:
     parameter_names = tuple(name for name, _ in model.named_parameters())
     buffer_names = tuple(name for name, _ in model.named_buffers())
@@ -84,11 +85,13 @@ def trace_and_compile(
     traced = trace_to_fx(compute, trace_inputs)
 
     compiled = torch.compile(
-        traced,
+        traced.forward,
         backend=backend,
         dynamic=True,
         fullgraph=True,
-        options=inductor_options() if backend == "inductor" else None,
+        options=inductor_options(shape_padding=shape_padding)
+        if backend == "inductor"
+        else None,
     )
     return compiled, parameter_names, buffer_names
 
@@ -170,10 +173,10 @@ def model_state_values(
     ]
 
 
-def inductor_options() -> Dict[str, object]:
+def inductor_options(*, shape_padding: bool = True) -> Dict[str, object]:
     options: Dict[str, object] = {
         "max_autotune": False,
-        "shape_padding": True,
+        "shape_padding": shape_padding,
         "epilogue_fusion": False,
         # In-place buffer reuse can corrupt parameter gradients through forces.
         "inplace_buffers": False,

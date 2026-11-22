@@ -3,6 +3,8 @@
 import torch
 import torch.distributed as dist
 
+from equivariantx.utils.autograd import clip_gradient_norm
+
 
 class GradientWorkspace:
     """Attach explicit joint gradients, synchronize and clip in flat storage.
@@ -93,22 +95,17 @@ class GradientWorkspace:
         """Average the complete gradient using the current distributed group."""
         if not dist.is_initialized() or dist.get_world_size() == 1:
             return
-        requests = [dist.all_reduce(value, async_op=True) for value in self.buffers]
+        summed = dist.get_backend() == "gloo"
+        op = dist.ReduceOp.SUM if summed else dist.ReduceOp.AVG
+        requests = [
+            dist.all_reduce(value, op=op, async_op=True) for value in self.buffers
+        ]
         for request in requests:
             request.wait()
-        torch._foreach_mul_(self.buffers, 1.0 / dist.get_world_size())
+        if summed:
+            torch._foreach_mul_(self.buffers, 1.0 / dist.get_world_size())
 
     @torch.no_grad()
     def clip(self, maximum):
-        """Apply the original global L2 clipping rule and return its norm."""
-        if maximum < 0:
-            raise ValueError("maximum must be nonnegative")
-        device = self.buffers[0].device
-        norms = [
-            torch.linalg.vector_norm(value, 2).to(device) for value in self.buffers
-        ]
-        total = torch.linalg.vector_norm(torch.stack(norms), 2)
-        coefficient = (maximum / (total + 1e-6)).clamp(max=1.0)
-        for buffer in self.buffers:
-            buffer.mul_(coefficient.to(buffer.device, buffer.dtype))
-        return total
+        """Clip active gradients and return their original global L2 norm."""
+        return clip_gradient_norm(self.parameters, maximum)

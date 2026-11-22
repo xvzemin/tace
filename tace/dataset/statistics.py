@@ -17,9 +17,10 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
+
+from tace.utils.strategy import is_rank_0
 
 from .cache import GRAPH_SCHEMA, statistics_cache_key
 from .element import TorchElement, build_element_lookup
@@ -27,16 +28,16 @@ from .quantity import KeySpecification, get_need_property
 from .store import GraphDatasetLMDB
 
 
-@rank_zero_only
 def log_statistics_to_yaml(statistics) -> None:
     """Write one complete statistics YAML file per fidelity on rank zero."""
-    if statistics is not None:
-        for index, values in enumerate(statistics):
-            path = Path(f"statistics_{index}.yaml")
-            temporary = path.with_suffix(".yaml.tmp")
-            with temporary.open("w", encoding="utf-8") as stream:
-                yaml.dump(values, stream, sort_keys=False, allow_unicode=True)
-            temporary.replace(path)
+    if statistics is None or not is_rank_0():
+        return
+    for index, values in enumerate(statistics):
+        path = Path(f"statistics_{index}.yaml")
+        temporary = path.with_suffix(".yaml.tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            yaml.dump(values, stream, sort_keys=False, allow_unicode=True)
+        temporary.replace(path)
 
 
 def statistics_devices(cfg, dataset):

@@ -14,6 +14,7 @@ from .compile import compiled_call, trace_and_compile
 
 
 class CompileTensorModel(TensorModel):
+    shape_padding = True
     allowed_properties = frozenset(
         {
             "energy",
@@ -108,6 +109,7 @@ class CompileTensorModel(TensorModel):
                     flat_model,
                     inputs,
                     backend=getattr(self.readout_fn, "compile_backend", "inductor"),
+                    shape_padding=self.shape_padding,
                 ),
             )
 

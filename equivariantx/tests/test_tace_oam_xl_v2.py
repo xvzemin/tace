@@ -49,16 +49,67 @@ from equivariantx.ops.common.channel_product import channel_product
 
 
 @pytest.mark.parametrize(
-    ("radial_mode", "associate_norm", "scatter_norm", "edge_mode", "device", "pre_norm"),
+    "device,radial_mode,scatter_norm,multi_cutoff,conditioning,projection,topology",
     [
-        ("stream", False, "density", "original", "cpu", "merge_rms_norm"),
-        ("materialize", True, "density", "original", "cpu", "merge_rms_norm"),
-        ("materialize", True, "cutoff", "scheduled", "cuda", "merge_rms_norm"),
-        ("stream", False, "cutoff", "original", "cpu", "const_norm"),
+        ("cpu", "stream", "density", None, "linear", "individual", "directed"),
+        ("cpu", "stream", "cutoff", [4.0], "element", "individual", "directed"),
+        ("cpu", "stream", "cutoff", [2.5, 4.0], "element2", "individual", "pairs"),
+        ("cpu", "stream", "density", [2.0, 4.0, 6.0], "linear", "individual", "empty"),
+        ("cpu", "materialize", "density", [2.5, 4.0], "linear", "composed", "pairs"),
+        ("cpu", "materialize", "cutoff", [2.5, 4.0], "element2", "batched", "pairs"),
+        ("cpu", "materialize", "density", None, "linear", "split", "directed"),
+        ("cpu", "materialize", "density", [2.5, 4.0], "linear", "split", "directed"),
+        ("cpu", "materialize", "density", None, "linear", "jet", "directed"),
+        ("cpu", "materialize", "cutoff", [2.5, 4.0], "element", "jet", "directed"),
+        ("cuda", "materialize", "density", None, "linear", "individual", "directed"),
+        ("cuda", "materialize", "cutoff", [4.0], "element", "individual", "directed"),
+        (
+            "cuda",
+            "materialize",
+            "density",
+            [2.5, 4.0],
+            "element2",
+            "individual",
+            "pairs",
+        ),
+        (
+            "cuda",
+            "materialize",
+            "cutoff",
+            [2.5, 4.0],
+            "element2",
+            "individual",
+            "pairs",
+        ),
+        (
+            "cuda",
+            "materialize",
+            "density",
+            [2.0, 4.0, 6.0],
+            "linear",
+            "individual",
+            "directed",
+        ),
+        (
+            "cuda",
+            "materialize",
+            "density",
+            [2.0, 4.0, 6.0],
+            "linear",
+            "individual",
+            "empty",
+        ),
     ],
 )
 def test_conversion_checkpoint_and_mixed_derivatives(
-    monkeypatch, radial_mode, associate_norm, scatter_norm, edge_mode, device, pre_norm
+    monkeypatch,
+    radial_mode,
+    scatter_norm,
+    device,
+    multi_cutoff,
+    conditioning,
+    projection,
+    topology,
 ):
     pytest.importorskip("tace")
     if device == "cuda" and not torch.cuda.is_available():
@@ -68,7 +119,12 @@ def test_conversion_checkpoint_and_mixed_derivatives(
 
     for name, value in {"EQX": "1", "MATRIX_WEIGHT": "1", "COMPILE": "0"}.items():
         monkeypatch.setenv(f"TACE_USE_{name}", value)
+    edge_mode = "scheduled" if device == "cuda" else "original"
+    associate_norm = scatter_norm == "cutoff" and conditioning == "linear"
+    pre_norm = "const_norm" if conditioning == "element" else "merge_rms_norm"
     monkeypatch.setenv("EQX_XL_ASSOCIATE_NORM", str(int(associate_norm)))
+    monkeypatch.setenv("EQX_XL_COMPRESSED_RADIAL", str(int(topology == "pairs")))
+    monkeypatch.setenv("EQX_XL_RADIAL_JET", str(int(projection == "jet")))
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
@@ -79,13 +135,17 @@ def test_conversion_checkpoint_and_mixed_derivatives(
             Lmax=1,
             lmax=1,
             mmax=1,
-            cutoff=4.0,
+            cutoff=multi_cutoff[-1] if multi_cutoff else 4.0,
             max_neighbors=None,
             mlp_type="mlp_v2",
         )
-        config["edge_update"]["type"] = "element2"
-        config["edge_embedding"]["type"] = "linear"
-        config["radial_basis"].update(hidden=[4, 4], bias=True, apply_cutoff=False)
+        config["edge_update"]["type"] = (
+            "element2" if conditioning == "linear" else "identity"
+        )
+        config["edge_embedding"]["type"] = conditioning
+        config["radial_basis"].update(
+            hidden=[4, 4], bias=True, apply_cutoff=False, multi_cutoff=multi_cutoff
+        )
         config["atomic_basis"].update(type="cgtp", scatter_norm=scatter_norm)
         config["resnet"].update(type="BAB", linear_type="identity")
         config["layer_norm"].update(
@@ -99,11 +159,43 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         targets = ["energy", "forces", "stress"]
         config["target_property"] = targets
         stats = [
-            dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)
+            dict(
+                atomic_numbers=[1, 8],
+                atomic_energy={1: 0.0, 8: 0.0},
+                avg_num_neighbors=2.0,
+            )
         ]
         source = create_model(config, stats, targets, []).double().to(device).train()
+        embedding = source.readout_fn.representation.edge_embedding
+        for name in getattr(embedding, "table_names", ()):
+            with torch.no_grad():
+                getattr(embedding, name).weight.normal_(std=0.1)
+        production = (
+            radial_mode == "materialize"
+            and not associate_norm
+            and edge_mode == "scheduled"
+        )
+        if production:
+            from tace.models.linear import switch_e3nn_weight_layout
+
+            switch_e3nn_weight_layout(source, "matrix")
+        schedule = (
+            dict(
+                product_mode="packed",
+                compose_products=True,
+                affine_radial=True,
+                gradient_schedule="fused",
+                padded_batches=True,
+            )
+            if production
+            else {}
+        )
         candidate = TACEOAMXLV2.from_tace(
-            source, radial_mode=radial_mode, edge_mode=edge_mode
+            source,
+            radial_mode=radial_mode,
+            edge_mode=edge_mode,
+            radial_projection="individual" if projection == "jet" else projection,
+            **schedule,
         )
         original = dict(source.named_parameters())
         converted = dict(candidate.named_parameters())
@@ -128,7 +220,8 @@ def test_conversion_checkpoint_and_mixed_derivatives(
                     [0.0, 0.0, 0.0],
                 ]
             ),
-            "node_type": torch.zeros(4, dtype=torch.int64),
+            "node_type": torch.tensor([0, 1, 0, 1]),
+            "atomic_numbers": torch.tensor([1, 8, 1, 8]),
             "edge_index": torch.tensor([[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]]),
             "edge_shifts": torch.zeros(6, 3, dtype=torch.int64),
             "lattice": torch.eye(3).repeat(2, 1, 1) * 16.0,
@@ -137,18 +230,49 @@ def test_conversion_checkpoint_and_mixed_derivatives(
             "ptr": torch.tensor([0, 3, 4]),
             "fidelity_idx": torch.zeros(2, dtype=torch.int64),
         }
+        if multi_cutoff and len(multi_cutoff) == 3:
+            data["positions"][1, 0] = 1.2
+            data["positions"][2, 1] = 4.7
+        if topology == "empty":
+            data["edge_index"] = data["edge_index"][:, :0]
+            data["edge_shifts"] = data["edge_shifts"][:0]
         data = {name: value.to(device) for name, value in data.items()}
         results = []
         for model in (source, candidate):
-            batch = model.prepare_property_data(
-                {name: value.clone() for name, value in data.items()}
-            )
+            batch = {name: value.clone() for name, value in data.items()}
+            if production and model is candidate:
+                from equivariantx.models.tace.tace_oam_xl_v2.padding import pad_batch
+
+                batch = pad_batch(batch, 8, 16)
+            if topology == "pairs" and model is candidate:
+                from equivariantx.models.tace.tace_oam_xl_v2.reciprocal import (
+                    reciprocal_plan,
+                )
+
+                batch = reciprocal_plan(batch)
+            batch = model.prepare_property_data(batch)
             output = model(batch)
             loss = sum(output[name].square().sum() for name in targets)
             gradients = torch.autograd.grad(
                 loss, tuple(original.values()), allow_unused=True
             )
+            if production and model is candidate:
+                dummy_forces = output["forces"][data["positions"].shape[0] :]
+                torch.testing.assert_close(
+                    dummy_forces, torch.zeros_like(dummy_forces), rtol=0, atol=0
+                )
+                output["forces"] = output["forces"][: data["positions"].shape[0]]
             results.append((output, gradients))
+        if multi_cutoff and len(multi_cutoff) > 1 and topology != "empty":
+            for scale in range(len(multi_cutoff)):
+                selected = [
+                    gradient
+                    for name, gradient in zip(original, results[1][1])
+                    if f"edge_info.networks.{scale}." in name and gradient is not None
+                ]
+                assert selected and any(
+                    gradient.abs().max() > 0 for gradient in selected
+                )
         for name in targets:
             torch.testing.assert_close(
                 results[0][0][name], results[1][0][name], rtol=1e-10, atol=1e-11
@@ -945,6 +1069,13 @@ def test_shared_gradient_outputs_and_unused_parameters():
         for p, q in zip(original, candidate):
             torch.testing.assert_close(p, q, rtol=1e-14, atol=1e-14)
 
+    parameter = torch.nn.Parameter(torch.zeros(2, dtype=torch.float32))
+    workspace = GradientWorkspace([parameter])
+    workspace.attach([torch.tensor([3e21, 4e21], dtype=parameter.dtype)])
+    norm = workspace.clip(10.0)
+    torch.testing.assert_close(norm, norm.new_tensor(5e21), rtol=1e-7, atol=0)
+    torch.testing.assert_close(parameter.grad, parameter.new_tensor([6.0, 8.0]))
+
 
 def test_refuse_ordinary_autograd_loss():
     import pytest
@@ -977,3 +1108,90 @@ def test_explicit_loss_requires_matching_parameter_order():
         torch.testing.assert_close(p.grad, g)
     with pytest.raises(ValueError, match="parameter order"):
         GradientWorkspace([b, a]).attach_loss(loss)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_element_index_force_loss(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA execution")
+    from equivariantx.models.tace.tace_oam_xl_v2.ordered_reductions import (
+        replace_index_put,
+    )
+
+    torch.manual_seed(21)
+    torch.set_num_threads(4)
+    layers, groups, width, edges = 3, 11, 16, 271
+    source = torch.randint(groups, (edges,), device="cuda")
+    target = torch.randint(groups, (edges,), device="cuda")
+    shapes = [
+        (edges, 3),
+        (layers, groups, width),
+        (layers, groups, width),
+        (layers, 1, width),
+        (layers, width),
+    ]
+    values = [
+        (0.1 * torch.randn(s, device="cuda", dtype=dtype)).requires_grad_()
+        for s in shapes
+    ]
+
+    def compute(position, left, right, radial, output):
+        length2 = position.square().sum(-1, keepdim=True)
+        h = length2[None] * radial + left[:, source] + right[:, target]
+        energy = (torch.nn.functional.silu(h) * output[:, None]).sum()
+        force = -torch.autograd.grad(energy, position, create_graph=True)[0]
+        loss = energy.square() * 0.01 + (force - 0.05).square().sum()
+        gradients = torch.autograd.grad(loss, (left, right, radial, output))
+        return energy, force, *gradients
+
+    with torch.enable_grad():
+        graph = make_fx(compute)(*values)
+    with torch.no_grad():
+        expected = graph(*values)
+        assert replace_index_put(graph.graph) == 2
+        graph.recompile()
+        result = graph(*values)
+        tolerance = 3e-6 if dtype == torch.float32 else 2e-13
+        for actual, reference in zip(result, expected):
+            torch.testing.assert_close(
+                actual, reference, rtol=tolerance, atol=tolerance
+            )
+        compiled = torch.compile(graph, fullgraph=True)
+        result = compiled(*values)
+        for actual, reference in zip(result, expected):
+            torch.testing.assert_close(
+                actual, reference, rtol=tolerance, atol=tolerance
+            )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_element_index_replay_and_empty(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA execution")
+    from equivariantx.models.tace.tace_oam_xl_v2.ordered_reductions import grouped_sum
+
+    torch.manual_seed(22)
+    base = torch.randn((2, 7, 13), device="cuda", dtype=dtype)
+    index = torch.randint(7, (37,), device="cuda")
+    value = torch.randn((2, 37, 13), device="cuda", dtype=dtype)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        grouped_sum(base, index, value)
+        capture = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(capture):
+            result = grouped_sum(base, index, value)
+    torch.cuda.current_stream().wait_stream(stream)
+    for _ in range(3):
+        index.random_(0, 7)
+        value.normal_()
+        capture.replay()
+        expected = torch.ops.aten.index_put.default(base, [None, index], value, True)
+        torch.testing.assert_close(result, expected)
+    negative = index - base.shape[1]
+    torch.testing.assert_close(
+        grouped_sum(base, negative, value),
+        torch.ops.aten.index_put.default(base, [None, negative], value, True),
+    )
+    empty = grouped_sum(base, index[:0], value[:, :0])
+    torch.testing.assert_close(empty, base, rtol=0, atol=0)

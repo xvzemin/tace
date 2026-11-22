@@ -216,17 +216,11 @@ def train(
     datamodule,
     target_property,
     embedding_property: list[str] = [],
+    *,
+    module_type: type[LightningWrapperModel] = LightningWrapperModel,
 ):
     resolve_precision(cfg, training=True).apply()
-
-    # resume_ckpt = cfg.get("resume_from_model", None)
-    # if resume_ckpt:
-    #     ckpt_path = Path(resume_ckpt)
-    #     if not ckpt_path.is_file():
-    #         raise FileNotFoundError(f"Checkpoint not exists: {ckpt_path}")
-    #     _maybe_start_wsd_decay_on_resume(cfg, resume_ckpt)
-
-    lit_model = LightningWrapperModel(
+    lit_model = module_type(
         cfg,
         model,
         target_property,
@@ -234,8 +228,13 @@ def train(
         statistics,
     )
 
-    # Trainer
-    trainer = build_trainer(cfg)
+    # In manual optimization the module applies the configured clipping itself.
+    trainer_cfg = (
+        cfg
+        if lit_model.automatic_optimization
+        else dict(cfg, trainer=dict(cfg["trainer"], gradient_clip_val=None))
+    )
+    trainer = build_trainer(trainer_cfg)
 
     # TRAIN AND VALID
     resume_ckpt = cfg.get("resume_from_model", None)
@@ -244,18 +243,10 @@ def train(
         if not ckpt_path.is_file():
             raise FileNotFoundError(f"Checkpoint not exists: {ckpt_path}")
         logging.info(f"Resume Training from checkpoint: {resume_ckpt}")
-        trainer.fit(
-            lit_model,
-            datamodule=datamodule,
-            ckpt_path=resume_ckpt,
-        )
     else:
         logging.debug(lit_model)
         log_parameters(model)
-        trainer.fit(
-            lit_model,
-            datamodule=datamodule,
-        )
+    trainer.fit(lit_model, datamodule=datamodule, ckpt_path=resume_ckpt)
 
     # TEST
     if cfg["dataset"].get("test_files", None):

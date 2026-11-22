@@ -295,6 +295,8 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
     even_scalar_act, odd_scalar_act, tensor_act : torch.nn.Module
         Even-scalar, odd-scalar and gate activations. An odd-scalar activation
         of ``None`` gates odd scalars instead.
+    use_bias : bool
+        Add biases to invariant scalar outputs of the local linear maps.
 
     Examples
     --------
@@ -318,6 +320,7 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
         even_scalar_act: torch.nn.Module,
         odd_scalar_act: Optional[torch.nn.Module],
         tensor_act: torch.nn.Module,
+        use_bias: bool = True,
     ) -> None:
         super().__init__()
         self.irreps_in = o3.Irreps(irreps_in)
@@ -426,13 +429,13 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
         self.linear_up = o2.Linear(
             self.local_irreps_in,
             self.nonlinearity.irreps_in,
-            biases=True,
+            biases=use_bias,
             backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.linear_down = o2.Linear(
             self.nonlinearity.irreps_out,
             self.local_irreps_out,
-            biases=True,
+            biases=use_bias,
             backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
         )
         self.weight_numel = self.local_irreps_in.num_irreps
@@ -733,6 +736,7 @@ class O2MagneticInteraction(UvO2Interaction):
             self.magnetic_edge_irreps_out,
             num_channel=self.num_channel,
             mmax=self.mmax,
+            use_bias=self.use_bias,
             even_scalar_act=ACTIVATION[
                 (
                     self.scalar_act[0]
