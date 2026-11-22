@@ -13,7 +13,7 @@ from ...ops.precision import validate_module_precision
 from ...ops.torch.conv.uu_o2 import convolution as torch_kernel
 from ...ops.torch.o3.cgtp.convolution import angular_groups, directional_table
 from ...utils.autograd import forward_ad_active
-from ...utils.metadata import parse_metadata
+from ...utils.metadata import numeric_rows, parse_metadata
 from ..o2_o3.convolution import O2O3TensorProductConv
 
 
@@ -38,6 +38,9 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     radial_mode : {"last", "full"}, optional
         Retain hidden MLP activations or recompute the complete radial network.
         Defaults to ``"last"``; see :class:`O2O3TensorProductConv`.
+    with_transverse : bool, optional
+        Build the direction-only coupling tables. If False, directions are
+        evaluated with packed Wigner matrices.
 
     Examples
     --------
@@ -57,7 +60,14 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
     """
 
     def __init__(
-        self, frame_in, linear, frame_out, *, backend=None, radial_mode="last"
+        self,
+        frame_in,
+        linear,
+        frame_out,
+        *,
+        backend=None,
+        radial_mode="last",
+        with_transverse=True,
     ):
         backend = resolve_backend(backend)
         torch.nn.Module.__init__(self)
@@ -119,15 +129,7 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                     scale = ins.path_weight * math.sqrt(
                         dim_out / (2 * min(l_out, frame_out.mmax) + 1)
                     )
-                    cg = torch.zeros(dim, dim_out, dtype=torch.float64, device="cpu")
-                    for (a, sign_in), (b, sign_out) in zip(rows_in, rows_out):
-                        cg[a, b] = scale * sign_in * sign_out
                     index = len(self.path_data)
-                    self.register_buffer(
-                        f"cg_{index}",
-                        cg.to(torch.get_default_dtype()),
-                        persistent=False,
-                    )
                     if l_in == l_out == 0:
                         scalar_paths.append(index)
                     self.path_data.append(
@@ -148,7 +150,13 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                         )
                     )
                     self.sparse_paths.append(
-                        tuple((a, b, float(cg[a, b])) for a, b in cg.nonzero().tolist())
+                        tuple(
+                            sorted(
+                                (a, b, scale * pin * pout)
+                                for (a, pin), (b, pout) in zip(rows_in, rows_out)
+                                if scale
+                            )
+                        )
                     )
             offset += math.prod(ins.path_shape)
         self.has_unweighted = False
@@ -158,10 +166,17 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
             False,
             tuple(self.sparse_paths),
         )
-        self.kernel_metadata = repr(metadata)
+        self.kernel_metadata = numeric_rows(*metadata, rows_at=0)
         # These weights are independent at each order, not CG slices of a
         # single spherical harmonic. Use the general angular-generator rule.
-        self.direction_metadata = repr((*metadata, tuple(scalar_paths)))
+        self.direction_metadata = numeric_rows(
+            *metadata, tuple(scalar_paths), rows_at=0
+        )
+        self.with_transverse = with_transverse
+        if not with_transverse:
+            self.weight_transforms = self.angular_groups = ()
+            self.projection_basis = None
+            return
 
         # Pole CG slices form an orthogonal basis for order-preserving maps.
         # Transform the radial projection, not the edge features or their weights.
@@ -307,6 +322,8 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
 
     def weight_basis(self):
         """Return the fixed map from local path weights to directional weights."""
+        if not self.with_transverse:
+            raise ValueError("Directional weights require with_transverse=True.")
         _, (inputs, outputs), entries = parse_metadata(self.weight_metadata)
         basis = torch.zeros(outputs, inputs, dtype=torch.float64, device="cpu")
         for (i, j), coefficient in entries:
@@ -323,12 +340,6 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         for index, (_, values) in enumerate(self.weight_transforms):
             buffer = getattr(self, f"weight_transform_{index}")
             buffer.copy_(torch.tensor(values, dtype=buffer.dtype, device=buffer.device))
-        for index, entries in enumerate(self.sparse_paths):
-            buffer = getattr(self, f"cg_{index}")
-            value = torch.zeros(buffer.shape, dtype=torch.float64, device="cpu")
-            for a, b, coefficient in entries:
-                value[a, b] = coefficient
-            buffer.copy_(value.to(buffer))
         for name, _, _, _, dx, dy, _, paths in self.angular_groups:
             buffer = getattr(self, name)
             if buffer.dtype == torch.float64:
@@ -336,8 +347,21 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
                 buffer.copy_(directional_table(dx, dy, sizes))
         return self
 
+    def aligned_path(self, index, features):
+        """Map one aligned order without storing a dense angular matrix."""
+        dim = self.path_data[index][1][5]
+        columns = {
+            b: features[:, a] * scale for a, b, scale in self.sparse_paths[index]
+        }
+        if len(columns) == dim:
+            return torch.stack([columns[i] for i in range(dim)], dim=1)
+        zero = features.new_zeros((features.shape[0], features.shape[-1]))
+        return torch.stack([columns.get(i, zero) for i in range(dim)], dim=1)
+
     def transform_weights(self, weights):
         """Express local order weights in the directional coupling basis."""
+        if not self.with_transverse:
+            raise ValueError("Directional weights require with_transverse=True.")
         if self.backend == "cuda" and weights.is_cuda:
             from ...ops.cuda.conv.uu_o2 import convolution as cuda_kernel
 
@@ -403,6 +427,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
         radial_network=None,
     ):
         """Evaluate local order weights without constructing alignment matrices."""
+        if not self.with_transverse:
+            raise ValueError(
+                "Direction-only contractions require with_transverse=True."
+            )
         if vectors.dtype != features.dtype:
             return self.forward_wigner(
                 features,
@@ -564,6 +592,10 @@ class UuO2TensorProductConv(O2O3TensorProductConv):
 
             radial = radial_features(radial_network, radial, edge_index, projection)
             radial_network = None
+        if vectors is not None and not self.with_transverse:
+            method = "generator" if self.frame.lmax >= 4 else "auto"
+            wigner = self.frame.forward_packed(vectors, method=method).to(features)
+            vectors = None
         if vectors is not None:
             return self.forward_transverse(
                 features,

@@ -149,6 +149,66 @@ def packed_wigner(vectors, degree, coefficients):
     return torch.ops.eqx.packed_wigner(vectors, degree, coefficients)
 
 
+@torch.library.custom_op("eqx::generator_wigner", mutates_args=(), device_types="cuda")
+def generator_wigner(
+    degree: int, mode: int, first: torch.Tensor, second: torch.Tensor
+) -> torch.Tensor:
+    """Evaluate packed rotation blocks, a tangent action or its four contractions."""
+    from .cuda.wigner_generator import evaluate
+
+    return evaluate(degree, mode, first, second)
+
+
+@generator_wigner.register_fake
+def generator_output(degree, mode, first, second):
+    width = (degree + 1) * (2 * degree + 1) * (2 * degree + 3) // 3
+    return first.new_empty((first.shape[0], 4 if mode == 2 else width))
+
+
+def generator_context(ctx, inputs, output):
+    degree, mode, first, second = inputs
+    ctx.degree, ctx.mode = degree, mode
+    ctx.save_for_backward(first, output if mode == 0 else second)
+
+
+def generator_backward(ctx, gradient):
+    degree = ctx.degree
+    first, second = ctx.saved_tensors
+    op = torch.ops.eqx.generator_wigner.default
+
+    def conjugate(q):
+        return torch.cat((q[:, :1], -q[:, 1:]), -1)
+
+    if ctx.mode == 0:
+        # dD_l(q) = [l Re(u) I + Im(u).J_l] D_l(q), u=2 dq q*/|q|².
+        rate = op(degree, 2, second, gradient)
+        a, u = rate[:, :1], rate[:, 1:]
+        b, v = first[:, :1], first[:, 1:]
+        dq = torch.cat(
+            (a * b - (u * v).sum(-1, True), a * v + b * u + torch.linalg.cross(u, v)),
+            -1,
+        )
+        return None, None, dq * (2 / first.square().sum(-1, True)), None
+    if ctx.mode == 1:
+        return (
+            None,
+            None,
+            op(degree, 1, gradient, conjugate(second))
+            if ctx.needs_input_grad[2]
+            else None,
+            op(degree, 2, first, gradient) if ctx.needs_input_grad[3] else None,
+        )
+    return (
+        None,
+        None,
+        op(degree, 1, second, conjugate(gradient)) if ctx.needs_input_grad[2] else None,
+        op(degree, 1, first, gradient) if ctx.needs_input_grad[3] else None,
+    )
+
+
+generator_wigner.register_autograd(generator_backward, setup_context=generator_context)
+
+
 def wigner_D(frame, vectors, *, backend="torch", method=None):
     """Return packed Wigner matrices with fused CUDA derivatives.
 
@@ -160,10 +220,12 @@ def wigner_D(frame, vectors, *, backend="torch", method=None):
         Frame directions with shape ``(edges, 3)``.
     backend : {"cuda", "torch"}, optional
         Execution provider. Defaults to Torch on either device.
-    method : {"auto", "quaternion", "recursive"}, optional
+    method : {"auto", "quaternion", "recursive", "generator"}, optional
         Overrides the frame's method. On CUDA, ``"auto"`` uses direct
         quaternion polynomials. ``"recursive"`` retains the sparse degree
-        contractions. Both CUDA methods support higher derivatives.
+        contractions. ``"generator"`` differentiates packed degree matrices
+        with the rotation generators on CUDA. All methods support higher
+        derivatives.
 
     Returns
     -------
@@ -175,8 +237,13 @@ def wigner_D(frame, vectors, *, backend="torch", method=None):
         raise ValueError("backend must be torch or cuda.")
     validate_module_precision(frame, (vectors,))
     method = getattr(frame, "method", "auto") if method is None else method
+    if method == "generator":
+        if backend == "cuda" and vectors.is_cuda and not forward_ad_active():
+            q = alignment_cuda(repr("quaternion"), [vectors])[0]
+            return generator_wigner(frame.lmax, 0, q, q.new_empty(0))
+        method = "recursive"
     if method not in ("auto", "quaternion", "recursive"):
-        raise ValueError("method must be auto, quaternion or recursive.")
+        raise ValueError("method must be auto, quaternion, recursive or generator.")
     if backend == "torch" and config.TORCH_REFERENCE:
         method = "recursive"
     if backend == "cuda" and vectors.is_cuda:

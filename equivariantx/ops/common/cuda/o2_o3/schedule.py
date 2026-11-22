@@ -104,7 +104,7 @@ def register_estimate(paths, operations, itemsize):
     """Estimate live 32-bit words per channel, including rotation temporaries."""
     xp, yp, messages, _, q, accumulators, *_ = operations
     inputs, outputs = rotation_groups(paths)
-    dim = sum(paths[group[0]][0][4] for group in inputs)
+    dim = sum(len({a for i in group for a, _, _ in paths[i][1]}) for group in inputs)
     dim_out = max(sum(len(paths[i][1]) for i in group) for group in outputs)
     live = dim * (len(xp) + len(accumulators))
     live += dim_out * (len(yp) + len(messages))

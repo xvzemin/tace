@@ -126,6 +126,16 @@ class MultiCutoffRadial(torch.nn.Module):
         if len(set(outputs)) != 1:
             raise ValueError("Radial networks must have the same output width.")
 
+    @staticmethod
+    def relative_envelopes(envelopes):
+        """Factor the outer cutoff out of nested envelopes of shape (edges, scales)."""
+        outer = envelopes[:, -1:]
+        inner = envelopes[:, :-1]
+        # Zero inner branches have no support near the outer cutoff. Avoid
+        # an intermediate reciprocal there, including in force derivatives.
+        denominator = torch.where(inner != 0, outer, 1.0)
+        return torch.cat((inner / denominator, torch.ones_like(outer)), dim=1)
+
     def _prepare_inputs(self, features, envelopes, edge_index, edge_pairs):
         if (
             len(features) != len(self.networks)

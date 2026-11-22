@@ -2,7 +2,7 @@
 
 import torch
 
-from equivariantx.utils.metadata import channel_product_layout
+from equivariantx.utils.metadata import channel_product_layout, numeric_rows
 
 
 def ir_mul_order(irreps):
@@ -36,22 +36,31 @@ def channel_contiguous_metadata(metadata, orders, channels):
     ):
         raise ValueError("Layout orders do not match the tensor-product dimensions")
     inverse = [order.argsort().tolist() for order in orders]
+    locations = [dict() for _ in dimensions]
+
+    def component(role, index, stride):
+        if index < 0:
+            return -1
+        key = (index, stride)
+        found = locations[role].get(key)
+        if found is None:
+            table = inverse[role]
+            base = table[index]
+            if base % channels or any(
+                table[index + c * stride] != base + c for c in range(channels)
+            ):
+                raise ValueError("The requested layout is not channel contiguous")
+            found = locations[role][key] = base // channels
+        return found
+
     converted = []
     for indices, coefficient, width, strides in rows:
         if width != channels:
             raise ValueError("OAM node products require a uniform channel count")
-        bases = []
-        for table, index, stride in zip(inverse, indices, strides):
-            if index < 0:
-                bases.append(-1)
-                continue
-            base = table[index]
-            if base % channels or any(
-                table[index + c * stride] != base + c for c in range(width)
-            ):
-                raise ValueError("The requested layout is not channel contiguous")
-            bases.append(base // channels)
-        converted.append((tuple(bases), coefficient))
-    return repr(
-        (channels, tuple(dim // channels for dim in dimensions), tuple(converted))
+        bases = tuple(
+            component(k, i, s) for k, (i, s) in enumerate(zip(indices, strides))
+        )
+        converted.append((bases, coefficient))
+    return numeric_rows(
+        channels, tuple(dim // channels for dim in dimensions), tuple(converted)
     )

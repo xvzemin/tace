@@ -2,12 +2,54 @@
 
 from collections import Counter, defaultdict
 from functools import lru_cache
+from math import gcd
 
 import torch
 
 from ....utils.metadata import column_schedule, parse_metadata
 
 CSR_WARPS_MIN_DEGREE = 16
+INDEX_FRAME_ROWS = 64
+
+
+@lru_cache(maxsize=128)
+def frame_rows(layout, role):
+    """Index wide signed frame maps in units of contiguous channels."""
+    ni, no, _, entries = parse_metadata(layout)
+    count = sum(len(rows) for *_, rows in entries)
+    if role not in (0, 2) or count < INDEX_FRAME_ROWS:
+        return None
+    width = ni if role == 0 else no
+    unit = gcd(*(mul for _, mul, *_ in entries))
+    if not unit or width % unit or width // unit > 8 * count:
+        return None
+    groups = [None] * (width // unit)
+    inner = []
+    for start, mul, dim, offset, rows in entries:
+        if start % unit or any(
+            local % unit or sign not in (-1, 1) for local, _, sign in rows
+        ):
+            return None
+        if role == 2:
+            for local, row, sign in rows:
+                for c in range(0, mul, unit):
+                    slot = (local + c) // unit
+                    if groups[slot] is not None:
+                        return None
+                    groups[slot] = (start + c, mul, dim, offset + row * dim, sign)
+        else:
+            begin = len(inner)
+            for local, row, sign in rows:
+                inner.extend((offset + row * dim, local, sign))
+            for k in range(dim):
+                for c in range(0, mul, unit):
+                    slot = (start + k * mul + c) // unit
+                    if groups[slot] is not None:
+                        return None
+                    groups[slot] = (k, c, begin, len(inner))
+    if any(group is None for group in groups):
+        return None
+    return unit, tuple(v for group in groups for v in group), tuple(inner)
 
 
 @lru_cache(maxsize=128)
@@ -226,6 +268,23 @@ def source(
             return f"scalar sum=0; for(int k={table(ptr)}[i];k<{table(ptr)}[i+1];++k) sum+={get(args[0], f'{table(indices)}[k]')}; return sum;"
         if op == "frame":
             layout, role = data
+            indices = frame_rows(layout, role)
+            if indices is not None:
+                unit, groups, rows = indices
+                if role == 2:
+                    return f"""
+                    const int *d={table(groups)}+5*(i/{unit});
+                    int c=d[0]+i%{unit}; scalar sum=0;
+                    for(int k=0;k<d[2];++k)
+                        sum+={get(args[1], "d[3]+k")}*{get(args[0], "c+k*d[1]")};
+                    return scalar(d[4])*sum;"""
+                return f"""
+                const int *d={table(groups)}+4*(i/{unit}), *rows={table(rows)};
+                int c=d[1]+i%{unit}; scalar sum=0;
+                for(int j=d[2];j<d[3];j+=3)
+                    sum+=scalar(rows[j+2])*{get(args[1], "rows[j]+d[0]")}
+                         *{get(args[2], "rows[j+1]+c")};
+                return sum;"""
             _, _, _, entries = parse_metadata(layout)
             cases = []
             if role == 2:

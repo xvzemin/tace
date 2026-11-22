@@ -1,5 +1,6 @@
 """Cached operator specifications."""
 
+import json
 import zlib
 from ast import literal_eval
 from dataclasses import dataclass
@@ -42,9 +43,24 @@ def static_dimensions(tensor, dimensions=None):
 @torch.compiler.assume_constant_result
 def parse_metadata(metadata: str):
     """Decode an immutable, tensor-free specification once at trace time."""
+    if metadata.startswith("j:"):
+
+        def immutable(value):
+            return tuple(map(immutable, value)) if isinstance(value, list) else value
+
+        return immutable(json.loads(zlib.decompress(bytes.fromhex(metadata[2:]))))
     if metadata.startswith("z:"):
         metadata = zlib.decompress(bytes.fromhex(metadata[2:])).decode()
     return literal_eval(metadata)
+
+
+def numeric_rows(*description, rows_at=-1):
+    """Encode a contraction specification with its rows in field ``rows_at``."""
+    if len(description[rows_at]) < 4096:
+        return compact_metadata(repr(description))
+    # Decode large coefficient tables without building a Python syntax tree.
+    payload = json.dumps(description, separators=(",", ":"), allow_nan=False).encode()
+    return "j:" + zlib.compress(payload, level=1).hex()
 
 
 @lru_cache(maxsize=256)
@@ -68,7 +84,7 @@ def compact_metadata(metadata: str):
     >>> parse_metadata(compact_metadata(spec)) == parse_metadata(spec)
     True
     """
-    if len(metadata) < 4096 or metadata.startswith("z:"):
+    if len(metadata) < 4096 or metadata.startswith(("z:", "j:")):
         return metadata
     return "z:" + zlib.compress(metadata.encode()).hex()
 

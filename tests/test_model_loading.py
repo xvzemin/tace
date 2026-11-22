@@ -877,8 +877,8 @@ def test_multi_cutoff_scatter_weights(embedding, double_precision, monkeypatch):
 def test_multi_cutoff_support_and_envelopes(double_precision):
     model = make_model(edge_embedding="element2", multi_cutoff=[2, 4]).readout_fn
     config = deepcopy(model.model_config)
-    config["atomic_basis"]["type"] = ["cgtp", "uv_o2"]
-    with pytest.raises(ValueError, match="multi_cutoff supports only"):
+    config["atomic_basis"]["type"] = ["cgtp", "so2"]
+    with pytest.raises(ValueError, match="multi_cutoff requires"):
         SphericalTACE(**config)
     rep = model.representation
     layer = rep.interactions[0]
@@ -1319,15 +1319,7 @@ def test_cartesian_conversion(
     ):
         assert type(original) is type(converted)
     if node_embedding == "linear":
-
-        def no_spherical_harmonics(*args):
-            raise AssertionError(
-                "Cartesian convolution must evaluate Cartesian harmonics."
-            )
-
-        monkeypatch.setattr(
-            representation.o3_angular_basis, "forward", no_spherical_harmonics
-        )
+        assert representation.o3_angular_basis is None
     data = dict(
         positions=torch.tensor(
             [
@@ -1667,12 +1659,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
 
         monkeypatch.setattr(o2.WignerD, "forward", no_alignment)
 
-        def no_spherical_harmonics(*args):
-            raise AssertionError("o2_cgtp should not evaluate shared edge harmonics")
-
-        monkeypatch.setattr(
-            representation.o3_angular_basis, "forward", no_spherical_harmonics
-        )
+        assert representation.o3_angular_basis is None
 
     data = dict(
         positions=torch.tensor(

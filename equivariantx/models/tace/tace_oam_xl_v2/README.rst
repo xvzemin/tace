@@ -4,6 +4,12 @@ TACE-OAM-XL-v2
 Whole-model E/F/S training schedule for the TACE OAM architecture. Architecture,
 parameter names, live weights and the caller's loss are preserved.
 
+The source model may use ``cgtp``, ``uu_o2`` or ``uv_o2`` interactions.
+Local interactions use ``radial_basis.apply_cutoff=false`` and the source
+model's ``mmax``. The training entry is ``tace-train-oamv2 -cn omat.yaml``.
+For purely local CUDA interactions, ``from_tace(..., radial_mode="stream")``
+applies the final radial projection inside the convolution's edge tiles.
+
 .. code-block:: python
 
    from equivariantx.models.tace.tace_oam_xl_v2 import TACEOAMXLV2

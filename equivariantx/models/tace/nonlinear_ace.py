@@ -8,6 +8,7 @@ from e3nn import o3
 from ...co3 import Projector
 from ...mbe.ace.ictd_symmetric_contraction import coupling_entries
 from ...ops.common.edge import evaluate
+from ...utils.metadata import numeric_rows
 from ...utils.program import Program, activate
 
 
@@ -25,6 +26,14 @@ def angular_layout(program, value, irreps, inverse=False):
         blocks.append(program.transpose(block, rows, columns))
         offset += mul * ir.dim
     return program.concatenate(blocks)
+
+
+@lru_cache(maxsize=1024)
+def spherical_rows(l1, l2, l3):
+    """Return nonzero real Wigner coefficients before path scaling."""
+    cg = o3.wigner_3j(l1, l2, l3, dtype=torch.float64, device="cpu")
+    a, b, c = cg.nonzero(as_tuple=True)
+    return tuple(zip(a.tolist(), b.tolist(), c.tolist(), cg[a, b, c].tolist()))
 
 
 def product_metadata(product):
@@ -49,18 +58,10 @@ def product_metadata(product):
         if cartesian:
             entries = coupling_entries(product, index)
         else:
-            coefficients = (
-                o3.wigner_3j(
-                    *(entries[i].ir.l for entries, i in zip(irreps, indices)),
-                    dtype=torch.float64,
-                    device="cpu",
-                )
-                * path.path_weight
-            )
-            entries = [
-                (*row, float(coefficients[tuple(row)]))
-                for row in coefficients.nonzero().tolist()
-            ]
+            if path.path_weight == 0:
+                continue
+            rows = spherical_rows(*(irreps[k][i].ir.l for k, i in enumerate(indices)))
+            entries = ((a, b, c, value * path.path_weight) for a, b, c, value in rows)
         starts = tuple(offsets[k][i] for k, i in enumerate(indices))
         paths.extend(
             ((starts[0] + a, starts[1] + b, starts[2] + c), coefficient)
@@ -124,7 +125,7 @@ def build_product(product):
         )
         for indices, coefficient in paths
     )
-    return repr((0, tuple(entries.dim for entries in irreps), rows))
+    return numeric_rows(0, tuple(entries.dim for entries in irreps), rows)
 
 
 def build(module):

@@ -1,9 +1,27 @@
 """CUDA source generation for aligned O(3) tensor-product contractions."""
 
 from functools import lru_cache
+from itertools import groupby
 
 from ..codegen import HEADER
 from .schedule import rotation_groups
+
+
+def row_storage(groups):
+    """Pack contiguous runs of referenced Wigner rows into a shared-memory tile."""
+    offsets, runs = {}, []
+    count = 0
+    for key, rows in groups.items():
+        operand, edge, offset, width = key
+        for _, run in groupby(enumerate(sorted(rows)), lambda item: item[1] - item[0]):
+            orders = [row for _, row in run]
+            runs.append(
+                (operand, edge, offset + orders[0] * width, count, len(orders) * width)
+            )
+            for row in orders:
+                offsets[(*key, row)] = count
+                count += width
+    return offsets, runs, count
 
 
 @lru_cache(maxsize=512)
@@ -18,6 +36,9 @@ def convolution_source(
     barrier = "__syncthreads();" if block_channels else "__syncwarp();"
     input_groups, output_groups = rotation_groups([(path, cg) for _, path, cg in paths])
     input_paths = [paths[group[0]][1] for group in input_groups]
+    input_rows = tuple(
+        {a for j in group for a, _, _ in paths[j][2]} for group in input_groups
+    )
     input_index = {j: i for i, group in enumerate(input_groups) for j in group}
     support = [{b: (a, c) for a, b, c in cg} for _, _, cg in paths]
     destinations = {}
@@ -26,17 +47,20 @@ def convolution_source(
     merged = {j for group in destinations.values() if len(group) > 1 for j in group}
     # Wide channel tiles share one matrix across the block's warps. Narrow
     # tiles keep independent edges in each warp without block synchronization.
-    matrices = {}
-    for path in input_paths:
+    matrix_rows = {}
+    for path, rows in zip(input_paths, input_rows):
         if path[6] < 0:
             continue
         for pd in (*[pd for _, pd in xp], *[pd for pd, *_ in gx]):
-            matrices[pd, "ei", path[6], path[4]] = None
+            matrix_rows.setdefault((pd, "ei", path[6], path[4]), set()).update(rows)
     for group in destinations.values():
         path = paths[group[0]][1]
         if len(group) > 1 and path[7] >= 0:
             for pd, *_ in gy:
-                matrices[pd, "eo", path[7], path[5]] = None
+                rows = matrix_rows.setdefault((pd, "eo", path[7], path[5]), set())
+                for j in group:
+                    rows.update(support[j])
+    matrices, matrix_runs, matrix_size = row_storage(matrix_rows)
     # C has one nonzero per supported order. Fold it into the output Wigner
     # rows once per tile, then reuse those rows across channels and transposes.
     coupled_offsets, coupled_entries = {}, {}
@@ -54,31 +78,32 @@ def convolution_source(
                     coupled_entries[key] = coupled_size
                     coupled_size += path[5]
                 coupled_offsets[pd, j, b] = coupled_entries[key]
-    gradients = {}
-    gradient_size = 0
+    gradient_rows = {}
     for entries, shared_edge, blocks in (
-        (gdo, shared[2], [(path[7], path[5]) for _, path, _ in paths]),
-        (gdi, shared[1], [(path[6], path[4]) for path in input_paths]),
+        (
+            gdo,
+            shared[2],
+            ((p[7], p[5], support[j]) for j, (_, p, _) in enumerate(paths)),
+        ),
+        (
+            gdi,
+            shared[1],
+            ((p[6], p[4], rows) for p, rows in zip(input_paths, input_rows)),
+        ),
     ):
-        for offset, size in blocks:
-            for _, g, *_ in entries:
-                key = g, "0" if shared_edge else "edge", offset, size
-                if key not in gradients:
-                    gradients[key] = gradient_size
-                    gradient_size += size**2
+        for offset, size, rows in blocks:
+            if offset >= 0:
+                for _, g, *_ in entries:
+                    key = g, "0" if shared_edge else "edge", offset, size
+                    gradient_rows.setdefault(key, set()).update(rows)
+    gradients, gradient_runs, gradient_size = row_storage(gradient_rows)
     itemsize = 4 if dtype == "float" else 8
     if gradient_size * 4 * itemsize > 16384:
         gradients, gradient_size = {}, 0
-    matrix_size = sum(size * size for _, _, _, size in matrices)
     coupled_staging = (coupled_size + gradient_size) * 4 * itemsize <= 24576
     staging = (
         matrix_size + (coupled_size if coupled_staging else 0) + gradient_size
     ) * 4 * itemsize <= 24576
-    if staging:
-        offset = 0
-        for key in matrices:
-            matrices[key] = offset
-            offset += key[3] ** 2
     args = [f"const T* __restrict__ p{i}" for i in range(inputs)]
     args += [f"T* __restrict__ g{i}" for i in range(outputs)]
     args += [
@@ -164,7 +189,7 @@ def convolution_source(
                 ]
                 if not terms:
                     continue
-                index = b * size + a if transpose else a * size + b
+                row, col = (b, a) if transpose else (a, b)
                 coefficients = {}
                 for name, value in terms:
                     if offset < 0:
@@ -175,16 +200,16 @@ def convolution_source(
                         )
                     elif couplings is None:
                         coefficient = (
-                            f"matrix[{matrices[p, e, offset, size] + index}]"
+                            f"matrix[{matrices[p, e, offset, size, row] + col}]"
                             if staging
-                            else f"p{p}[{e} * {ddim} + {offset + index}]"
+                            else f"p{p}[{e} * {ddim} + {offset + row * size + col}]"
                         )
                     else:
-                        j, order = couplings[name], b if transpose else a
+                        j, order = couplings[name], row
                         coefficient = (
-                            f"coupled_matrix[{coupled_offsets[p, j, order] + (a if transpose else b)}]"
+                            f"coupled_matrix[{coupled_offsets[p, j, order] + col}]"
                             if coupled_staging
-                            else f"(T({support[j][order][1]:.17g}) * p{p}[{e} * {ddim} + {offset + index}])"
+                            else f"(T({support[j][order][1]:.17g}) * p{p}[{e} * {ddim} + {offset + row * size + col}])"
                         )
                     coefficients.setdefault(coefficient, []).append((name, value))
                 for coefficient, entries in coefficients.items():
@@ -247,9 +272,9 @@ def convolution_source(
     thread_start = "threadIdx.x" if block_channels else "lane"
     thread_stride = "blockDim.x" if block_channels else "32"
     if staging and matrix_size:
-        for (pd, e, offset, size), location in matrices.items():
+        for pd, e, offset, location, count in matrix_runs:
             emit(
-                f"for (int k = {thread_start}; k < {size * size}; k += {thread_stride}) "
+                f"for (int k = {thread_start}; k < {count}; k += {thread_stride}) "
                 f"matrix[{location} + k] = p{pd}[{e} * {ddim} + {offset} + k];"
             )
     if coupled_staging and coupled_size:
@@ -262,7 +287,7 @@ def convolution_source(
         emit(barrier)
     for k, path in enumerate(input_paths):
         start, dim, dstart = path[0], path[4], path[6]
-        rows = {a for j in input_groups[k] for a, _, _ in paths[j][2]}
+        rows = input_rows[k]
         for i, (px, pd) in enumerate(xp):
             vector(f"x{k}_{i}_", px, "src", dim, start, (xdim, mul), "channel")
             rotated(
@@ -273,26 +298,34 @@ def convolution_source(
                 dim,
             )
         for i, _ in enumerate(accumulators):
-            for a in range(dim):
+            for a in sorted(rows):
                 emit(f"T dx{k}_{i}_{a} = 0;")
 
     for group in output_groups:
         odim, ostart = paths[group[0]][1][5], paths[group[0]][1][7]
+        output_paths = {}
+        for j in group:
+            output_paths.setdefault(paths[j][1][1], []).append(j)
+        readers = {j: indices[0] for indices in output_paths.values() for j in indices}
         emit("{")
         for i, (py, pd) in enumerate(yp):
-            for j in group:
+            for start, indices in output_paths.items():
                 vector(
-                    f"y{j}_{i}_",
+                    f"y{indices[0]}_{i}_",
                     py,
                     "dst",
                     odim,
-                    paths[j][1][1],
+                    start,
                     (ydim, mul),
                     "channel",
                 )
             rotated(
                 [
-                    (f"ly{j}_{i}_", [f"y{j}_{i}_{a}" for a in range(odim)], support[j])
+                    (
+                        f"ly{j}_{i}_",
+                        [f"y{readers[j]}_{i}_{a}" for a in range(odim)],
+                        support[j],
+                    )
                     for j in group
                 ],
                 pd,
@@ -324,9 +357,6 @@ def convolution_source(
                     emit(f"T cmsg{j}_{t}_{b} = T({c:.17g}) * msg{j}_{t}_{b};")
 
         for i, (pd, g, *terms) in enumerate(gy):
-            output_paths = {}
-            for j in group:
-                output_paths.setdefault(paths[j][1][1], []).append(j)
             names = {
                 f"out{indices[0]}_{i}_": indices[0] for indices in output_paths.values()
             }
@@ -399,13 +429,15 @@ def convolution_source(
                     consume,
                 )
         for i, (py, g, *terms) in enumerate(gdo):
-            for j in group:
+            if ostart < 0:
+                continue
+            for start, indices in output_paths.items():
                 vector(
-                    f"oy{j}_{i}_",
+                    f"oy{indices[0]}_{i}_",
                     py,
                     "dst",
                     odim,
-                    paths[j][1][1],
+                    start,
                     (ydim, mul),
                     "channel",
                 )
@@ -417,11 +449,10 @@ def convolution_source(
                     emit("{ T value = 0;")
                     for j in active_paths:
                         value = " + ".join(f"cmsg{j}_{t}_{a}" for t in terms)
-                        emit(f"value = fma(({value}), oy{j}_{i}_{b}, value);")
+                        emit(f"value = fma(({value}), oy{readers[j]}_{i}_{b}, value);")
                     if gradient_size:
                         location = (
-                            gradients[g, "0" if shared[2] else "edge", ostart, odim]
-                            + a * odim
+                            gradients[g, "0" if shared[2] else "edge", ostart, odim, a]
                             + b
                         )
                         emit(
@@ -482,7 +513,10 @@ def convolution_source(
                 [
                     (
                         f"back{k}_{i}_",
-                        [f"dx{k}_{accumulator}_{a}" for a in range(dim)],
+                        [
+                            f"dx{k}_{accumulator}_{a}" if a in input_rows[k] else None
+                            for a in range(dim)
+                        ],
                         range(dim),
                     )
                 ],
@@ -502,14 +536,15 @@ def convolution_source(
                         f"back{k}_{i}_{a}",
                     )
         for i, (px, g, accumulator) in enumerate(gdi):
+            if dstart < 0:
+                continue
             vector(f"ox{k}_{i}_", px, "src", dim, start, (xdim, mul), "channel")
-            for a in range(dim):
+            for a in sorted(input_rows[k]):
                 for b in range(dim):
                     value = f"dx{k}_{accumulator}_{a} * ox{k}_{i}_{b}"
                     if gradient_size:
                         location = (
-                            gradients[g, "0" if shared[1] else "edge", dstart, dim]
-                            + a * dim
+                            gradients[g, "0" if shared[1] else "edge", dstart, dim, a]
                             + b
                         )
                         emit(
@@ -520,10 +555,8 @@ def convolution_source(
                         store(g, f"ei * {ddim} + {dstart + a * dim + b}", value, True)
     if gradient_size:
         emit(barrier)
-        for (g, edge, offset, size), location in gradients.items():
-            emit(
-                f"for (int k = {thread_start}; k < {size * size}; k += {thread_stride}) {{"
-            )
+        for g, edge, offset, location, count in gradient_runs:
+            emit(f"for (int k = {thread_start}; k < {count}; k += {thread_stride}) {{")
             if block_channels:
                 base = shared_size - gradient_size
                 emit(

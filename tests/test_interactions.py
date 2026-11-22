@@ -997,7 +997,7 @@ def test_streaming_force_training(
         assert representation.use_packed_wigner == local
         assert representation.use_local_frame == local
         assert representation.use_o3_angular_basis == (
-            local or (not convert and interaction != "co3")
+            not convert and interaction in ("cgtp", "so2")
         )
 
         def no_edge_message(*args, **kwargs):

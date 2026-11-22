@@ -218,7 +218,7 @@ def reference(
                 wigner.size(0), dim, dim
             )
             inputs[key] = din @ x
-        value = getattr(module, f"cg_{index}").to(features).T @ inputs[key]
+        value = module.aligned_path(index, inputs[key])
         if weight >= 0:
             if mode == "uvu":
                 value = value * weights[:, None, weight : weight + mul]

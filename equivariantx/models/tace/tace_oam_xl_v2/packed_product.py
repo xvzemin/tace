@@ -9,6 +9,7 @@ from .precision import require_unscaled, require_tensors
 
 from collections import defaultdict
 from functools import lru_cache
+from itertools import accumulate, groupby
 import os
 import re
 
@@ -16,7 +17,7 @@ import torch
 
 from equivariantx.ops.common.cuda.runtime import kernels, runtime
 from equivariantx.ops.common.cuda.codegen import contraction_source
-from equivariantx.utils.metadata import parse_metadata
+from equivariantx.utils.metadata import compact_metadata, numeric_rows, parse_metadata
 
 POLYNOMIAL_PRODUCTS = os.environ.get("EQX_XL_POLYNOMIAL_PRODUCTS", "0")
 POLYNOMIAL_PRODUCTS = (
@@ -24,27 +25,95 @@ POLYNOMIAL_PRODUCTS = (
 )
 
 
+SPARSE_ROWS = 12000
+
+
+def angular_paths(product, gates, channels):
+    """Describe each independently weighted path in the simplified ir_mul layout."""
+    layouts = []
+    for irreps in (product.irreps_in1, product.irreps_in2, product.irreps_out):
+        layout, offset = [], 0
+        for ir, group in groupby(irreps, key=lambda block: block.ir):
+            copies = tuple(group)
+            if any(mul != channels for mul, _ in copies):
+                raise ValueError(
+                    "Expected equal multiplicities for a packed uuu product"
+                )
+            stride = len(copies)
+            layout.extend((ir.l, offset + i, stride) for i in range(stride))
+            offset += stride * ir.dim
+        layouts.append(layout)
+    result = []
+    for path in product.instructions:
+        if not path.path_weight:
+            continue
+        a = layouts[0][path.i_in1]
+        b = layouts[1][path.i_in2]
+        l, base, stride = layouts[2][path.i_out]
+        gate = gates[base]
+        if any(gates[base + m * stride] != gate for m in range(1, 2 * l + 1)):
+            return None
+        result.append((*a, *b, l, base, stride, gate, path.path_weight))
+    return tuple(result)
+
+
+def gate_components(gate_index, width, size):
+    """Map contiguous per-channel coefficients to their angular components."""
+    index = torch.as_tensor(gate_index, dtype=torch.long, device="cpu").reshape(
+        size, width
+    )
+    first = index[:, 0]
+    if (first % width).any() or not torch.equal(
+        index, first[:, None] + torch.arange(width, device="cpu")
+    ):
+        raise ValueError("Gate channels must be contiguous and aligned")
+    return (first // width).tolist()
+
+
+def angular_metadata(product, gate_index, gate_width, blocks, width):
+    """Build a large packed contraction directly from its angular instructions."""
+    from ..nonlinear_ace import spherical_rows
+
+    irreps = (product.irreps_in1, product.irreps_in2, product.irreps_out)
+    count = 0
+    for path in product.instructions:
+        if path.path_weight:
+            count += len(
+                spherical_rows(
+                    irreps[0][path.i_in1].ir.l,
+                    irreps[1][path.i_in2].ir.l,
+                    irreps[2][path.i_out].ir.l,
+                )
+            )
+        if count >= SPARSE_ROWS:
+            break
+    else:
+        return None
+    dims = tuple(sum(ir.dim for _, ir in group) for group in irreps)
+    if sum(blocks) != dims[2] or gate_width % width:
+        raise ValueError("Packed angular blocks do not match the gate layout")
+    gates = gate_components(gate_index, width, dims[2])
+    paths = angular_paths(product, gates, width)
+    if paths is None:
+        return None
+    dimensions = (*dims[:2], gate_width // width, dims[2])
+    return compact_metadata(repr((width, dimensions, tuple(blocks), ("wigner", paths))))
+
+
 def packed_metadata(metadata, gate_index, gate_width, blocks):
     """Describe uniform-channel products and per-irrep physical blocks."""
     width, dims, rows = parse_metadata(metadata)
     if not width or len(dims) != 3 or gate_width % width:
         raise ValueError("Packed products require uniform channel multiplicities")
-    gates = []
-    for index in range(dims[2]):
-        values = gate_index[index * width : (index + 1) * width]
-        first = values[0]
-        if first % width or values != list(range(first, first + width)):
-            raise ValueError("Gate channels must be contiguous and aligned")
-        gates.append(first // width)
     if sum(blocks) != dims[2]:
         raise ValueError("Irrep blocks do not cover the product result")
-    return repr(
-        (
-            width,
-            (*dims[:2], gate_width // width, dims[2]),
-            tuple(blocks),
-            tuple(((a, b, gates[z], z), c) for (a, b, z), c in rows),
-        )
+    gates = gate_components(gate_index, width, dims[2])
+    dimensions = (*dims[:2], gate_width // width, dims[2])
+    return numeric_rows(
+        width,
+        dimensions,
+        tuple(blocks),
+        tuple(((a, b, gates[z], z), c) for (a, b, z), c in rows),
     )
 
 
@@ -215,6 +284,172 @@ def packed_source(
     return source, len(cases)
 
 
+@lru_cache(maxsize=8)
+def sparse_rows(metadata):
+    """Expand tensor-free angular instructions into an immutable CPU coefficient table."""
+    import numpy as np
+
+    from equivariantx.models.tace.nonlinear_ace import spherical_rows
+
+    _, _, _, rows = parse_metadata(metadata)
+    if rows[0] != "wigner":
+        indices, coefficients = zip(*rows)
+        return np.asarray(indices, dtype=np.int32), np.asarray(
+            coefficients, dtype=np.float64
+        )
+    paths = rows[1]
+    count = sum(len(spherical_rows(a, b, c)) for a, _, _, b, _, _, c, *_ in paths)
+    indices = np.empty((count, 4), dtype=np.int32)
+    weights = np.empty(count, dtype=np.float64)
+    start = 0
+    for l1, a, sa, l2, b, sb, l3, z, sz, gate, factor in paths:
+        local = np.asarray(spherical_rows(l1, l2, l3), dtype=np.float64)
+        stop = start + len(local)
+        for col, offset, stride, values in (
+            (0, a, sa, 0),
+            (1, b, sb, 1),
+            (3, z, sz, 2),
+        ):
+            indices[start:stop, col] = offset + stride * local[:, values]
+        indices[start:stop, 2] = gate
+        weights[start:stop] = factor * local[:, 3]
+        start = stop
+    return indices, weights
+
+
+@lru_cache(maxsize=128)
+def sparse_product_table(metadata, role, dtype, device):
+    """Index the CG rows by the output component, preserving each path's sum order."""
+    import numpy as np
+
+    _, dims, blocks, _ = parse_metadata(metadata)
+    entries, weights = sparse_rows(metadata)
+    columns = entries[:, role]
+    order = np.argsort(columns, kind="stable")
+    offsets = np.empty(dims[role] + 1, dtype=np.int32)
+    offsets[0] = 0
+    np.cumsum(np.bincount(columns, minlength=dims[role]), out=offsets[1:])
+    sizes = np.asarray(blocks, dtype=np.int32)
+    starts = np.cumsum(sizes, dtype=np.int32) - sizes
+    block_info = np.repeat(np.stack((starts, sizes), axis=-1), sizes, axis=0)
+    return (
+        torch.from_numpy(offsets).to(device=device),
+        torch.from_numpy(entries[order]).to(device=device),
+        torch.from_numpy(weights[order]).to(device=device, dtype=dtype),
+        torch.from_numpy(block_info).to(device=device),
+    )
+
+
+@lru_cache(maxsize=96)
+def sparse_product_source(dtype, role, starts=()):
+    """Generate a channel-coalesced sparse value or adjoint kernel."""
+    scalar = "double" if dtype == torch.float64 else "float"
+    pointers = "".join(f", const T* piece{i}" for i in range(len(starts)))
+    packed_read = "pv=p[((I)z.x*nodes+n*z.y+e.w-z.x)*width+c];"
+    if starts:
+        packed_read = (
+            "I local=(n*z.y+e.w-z.x)*width+c; switch(z.x){"
+            + "".join(
+                f"case {start}: pv=piece{i}[local]; break;"
+                for i, start in enumerate(starts)
+            )
+            + "}"
+        )
+    return (
+        """
+    struct alignas(16) Row {int x,y,z,w;};
+    struct alignas(8) Block {int x,y;};
+    using I=long long;
+    using T="""
+        + scalar
+        + f""";
+    constexpr int role={role};
+    extern "C" __global__ void run(
+        const T* a,const T* b,const T* g,const T* p,
+        I sa,I ta,I sb,I tb,I sg,I tg,const int* ptr,const Row* rows,
+        const T* weights,const Block* blocks,T* out,I nodes,I width,I dim,I add{pointers}) {{
+        I lane=(I)blockIdx.y*blockDim.x+threadIdx.x;
+        I idx=blockIdx.x;
+        if(lane>=nodes*width) return;
+        I n=lane/width,c=lane%width;
+        T v=0;
+        for(int j=ptr[idx],end=ptr[idx+1];j<end;++j) {{
+            Row e=rows[j];
+            T av=1,bv=1,gv=1,pv=1;
+            if constexpr(role!=0) av=a[n*sa+(e.x*width+c)*ta];
+            if constexpr(role!=1) bv=b[n*sb+(e.y*width+c)*tb];
+            if constexpr(role!=2) gv=g[n*sg+(e.z*width+c)*tg];
+            if constexpr(role!=3) {{
+                Block z=blocks[e.w];
+                {packed_read}
+            }}
+            v+=weights[j]*((av*bv)*(gv*pv));
+        }}
+        I address=(n*dim+idx)*width+c;
+        if constexpr(role==3) {{
+            Block z=blocks[idx];
+            address=((I)z.x*nodes+n*z.y+idx-z.x)*width+c;
+        }}
+        if(add) out[address]+=v; else out[address]=v;
+    }}"""
+    )
+
+
+def sparse_packed_product(metadata, terms, operands, outputs, fragments):
+    """Execute all terms with shared sparse tables and no atomic reductions."""
+    from equivariantx.ops.common.cuda.graph import capture_constant
+
+    width, dims, blocks, _ = parse_metadata(metadata)
+    sample = operands[0]
+    nodes = sample.shape[0]
+    parts = dict(fragments)
+    starts = tuple(accumulate((0, *blocks[:-1]))) if parts else ()
+    sources = {
+        (role, mapping[3]): sparse_product_source(
+            sample.dtype, role, starts if mapping[3] in parts and role != 3 else ()
+        )
+        for mapping, role, _, _ in terms
+    }
+    compiled = kernels(tuple(sources.values()), sample.device)
+    launches, written = [], set()
+    for mapping, role, slot, _ in terms:
+        table = capture_constant(
+            sparse_product_table, metadata, role, sample.dtype, sample.device
+        )
+        values = [operands[i] for i in mapping]
+        args = [v.data_ptr() for v in values]
+        args.extend(stride for value in values[:3] for stride in value.stride())
+        args.extend(x.data_ptr() for x in table)
+        args.extend(
+            (outputs[slot].data_ptr(), nodes, width, dims[role], int(slot in written))
+        )
+        if role != 3:
+            args.extend(operands[i].data_ptr() for i in parts.get(mapping[3], ()))
+        launches.append(
+            (
+                compiled[sources[role, mapping[3]]],
+                args,
+                dims[role],
+                (nodes * width + 127) // 128,
+                128,
+                0,
+            )
+        )
+        written.add(slot)
+    runtime().launch(launches, torch.cuda.current_stream(sample.device).cuda_stream)
+    return outputs
+
+
+@lru_cache(maxsize=128)
+def use_sparse_product(metadata):
+    rows = parse_metadata(metadata)[3]
+    return bool(rows) and (
+        rows[0] == "wigner"
+        or len(rows) >= SPARSE_ROWS
+        and all(min(indices) >= 0 for indices, _ in rows)
+    )
+
+
 def run_packed(metadata, program, operands, tile=16, fragments=(), output_scale=0):
     """Execute a complete value or adjoint program without unpacking."""
     require_unscaled(output_scale, "output_scale")
@@ -223,7 +458,7 @@ def run_packed(metadata, program, operands, tile=16, fragments=(), output_scale=
     terms = parse_metadata(program)
     sweep = os.environ.get("EQX_XL_NODE_SWEEP", "0") == "1"
     tangent = os.environ.get("EQX_XL_NODE_TANGENT", "0") == "1"
-    if sweep or tangent:
+    if (sweep or tangent) and not use_sparse_product(metadata):
         roles = {role for _, role, _, _ in terms}
         slot_roles = defaultdict(set)
         for _, role, slot, _ in terms:
@@ -269,6 +504,8 @@ def run_packed(metadata, program, operands, tile=16, fragments=(), output_scale=
     nodes = operands[0].shape[0]
     if not nodes:
         return outputs
+    if use_sparse_product(metadata):
+        return sparse_packed_product(metadata, terms, operands, outputs, fragments)
     source, groups = packed_source(
         metadata,
         program,

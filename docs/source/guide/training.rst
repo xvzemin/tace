@@ -19,16 +19,23 @@ Once you have prepared the input files, you can start training using the command
 
     tace-train -cn tace.yaml
 
-For the OAM-v2 CGTP/nonlinear-product training schedule, use the same Hydra
-configuration and overrides:
+For the OAM-v2 training schedule, use the same Hydra configuration and
+overrides:
 
 .. code-block:: bash
 
     tace-train-oam-v2 -cn omat.yaml
+    tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uv_o2
+    tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uu_o2
 
 This entry uses one worker per visible CUDA device, FP32 model weights and
 TF32 matrix multiplication. The radial basis can use a single cutoff or
 ``radial_basis.multi_cutoff``. The command ``tace-train-oamv2`` is equivalent.
+Use ``uv_o2`` for a radial weight followed by a local Linear–Gate–Linear
+map, or ``uu_o2`` for a single externally weighted channelwise linear map.
+``model.config.mmax`` limits the retained local orders. Set
+``model.config.radial_basis.apply_cutoff=false`` for local interactions. Both
+support the same nonlinear CGTP product and energy/force/stress losses.
 
 See :doc:`environment_variables` for backend, compilation, radial fusion, and
 precision switches, including how to set them through ``misc.env``.

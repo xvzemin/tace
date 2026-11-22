@@ -26,7 +26,11 @@ def test_dimension_specialization():
 
 
 def test_shared_metadata_cache():
-    from equivariantx.utils.metadata import compact_metadata, parse_metadata
+    from equivariantx.utils.metadata import (
+        compact_metadata,
+        numeric_rows,
+        parse_metadata,
+    )
 
     specification = (2, ((0, 1, "uvu", True, 0.5),))
     metadata = repr(specification)
@@ -40,6 +44,10 @@ def test_shared_metadata_cache():
     assert compact_metadata(packed) == packed
     assert parse_metadata(packed) == specification * 1000
     assert parse_metadata(packed) is parse_metadata(packed)
+    rows = tuple(((i, -1, 3), 1 / (i + 1)) for i in range(4097))
+    numeric = numeric_rows(32, (4, 5, 6), rows)
+    assert compact_metadata(numeric) == numeric
+    assert parse_metadata(numeric) == (32, (4, 5, 6), rows)
     assert parse_metadata("None") is None
     with pytest.raises(ValueError):
         parse_metadata("tuple()")

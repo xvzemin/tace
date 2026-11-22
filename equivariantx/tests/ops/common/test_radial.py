@@ -217,6 +217,24 @@ def test_materialize_partitions(edges):
     )
 
 
+def test_local_gate_cutoff_factorization(double_precision):
+    from equivariantx.conv.radial import MultiCutoffRadial
+
+    r = torch.tensor([0.5, 2.0, 2.9, 3.0, 3.1, 5.99, 6.0, 6.1], requires_grad=True)
+    inner = (1 - r / 3).clamp_min(0).pow(3)
+    outer = (1 - r / 6).clamp_min(0).pow(3)
+    envelopes = torch.stack((inner, outer), -1)
+    relative = MultiCutoffRadial.relative_envelopes(envelopes)
+    # The outer-only nonlinear message is exactly the single-cutoff message.
+    torch.testing.assert_close(relative[:, 1], torch.ones_like(outer))
+    actual = outer * (relative[:, 0] * 2 + relative[:, 1])
+    expected = 2 * inner + outer
+    for _ in range(3):
+        torch.testing.assert_close(actual, expected)
+        (actual,) = torch.autograd.grad(actual.sum(), r, create_graph=True)
+        (expected,) = torch.autograd.grad(expected.sum(), r, create_graph=True)
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("edges", [0, 7])
 @pytest.mark.parametrize("paired", [False, True])

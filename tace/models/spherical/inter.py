@@ -390,6 +390,18 @@ class O3CgtpInteraction(Interaction):
                 conv_features = (*multi_radial, None)
         if conv_pairs is not None:
             message_inputs["edge_pairs"] = conv_pairs
+        if multi_radial is not None and isinstance(self, UvO2Interaction):
+            features, envelopes, radial_pairs = conv_features
+            conv_features = (
+                features,
+                self.edge_info.relative_envelopes(envelopes),
+                radial_pairs,
+            )
+            message_cutoff = envelopes[:, -1:]
+            if conv_pairs is not None:
+                message_cutoff = conv_pairs.expand(message_cutoff)
+        elif multi_radial is not None and isinstance(self, UuO2Interaction):
+            message_cutoff = node_feats.new_ones((1, 1))
         m_i = self.linear_down(
             self.truncate_ghosts(
                 self._compute_messages(
@@ -620,8 +632,12 @@ class UvO2Interaction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
         edge_pairs=None,
+        element=None,
     ) -> torch.Tensor:
-        if self.use_eqx and self.rejector.eqx_tp is not None and node_feats.is_cuda:
+        if element is not None or isinstance(self.edge_info, MultiCutoffRadial):
+            conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
+            radial_network, edge_pairs = None, None
+        elif self.use_eqx and self.rejector.eqx_tp is not None and node_feats.is_cuda:
             conv_weights, radial_network = (
                 radial_features(edge_feats),
                 self.edge_info.mlp,
@@ -685,7 +701,28 @@ class UuO2Interaction(O3CgtpInteraction):
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
         edge_pairs=None,
+        element=None,
     ) -> torch.Tensor:
+        if element is not None or isinstance(self.edge_info, MultiCutoffRadial):
+            weights = self._conv_weights(edge_feats, element, edge_pairs)
+            if self.use_eqx:
+                return self.rejector.forward_stream(
+                    node_feats,
+                    weights,
+                    weights.new_empty((0, weights.shape[-1])),
+                    edge_index,
+                    edge_wigner,
+                    edge_cutoff,
+                    graph,
+                )
+            return self.rejector(
+                node_feats,
+                weights,
+                edge_index,
+                edge_wigner,
+                edge_wigner_inv,
+                edge_cutoff,
+            )
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(edge_feats)
             return self.rejector.forward_stream(

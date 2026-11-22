@@ -9,6 +9,7 @@ from .....utils.metadata import kernel_plan, parse_metadata
 from .....utils.outputs import contraction_outputs, direction_outputs
 from ..reduction import prepare_graph
 from ..runtime import SOURCE_SIZE_LIMIT, kernels, launch_config, runtime
+from . import order as orderwise
 from .codegen import convolution_source
 from .schedule import (
     contraction_groups,
@@ -23,6 +24,7 @@ WORKSPACE_BYTES = 1024 << 20
 CHUNK_SIZE = 65536
 ROW_SIZE = 4
 THREADS = 128
+ORDER_PATHS = 1024
 
 
 @lru_cache(maxsize=256)
@@ -220,6 +222,12 @@ def contract(plan, source, target, calls, shared=None, initialize=()):
     x, radial, _, din, dout, amplitudes, y = calls[0][1]
     if shared is None:
         shared = tuple(value.size(0) == 1 for value in (radial, din, dout, amplitudes))
+    if (
+        len(plan.path_data) >= ORDER_PATHS
+        and amplitudes.size(1) == 1
+        and orderwise.supports(plan)
+    ):
+        return orderwise.contract(plan, source, target, calls, shared, initialize)
     dimensions = (x.size(1), y.size(1), din.size(1), radial.size(1), amplitudes.size(1))
     values, indices = [], {}
     specification = []

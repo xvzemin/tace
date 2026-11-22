@@ -17,10 +17,11 @@ class WignerD(torch.nn.Module):
         Largest local O(2) order retained in the local matrix axis.
     lmax : int
         Largest global O(3) degree represented by the matrices.
-    method : {"auto", "quaternion", "recursive"}, optional
+    method : {"auto", "quaternion", "recursive", "generator"}, optional
         ``"auto"`` uses direct quaternion polynomials on the CUDA backend
-        and recursive contractions on Torch. Both explicit methods support
-        Torch and CUDA execution.
+        and recursive contractions on Torch. ``"generator"`` uses packed
+        degree recurrence and rotation-generator derivatives on CUDA, and
+        recursive contractions otherwise.
     backend : {None, "torch", "cuda"}, optional
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
         CPU inputs always use Torch operations.
@@ -57,8 +58,8 @@ class WignerD(torch.nn.Module):
             raise ValueError("lmax must be non-negative.")
         if not 0 <= mmax <= lmax:
             raise ValueError("mmax must satisfy 0 <= mmax <= lmax.")
-        if method not in ("auto", "quaternion", "recursive"):
-            raise ValueError("method must be auto, quaternion or recursive.")
+        if method not in ("auto", "quaternion", "recursive", "generator"):
+            raise ValueError("method must be auto, quaternion, recursive or generator.")
 
         self.mmax = mmax
         self.lmax = lmax
@@ -143,7 +144,7 @@ class WignerD(torch.nn.Module):
         ----------
         vectors : torch.Tensor
             Nonzero vectors with shape ``(batch, 3)``.
-        method : {"auto", "quaternion", "recursive"}, optional
+        method : {"auto", "quaternion", "recursive", "generator"}, optional
             Override the construction method for this call.
 
         Returns
@@ -167,7 +168,7 @@ class WignerD(torch.nn.Module):
         ----------
         vectors : torch.Tensor
             Nonzero vectors with shape ``(batch, 3)``.
-        method : {"auto", "quaternion", "recursive"}, optional
+        method : {"auto", "quaternion", "recursive", "generator"}, optional
             Override the construction method for this call.
 
         Returns

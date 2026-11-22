@@ -108,7 +108,7 @@ class NonLinearEdgeEmbedding(EdgeEmbedding):
 
 
 class ElementEdgeEmbedding(IdentityEdgeEmbedding):
-    """Share one element offset per CGTP path and multiplicity channel.
+    """Share one element offset per convolution path and multiplicity channel.
 
     The radial features are unchanged. Both endpoints use the same table.
     Its rows are initialized to zero. In each layer the mean of the endpoint
@@ -121,6 +121,40 @@ class ElementEdgeEmbedding(IdentityEdgeEmbedding):
     @staticmethod
     def path_keys(conv):
         """Return semantic keys in the convolution's external weight order."""
+
+        if hasattr(conv, "local_frame_in") and not hasattr(conv, "irreps_in2"):
+
+            def restrictions(frame):
+                result = {ir: [] for ir, _ in frame.irreps_out}
+                copies = Counter()
+                for (_, ir), restriction in zip(frame.irreps_in, frame._entries):
+                    label = (ir.l, ir.p, getattr(ir, "t", 1))
+                    entry = (*label, copies[label])
+                    copies[label] += 1
+                    for index in restriction.local_indices:
+                        result[frame.irreps_out[index].ir].append(entry)
+                return result
+
+            inputs = restrictions(conv.local_frame_in)
+            channels = range(conv.num_channel)
+            if hasattr(conv, "linear_up"):
+                # Target then source, both in the same order as the local frame.
+                return [
+                    ((-1, ir.m, side), entry, u)
+                    for ir, _ in conv.local_irreps_in
+                    for side in (0, 1)
+                    for entry in inputs[ir]
+                    for u in channels
+                ]
+            outputs = restrictions(conv.local_frame_out)
+            return [
+                ((-2, ir.m), a, b, u)
+                for ins in conv.linear.instructions
+                for ir in (conv.local_irreps_in[ins.i_in].ir,)
+                for a in inputs[ir]
+                for b in outputs[ir]
+                for u in channels
+            ]
 
         def channels(irreps):
             counts = Counter()
@@ -153,7 +187,7 @@ class ElementEdgeEmbedding(IdentityEdgeEmbedding):
         return keys
 
     def build_paths(self, convolutions) -> None:
-        """Index each layer into the union of its weighted CGTP paths."""
+        """Index each layer into the union of its weighted convolution paths."""
         layers = [self.path_keys(conv) for conv in convolutions]
         keys = sorted(set().union(*layers))
         columns = {key: i for i, key in enumerate(keys)}

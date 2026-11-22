@@ -9,12 +9,13 @@ from ....utils.metadata import parse_metadata
 from ....utils.program import Program, scalar_product
 from ..pointwise import activation_vjp
 from .edge_codegen import source as expression_source
-from .graph import CAPTURE_CONSTANTS
+from .graph import capture_constant
 from .runtime import kernels, runtime
 
 TILE_BYTES = 64 << 20
 RADIAL_TILE_BYTES = 128 << 20
 FRAME_TILE_BYTES = 256 << 20
+FRAME_LIVE_BYTES = 3 << 30
 PRODUCT_TILE_BYTES = 512 << 20
 CONVOLUTION_TILE_BYTES = 384 << 20
 CONVOLUTION_TILE_MIN_EDGES = 16384
@@ -363,7 +364,7 @@ def expression(nodes, root, dependent, boundaries=frozenset()):
 
 
 @lru_cache(maxsize=1024)
-def expression_kernel(metadata, dtype, device):
+def expression_spec(metadata, dtype):
     nodes, _ = parse_metadata(metadata)
     mode = (
         "row"
@@ -378,10 +379,40 @@ def expression_kernel(metadata, dtype, device):
         else "pointwise"
     )
     code, storage, slots = expression_source(dtype, metadata, mode, 0, 4, 0.0, 0, 1)
+    return code, storage, slots, mode
+
+
+@lru_cache(maxsize=1024)
+def expression_kernel(metadata, dtype, device):
+    code, storage, slots, mode = expression_spec(metadata, dtype)
     kernel = kernels([code], device)[code]
     size = storage * (8 if dtype == torch.float64 else 4)
     processors = torch.cuda.get_device_properties(device).multi_processor_count
     return kernel, storage, slots, size, processors, mode
+
+
+@lru_cache(maxsize=128)
+def compile_frame_expressions(metadata, dtype, device):
+    """Compile independent wide frame expressions in the live tile schedule."""
+    nodes, outputs, _, expressions, *_ = execution_plan(metadata)
+    if len(expressions) < 12 or not any(
+        op == "frame" and parse_metadata(data[0])[2] >= 2048 for op, _, _, data in nodes
+    ):
+        return
+    roots = {root for root, _, _ in outputs}
+    # Output kernels can be replaced by a target reduction or a node GEMM.
+    # Only prepare intermediate expressions that the tile itself evaluates.
+    sources = {
+        expression_spec(part, dtype)[0]
+        for i, (part, _) in expressions.items()
+        if i not in roots
+        and any(
+            op == "frame" and parse_metadata(data[0])[2] >= 2048
+            for op, _, _, data in parse_metadata(part)[0]
+        )
+    }
+    if sources:
+        kernels(sources, device)
 
 
 @lru_cache(maxsize=128)
@@ -401,13 +432,7 @@ def indices(values, device):
 
 def column_indices(values, device):
     """Keep captured index tables alive independently of the eager cache."""
-    retained = CAPTURE_CONSTANTS.get()
-    if retained is None:
-        return indices(values, device)
-    key = values, device
-    if key not in retained:
-        retained[key] = indices(values, device)
-    return retained[key]
+    return capture_constant(indices, values, device)
 
 
 def transform(op, size, values, data):
@@ -1152,6 +1177,10 @@ def tile_rows(metadata, element_size, workspace):
         else TILE_BYTES
     )
     rows = min(TILE_SIZE, budget // (max(1, width) * element_size))
+    if channel_frame and not workspace:
+        # A mixed force/parameter derivative can keep several rotated feature
+        # blocks live even when the graph fits in a single ordinary edge tile.
+        workspace = FRAME_LIVE_BYTES
     if (
         workspace
         and not node_product
@@ -1164,6 +1193,8 @@ def tile_rows(metadata, element_size, workspace):
 def launch(metadata, inputs, source, target, outputs, tile_size=None):
     """Evaluate a program with bounded intermediate edge storage."""
     plan = execution_plan(metadata)
+    if source.numel():
+        compile_frame_expressions(metadata, inputs[0].dtype, inputs[0].device)
     if tile_size is None:
         workspace = (
             CONVOLUTION_TILE_BYTES if source.numel() > CONVOLUTION_TILE_MIN_EDGES else 0

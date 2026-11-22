@@ -1,4 +1,4 @@
-"""Whole-model scheduling for the OAM CGTP/nonlinear-product architecture.
+"""Whole-model scheduling for OAM CGTP and local O(2) interactions.
 
 Conversion preserves parameter objects and checkpoint names. Geometry-only
 networks are evaluated together before the sequential node stack. The compiled
@@ -17,11 +17,13 @@ from torch.nn import functional as F
 
 from equivariantx.conv.radial import MultiCutoffRadial
 from equivariantx.ops.common.channel_product import channel_product
+from equivariantx.ops.common.weights import ConvolutionWeights
 
 from .angular import aligned_convolution, packed_frame
 from .gated import gated_product, gated_product_metadata
 from .layout import channel_contiguous_metadata, ir_mul_order
 from .packed_product import (
+    angular_metadata,
     composed_linear,
     packed_contract,
     packed_linear,
@@ -504,7 +506,11 @@ class Representation(torch.nn.Module):
         cutoff = radial_inputs[-1][1]
         bases = [value.to(self.model_dtype) for value, _ in radial_inputs]
         direction = graph.edge_vector / graph.edge_length.clamp_min(1e-12)
-        attrs = self.o3_angular_basis(direction).to(self.model_dtype)
+        attrs = (
+            self.o3_angular_basis(direction).to(self.model_dtype)
+            if self.use_o3_angular_basis
+            else None
+        )
         envelopes = (
             torch.cat([c for _, c in radial_inputs], dim=-1) if multi_cutoff else cutoff
         )
@@ -515,6 +521,11 @@ class Representation(torch.nn.Module):
             envelopes = norm.edge_weights(envelopes, edge_index[1], node_type.size(0))
         if envelopes is not None:
             envelopes = envelopes.to(self.model_dtype)
+        uv_envelopes = (
+            MultiCutoffRadial.relative_envelopes(envelopes)
+            if multi_cutoff and "uv_o2" in self.interaction_modes
+            else None
+        )
         message_cutoff = None if multi_cutoff else envelopes
         if (
             radial_map is not None
@@ -527,8 +538,16 @@ class Representation(torch.nn.Module):
         edge_cutoff = (
             cutoff if cutoff is None or radial_map is None else cutoff[radial_map]
         )
+        local_frame = (
+            self.o2_angular_basis.forward_packed(
+                graph.edge_vector, method=self.frame_method
+            ).to(self.model_dtype)
+            if self.has_local_interactions
+            or getattr(self.node_embedding, "use_wigner", False)
+            else None
+        )
         nodes = self.node_embedding(
-            node_type, basis, edge_index, attrs, edge_cutoff, None, None
+            node_type, basis, edge_index, attrs, edge_cutoff, local_frame, local_frame
         )
         radials = [
             self.edge_embedding(
@@ -546,12 +565,16 @@ class Representation(torch.nn.Module):
                 self.model_dtype
             )
         native_attrs = None
-        if self.edge_mode in ("scheduled", "flashtp") and nodes.is_cuda:
+        if (
+            self.cg_layers
+            and self.edge_mode in ("scheduled", "flashtp")
+            and nodes.is_cuda
+        ):
             # Match the existing FP64 harmonic-times-amplitude computation
             # before the final model-dtype cast, and share it across layers.
             from e3nn import o3
 
-            conv = self.interactions[0].rejector.eqx_tp
+            conv = self.interactions[self.cg_layers[0]].rejector.eqx_tp
             amplitude = (
                 nodes.new_ones((1, conv.amplitude_dim))
                 if message_cutoff is None
@@ -580,6 +603,7 @@ class Representation(torch.nn.Module):
         compressed_radial = (
             pair_head
             and self.edge_mode == "scheduled"
+            and not self.has_local_interactions
             and nodes.is_cuda
             and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1"
         )
@@ -639,7 +663,11 @@ class Representation(torch.nn.Module):
             if batch_heads:
                 if multi_cutoff:
                     values = [
-                        value * envelopes[:, scale : scale + 1] for value in values
+                        value
+                        * (uv_envelopes if kind == "uv_o2" else envelopes)[
+                            :, scale : scale + 1
+                        ]
+                        for kind, value in zip(self.interaction_modes, values)
                     ]
                 projected = (
                     values
@@ -682,6 +710,8 @@ class Representation(torch.nn.Module):
         )
         for index, (inter, product) in enumerate(zip(self.interactions, self.products)):
             packed_message = False
+            mode = self.interaction_modes[index]
+            local_uv = multi_cutoff and mode == "uv_o2"
             res_bb = inter.resnetBB(nodes) if hasattr(inter, "resnetBB") else None
             res_ba = inter.resnetBA(nodes) if hasattr(inter, "resnetBA") else None
             associate_norm = os.environ.get("EQX_XL_ASSOCIATE_NORM", "0") == "1"
@@ -704,7 +734,7 @@ class Representation(torch.nn.Module):
                 features, projection = project_radial(
                     networks[index],
                     [scale[index] for scale in hidden],
-                    envelopes,
+                    uv_envelopes if local_uv else envelopes,
                     self.radial_mode == "materialize",
                     self.affine_radial,
                 )
@@ -714,12 +744,50 @@ class Representation(torch.nn.Module):
                     projection,
                     self.edge_embedding.layer_weights(index),
                     head_endpoints,
-                    envelopes[:, -1:] if multi_cutoff else None,
+                    envelopes[:, -1:] if multi_cutoff and not local_uv else None,
                     self.radial_mode == "materialize",
                 )
             if pair_head and not compressed_radial:
                 features = features[radial_map]
-            if self.edge_mode == "flashtp":
+            if mode in ("uv_o2", "uu_o2"):
+                rejector = inter.rejector
+                envelope = message_cutoff
+                if local_uv:
+                    envelope = envelopes[:, -1:]
+                    if pair_head:
+                        envelope = envelope[radial_map]
+                elif envelope is None:
+                    envelope = nodes.new_ones((1, 1))
+                if mode == "uv_o2":
+                    from tace.models.spherical.o2 import uv_convolution
+
+                    radial_network = None
+                    if projection.shape[0]:
+                        features, radial_network = ConvolutionWeights(
+                            features, projection, None
+                        ).as_network()
+                    message = uv_convolution(
+                        rejector,
+                        nodes,
+                        None,
+                        features,
+                        edge_index,
+                        local_frame,
+                        None,
+                        envelope,
+                        radial_network=radial_network,
+                    )
+                else:
+                    message = rejector.forward_stream(
+                        nodes,
+                        features,
+                        projection,
+                        edge_index,
+                        local_frame,
+                        envelope,
+                        None,
+                    )
+            elif self.edge_mode == "flashtp":
                 message = self.flash_convolutions[index](
                     nodes, native_attrs, features, flash_indices[0], flash_indices[1]
                 )
@@ -848,10 +916,24 @@ def validate(source):
         representation.edge_updates,
     ):
         if (
-            type(inter).__name__ != "O3CgtpInteraction"
+            type(inter).__name__
+            not in ("O3CgtpInteraction", "UvO2Interaction", "UuO2Interaction")
             or inter.resnet_linear_type != "identity"
         ):
-            raise ValueError("Expected CGTP interactions with identity residuals")
+            raise ValueError(
+                "Expected cgtp, uv_o2 or uu_o2 interactions with identity residuals"
+            )
+        if type(inter).__name__ == "UvO2Interaction" and inter.rejector.eqx_tp is None:
+            raise ValueError(
+                "The UV O(2) gate activations must support fused execution"
+            )
+        if (
+            type(inter).__name__ in ("UvO2Interaction", "UuO2Interaction")
+            and source.readout_fn.model_config["radial_basis"]["apply_cutoff"]
+        ):
+            raise ValueError(
+                "Local O(2) interactions require radial_basis.apply_cutoff=False"
+            )
         if type(product).__name__ != "NonlinearCgtpACE" or product.correlation != 2:
             raise ValueError("Expected correlation-two nonlinear CGTP products")
         if type(update).__name__ not in ("IdentityEdgeUpdate", "Element2EdgeUpdate"):
@@ -928,7 +1010,7 @@ class TACEOAMXLV2(torch.nn.Module):
         Parameters
         ----------
         model : torch.nn.Module
-            TACE property adapter for the OAM CGTP/nonlinear-product model.
+            TACE property adapter with CGTP, UV O(2) or UU O(2) interactions.
             Move it to the desired device and dtype before conversion.
         fuse_products : bool, optional
             Include compact learned gates in the local CG product and its
@@ -947,8 +1029,9 @@ class TACEOAMXLV2(torch.nn.Module):
             Experimental grouped linear and mixed-adjoint programs. Native
             execution directly reads and writes the model's irrep layouts.
         edge_mode : {"original", "scheduled", "flashtp"}, optional
-            Use a CSR force-adjoint schedule with shared explicit harmonics.
-            Requires materialized radial weights and the CG angular mode.
+            Select the CGTP edge schedule. Scheduled CGTP layers use materialized
+            radial weights and shared harmonics. Local O(2) layers use their own
+            fused convolution and also accept streamed radial projections.
         gradient_schedule : {"original", "fused"}, optional
             Delay exclusively consumed mixed weight adjoints into the final
             native gradient program through an Inductor graph pass.
@@ -1004,15 +1087,34 @@ class TACEOAMXLV2(torch.nn.Module):
             raise ValueError("Unsupported radial_projection mode")
         if radial_projection != "individual" and radial_mode != "materialize":
             raise ValueError("Batched projections require materialized radial weights")
-        if edge_mode in ("scheduled", "flashtp") and (
-            radial_mode != "materialize" or angular_mode != "cg"
-        ):
-            raise ValueError("Scheduled edges require materialized CG contractions")
         from .precision import require_tensors, validate_environment
 
         validate_environment()
         require_tensors((*model.parameters(), *model.buffers()))
         architecture = validate(model)
+        modes = {
+            "O3CgtpInteraction": "cgtp",
+            "UvO2Interaction": "uv_o2",
+            "UuO2Interaction": "uu_o2",
+        }
+        interaction_modes = tuple(
+            modes[type(layer).__name__]
+            for layer in model.readout_fn.representation.interactions
+        )
+        if (
+            "cgtp" in interaction_modes
+            and edge_mode in ("scheduled", "flashtp")
+            and (radial_mode != "materialize" or angular_mode != "cg")
+        ):
+            raise ValueError(
+                "Scheduled CGTP edges require materialized radial weights and angular_mode='cg'"
+            )
+        if any(mode != "cgtp" for mode in interaction_modes) and (
+            angular_mode == "aligned" or edge_mode == "flashtp"
+        ):
+            raise ValueError(
+                "Aligned CGTP and FlashTP require CGTP interactions in every layer"
+            )
         memo = {id(parameter): parameter for parameter in model.parameters()}
         readout = copy.deepcopy(model.readout_fn, memo)
         if padded_batches:
@@ -1054,9 +1156,25 @@ class TACEOAMXLV2(torch.nn.Module):
         representation.radial_projection = radial_projection
         representation.angular_mode = angular_mode
         representation.edge_mode = edge_mode
-        if edge_mode in ("scheduled", "flashtp"):
+        representation.interaction_modes = interaction_modes
+        representation.cg_layers = tuple(
+            i
+            for i, mode in enumerate(representation.interaction_modes)
+            if mode == "cgtp"
+        )
+        representation.has_local_interactions = (
+            len(representation.cg_layers) != representation.num_layers
+        )
+        representation.frame_method = (
+            "generator"
+            if representation.has_local_interactions
+            and representation.o2_angular_basis.lmax >= 4
+            else "auto"
+        )
+        if representation.cg_layers and edge_mode in ("scheduled", "flashtp"):
             convolutions = [
-                layer.rejector.eqx_tp for layer in representation.interactions
+                representation.interactions[i].rejector.eqx_tp
+                for i in representation.cg_layers
             ]
             signatures = {
                 (conv.harmonic_entries, conv.normalization, conv.normalize)
@@ -1159,6 +1277,7 @@ class TACEOAMXLV2(torch.nn.Module):
                 )
             if product_mode == "packed" and len(product.aces) != 1:
                 raise ValueError("Packed products currently require correlation two")
+            product.packed_products = []
             if product_layout == "ir_mul":
                 factor_order = ir_mul_order(product.coefs[0].irreps_in)
                 output_order = ir_mul_order(product.coefs[1].irreps_in)
@@ -1178,12 +1297,30 @@ class TACEOAMXLV2(torch.nn.Module):
                 product.gate_index_1 = product.gate_index_1[factor_order.to(device)]
                 product.gate_index_2 = product.gate_index_2[output_order.to(device)]
                 metadata, width = product.eqx_products[0]
-                metadata = channel_contiguous_metadata(
-                    metadata,
-                    (factor_order, factor_order, output_order),
-                    product.num_hidden_channel,
-                )
-                product.eqx_products = ((metadata, width),)
+                if product_mode == "packed":
+                    start, stop = product.gate_slices[1]
+                    blocks = [
+                        mul * ir.dim // product.num_hidden_channel
+                        for mul, ir in product.coefs[1].irreps_in
+                    ]
+                    angular = angular_metadata(
+                        product.aces[0].tp,
+                        product.gate_index_2,
+                        stop - start,
+                        blocks,
+                        product.num_hidden_channel,
+                    )
+                    if angular is not None:
+                        product.packed_products.append((angular, width))
+                if product.packed_products:
+                    product.eqx_products = ()
+                else:
+                    metadata = channel_contiguous_metadata(
+                        metadata,
+                        (factor_order, factor_order, output_order),
+                        product.num_hidden_channel,
+                    )
+                    product.eqx_products = ((metadata, width),)
                 for linear in product.coefs:
                     linear.input_layout = "ir_mul"
                 product.register_buffer(
@@ -1220,13 +1357,9 @@ class TACEOAMXLV2(torch.nn.Module):
                     raise ValueError("Gate partition does not match its affine output")
                 product.gate_partition_widths = tuple(widths)
             product.gated_products = []
-            product.packed_products = []
             for index, (metadata, width) in enumerate(product.eqx_products):
                 start, stop = product.gate_slices[index + 1]
                 mapping = getattr(product, f"gate_index_{index + 2}").cpu().tolist()
-                product.gated_products.append(
-                    (gated_product_metadata(metadata, mapping, stop - start), width)
-                )
                 if product_mode == "packed":
                     blocks = [
                         mul * ir.dim // product.num_hidden_channel
@@ -1234,9 +1367,18 @@ class TACEOAMXLV2(torch.nn.Module):
                     ]
                     product.packed_products.append(
                         (
-                            packed_metadata(metadata, mapping, stop - start, blocks),
+                            packed_metadata(
+                                metadata,
+                                mapping,
+                                stop - start,
+                                blocks,
+                            ),
                             width,
                         )
+                    )
+                elif fuse_products:
+                    product.gated_products.append(
+                        (gated_product_metadata(metadata, mapping, stop - start), width)
                     )
         readout.representation = representation
         from tace.models.compile.wrapper import CompileTensorModel

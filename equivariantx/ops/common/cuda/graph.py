@@ -46,6 +46,17 @@ def retain_constants(constants):
         CAPTURE_CONSTANTS.reset(token)
 
 
+def capture_constant(factory, *args):
+    """Retain a native kernel's lookup tensors for the lifetime of its CUDA Graph."""
+    retained = CAPTURE_CONSTANTS.get()
+    if retained is None:
+        return factory(*args)
+    key = (factory, *args)
+    if key not in retained:
+        retained[key] = factory(*args)
+    return retained[key]
+
+
 def enabled(name):
     """Return whether native graph replay is enabled for this operator."""
     default = "1" if name == "product" else "0"

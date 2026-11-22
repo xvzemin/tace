@@ -7,6 +7,52 @@ from e3nn import o3
 from equivariantx import o2
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA execution")
+@pytest.mark.parametrize("lmax", [2, 7])
+def test_generator_frame_derivatives(lmax):
+    generator = torch.Generator().manual_seed(43)
+    vectors = torch.randn(5, 3, generator=generator, dtype=torch.float64)
+    vectors[0] = torch.tensor([0.0, -1.0, 0.0])
+    vectors = vectors.cuda().requires_grad_()
+    seeds = [
+        torch.randn(x, generator=generator, dtype=vectors.dtype).cuda()
+        for x in [
+            (5, (lmax + 1) * (2 * lmax + 1) * (2 * lmax + 3) // 3),
+            (5, 3),
+            (5, 3),
+        ]
+    ]
+    frame = o2.WignerD(lmax, lmax, backend="cuda").to(vectors)
+
+    def derivatives(method):
+        y = frame.forward_packed(vectors, method=method)
+        outputs = [y]
+        for seed in seeds:
+            (y,) = torch.autograd.grad((y * seed).sum(), vectors, create_graph=True)
+            outputs.append(y)
+        return outputs
+
+    for a, b in zip(derivatives("generator"), derivatives("quaternion")):
+        torch.testing.assert_close(a, b, rtol=2e-9, atol=2e-9)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA execution")
+def test_generator_large_degree():
+    degree = 24
+    values = torch.tensor([[0.35, -0.71, 0.12]], dtype=torch.float64)
+    output = []
+    for device, method in (("cpu", "recursive"), ("cuda", "generator")):
+        x = values.to(device).requires_grad_()
+        frame = o2.WignerD(
+            degree, degree, backend=device if device == "cuda" else "torch"
+        ).to(x)
+        block = frame.forward_packed(x, method=method)[0, -((2 * degree + 1) ** 2) :]
+        (dx,) = torch.autograd.grad(block[::73].sum(), x)
+        output.append((block.detach().cpu(), dx.cpu()))
+    for a, b in zip(*output):
+        torch.testing.assert_close(a, b, rtol=2e-8, atol=2e-9)
+
+
 def test_wigner_invalid_method(device):
     wigner = o2.WignerD(lmax=2, mmax=2).to(device)
     vectors = torch.randn(3, 3, device=device)

@@ -251,29 +251,27 @@ def test_large_program_keeps_native_derivatives(dtype, primal_inline, monkeypatc
 @pytest.mark.parametrize("channels", [2, 32])
 def test_frame_fusion_derivatives(dtype, channels, monkeypatch):
     from equivariantx.ops.common.cuda import execution, frame
+    from equivariantx.ops.common.cuda.edge_codegen import frame_rows
+    from equivariantx.utils.metadata import parse_metadata
     from equivariantx.utils.program import next_adjoint
 
-    width = 3 * channels
-    layout = repr(
-        (
-            width,
-            width,
-            9,
-            (
-                (
-                    0,
-                    channels,
-                    3,
-                    0,
-                    ((0, 0, 1), (channels, 1, -1), (2 * channels, 2, 1)),
-                ),
-            ),
-        )
-    )
+    if channels == 2:
+        from e3nn import o3
+        from equivariantx import o2
+
+        irreps = [(channels, ir) for _, ir in o3.Irreps.spherical_harmonics(7)]
+        irreps.insert(1, (4, o3.Irrep("1e")))
+        layout = o2.LocalFrame(o3.Irreps(irreps), mmax=7).rotation_layout
+        width, _, matrix_width, _ = parse_metadata(layout)
+        assert all(frame_rows(layout, role) is not None for role in (0, 2))
+    else:
+        width, matrix_width = 3 * channels, 9
+        rows = ((0, 0, 1), (channels, 1, -1), (2 * channels, 2, 1))
+        layout = repr((width, width, matrix_width, ((0, channels, 3, 0, rows),)))
     program = Program()
     x = program.input(0, "source", width)
     y = program.input(0, "target", width)
-    rotation = program.input(1, "edge", 9)
+    rotation = program.input(1, "edge", matrix_width)
     weights = program.input(2, "edge", width)
     empty = program.constant(width, 0)
     left = program.add("frame", width, (x, rotation, empty), (layout, 2))
@@ -295,7 +293,7 @@ def test_frame_fusion_derivatives(dtype, channels, monkeypatch):
     target = torch.tensor([1, 0, 2, 2, 1, 1, 2], device="cuda")
     values = tuple(
         (torch.randn(shape, device="cuda", dtype=dtype) * 0.2).requires_grad_()
-        for shape in ((4, width), (7, 9), (7, width))
+        for shape in ((4, width), (7, matrix_width), (7, width))
     )
     actual = edge_program("cuda", metadata, 4, source, target, *values, inline=False)[0]
     expected = evaluate_torch(metadata, values, source, target, 4)[0]

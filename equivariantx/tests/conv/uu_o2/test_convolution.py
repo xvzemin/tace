@@ -41,6 +41,10 @@ def test_uu_o2_convolution_derivatives(
         pytest.skip("CUDA is unavailable")
     if backend == "torch":
         monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    elif direction is False:
+        from equivariantx.ops.common.cuda.o2_o3 import convolution
+
+        monkeypatch.setattr(convolution, "ORDER_PATHS", 0)
     frame_in = o2.LocalFrame("2x0e+2x1o+2x1e+2x2o", mmax=mmax).to(device)
     frame_out = o2.LocalFrame("2x0o+2x1e+2x1o+2x2e", mmax=mmax).to(device)
     linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, 2)

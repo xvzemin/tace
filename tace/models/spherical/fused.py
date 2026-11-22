@@ -711,7 +711,11 @@ class UuO2TensorProductConv(torch.nn.Module):
         )
         self.weight_numel = self.linear.weight_numel
         self.eqx_tp = eqx_conv.UuO2TensorProductConv(
-            self.local_frame_in, self.linear, self.local_frame_out, backend="cuda"
+            self.local_frame_in,
+            self.linear,
+            self.local_frame_out,
+            backend="cuda",
+            with_transverse=max(self.irreps_in.lmax, self.irreps_out.lmax) < 4,
         )
 
     def __repr__(self) -> str:
@@ -746,6 +750,9 @@ class UuO2TensorProductConv(torch.nn.Module):
     ):
         """Fuse rotations, local paths, radial projection, and gather/scatter."""
         vectors = graph.edge_vector if graph is not None else None
+        if not self.eqx_tp.with_transverse and wigner is not None:
+            # These matrices were constructed from this graph once for all layers.
+            vectors = None
         if vectors is None and wigner is not None and wigner.ndim == 3:
             # Mixed interactions may still use order-major, truncated frames.
             # Keep their matrix derivatives, including the zero-padded rows.

@@ -6,7 +6,104 @@ import torch
 
 from ....utils.metadata import parse_metadata
 from ....utils.outputs import EDGE, MATRIX, NODE, indexed_frame_output
+from .graph import capture_constant
 from .runtime import kernels, runtime
+
+INDEX_MATRIX_WIDTH = 64
+
+
+@lru_cache(maxsize=64)
+def matrix_index(layouts, device):
+    """Index the channel dots contributing to each packed matrix entry."""
+    import numpy as np
+
+    columns, records, strides = [], [], []
+    width = parse_metadata(layouts[0])[2]
+    for slot, layout in enumerate(layouts):
+        ni, no, nw, entries = parse_metadata(layout)
+        if nw != width:
+            raise ValueError("Summed frame adjoints must share a matrix width.")
+        strides.append((ni, no))
+        for start, mul, dim, offset, rows in entries:
+            k = np.arange(dim, dtype=np.int32)
+            for local, row, sign in rows:
+                if sign not in (-1, 1):
+                    return None
+                columns.append(offset + row * dim + k)
+                data = np.empty((dim, 4), dtype=np.int32)
+                data[:, 0], data[:, 1] = slot, start + k * mul
+                data[:, 2], data[:, 3] = local, sign * mul
+                records.append(data)
+    if not columns:
+        return None
+    col = np.concatenate(columns)
+    order = np.argsort(col, kind="stable")
+    counts = np.bincount(col, minlength=width)
+    fan = int(counts[0]) if (counts == counts[0]).all() else 0
+    offsets = np.empty(0 if fan else width + 1, dtype=np.int32)
+    if not fan:
+        offsets[0] = 0
+        np.cumsum(counts, out=offsets[1:])
+    return (
+        tuple(strides),
+        fan,
+        torch.from_numpy(np.concatenate(records)[order]).to(device),
+        torch.from_numpy(offsets).to(device),
+    )
+
+
+@lru_cache(maxsize=128)
+def indexed_matrix_source(dtype, strides, fan):
+    """Generate one warp per matrix entry without enumerating angular rows in code."""
+    from .codegen import HEADER
+
+    header = HEADER.replace("SCALAR", "double" if dtype == torch.float64 else "float")
+    arguments, terms = [], []
+    for i, (ni, no) in enumerate(strides):
+        arguments.extend((f"const T* n{i}", f"const T* m{i}", f"const I* idx{i}"))
+        dot = f"""
+          const T *x=n{i}+idx{i}[e]*{ni}+p.start, *y=m{i}+e*{no}+p.local;
+          for(int c=lane;c<mul;c+=32) s=fma(T(p.width<0?-1:1)*x[c],y[c],s);"""
+        terms.append(f"case {i}:{{{dot}break;}}" if len(strides) > 1 else dot)
+    body = "".join(terms)
+    if len(strides) > 1:
+        body = "switch(p.slot){" + body + "}"
+    begin, end = (f"col*{fan}", f"lo+{fan}") if fan else ("ptr[col]", "ptr[col+1]")
+    return (
+        header
+        + f"""
+    using I=long long; struct alignas(16) Row {{int slot,start,local,width;}};
+    extern "C" __global__ void run({",".join(arguments)},const Row* rows,
+      const int* ptr,T* out,I width,I count){{
+      const int lane=threadIdx.x%32; const I col=blockIdx.x*4+threadIdx.x/32;
+      if(col>=width) return;
+      const int lo={begin}, hi={end};
+      for(I e=blockIdx.y;e<count;e+=gridDim.y){{
+        T s=0;
+        for(int j=lo;j<hi;++j){{Row p=rows[j]; int mul=p.width<0?-p.width:p.width; {body} }}
+        s=warp_sum(s);
+        if(!lane) out[e*width+col]=s;
+      }}
+    }}"""
+    )
+
+
+def indexed_matrix(layouts, operands, output):
+    """Write a sum of frame adjoints using a compact shared channel index."""
+    plan = capture_constant(matrix_index, layouts, output.device)
+    if plan is None:
+        return False
+    strides, fan, rows, ptr = plan
+    code = indexed_matrix_source(output.dtype, strides, fan)
+    kernel = kernels([code], output.device)[code]
+    values = [value.contiguous() for term in operands for value in term]
+    count, width = output.shape
+    args = [value.data_ptr() for value in (*values, rows, ptr, output)] + [width, count]
+    runtime().launch(
+        [(kernel, args, (width + 3) // 4, min(count, 65535), 128, 0)],
+        torch.cuda.current_stream(output.device).cuda_stream,
+    )
+    return True
 
 
 @lru_cache(maxsize=128)
@@ -54,6 +151,8 @@ def matrix_sum(layouts, operands):
     count = operands[0][2].numel()
     output = reference.new_empty((count, width))
     if not count or not width:
+        return output
+    if width >= INDEX_MATRIX_WIDTH and indexed_matrix(layouts, operands, output):
         return output
     values = [value.contiguous() for term in operands for value in term]
     code = matrix_sum_source(reference.dtype, layouts)
@@ -202,6 +301,9 @@ def contract(
         return output
     if not index.numel():
         return output if accumulate else output.zero_()
+    if role == MATRIX and nw >= INDEX_MATRIX_WIDTH:
+        if indexed_matrix((layout,), ((nodes, edges, index),), output):
+            return output
     order = ptr = index
     if role == NODE and not rowwise:
         from .reduction import prepare_graph

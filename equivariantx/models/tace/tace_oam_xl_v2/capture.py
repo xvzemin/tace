@@ -52,6 +52,7 @@ class CapturedTraining:
         self.pool_resets = 0
         self.captures = 0
         self.programs = {}
+        self.constants = {}
         if maximum < 1:
             raise ValueError("The graph cache must hold at least one entry")
 
@@ -60,6 +61,7 @@ class CapturedTraining:
 
         from tace.models.compile.joint import JointTraining
         from tace.utils.loss.common import prepare_tensor_loss_counts
+        from equivariantx.ops.common.cuda.graph import retain_constants
 
         from .extensions import extension_identity
         from .precision import validate_call
@@ -110,6 +112,7 @@ class CapturedTraining:
                         torch.cuda.stream(self.stream),
                         torch.cuda.use_mem_pool(self.memory_pool, device),
                         self.plan_scope(),
+                        retain_constants(self.constants),
                     ):
                         predictions, loss = program(static)
                         spec = {
@@ -152,6 +155,7 @@ class CapturedTraining:
                     capture_error_mode="thread_local",
                 ),
                 self.plan_scope(),
+                retain_constants(self.constants),
             ):
                 predictions, loss = program(static)
                 self.workspace.attach_loss(loss)

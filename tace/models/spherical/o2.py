@@ -60,6 +60,7 @@ def uv_kernel(module):
             backend="cuda",
             radial_mode="full",
             frame_edge=getattr(module, "magnetic_frame", None),
+            with_transverse=False,
         )
     except NotImplementedError:
         return None

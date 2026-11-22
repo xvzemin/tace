@@ -72,6 +72,9 @@ class UvO2TensorProductConv(torch.nn.Module):
         projection and its pointwise tail into the edge program.
         ``"full"`` (default) streams all radial layers and recomputes their
         activations during differentiation. CUDA remains tiled during compilation.
+    with_transverse : bool, optional
+        Build direction-only transverse couplings. If False, vector inputs
+        use packed Wigner matrices.
 
     Examples
     --------
@@ -110,10 +113,12 @@ class UvO2TensorProductConv(torch.nn.Module):
         frame_edge=None,
         backend=None,
         radial_mode="full",
+        with_transverse=True,
     ):
         backend = resolve_backend(backend)
         super().__init__()
         self.backend = backend
+        self.with_transverse = with_transverse
         if radial_mode not in ("last", "full"):
             raise ValueError("radial_mode must be last or full.")
         self.radial_mode = radial_mode
@@ -140,7 +145,9 @@ class UvO2TensorProductConv(torch.nn.Module):
         self.degree = degree
         self.wigner = WignerD(degree, degree, backend=backend)
         self.transverse_frames = torch.nn.ModuleList(
-            TransverseFrame(f, backend) if f is not None and f.basis_change else None
+            TransverseFrame(f, backend)
+            if with_transverse and f is not None and f.basis_change
+            else None
             for f in (frame_in, frame_edge, frame_out)
         )
         self.input_dim, self.edge_dim = (
@@ -167,8 +174,10 @@ class UvO2TensorProductConv(torch.nn.Module):
                     torch.tensor(rows, dtype=torch.get_default_dtype()),
                     persistent=False,
                 )
-        self.transverse_linears = tuple(
-            linear_description(layer, True) for layer in linears
+        self.transverse_linears = (
+            tuple(linear_description(layer, True) for layer in linears)
+            if with_transverse
+            else ()
         )
         self.gates = tuple(gate_program(gate, blocks=True) for gate in gates)
         self.gate_layouts = tuple(
@@ -177,8 +186,10 @@ class UvO2TensorProductConv(torch.nn.Module):
             else None
             for gate in gates
         )
-        self.transverse_gates = tuple(
-            gate_program(gate, True, blocks=True) for gate in gates
+        self.transverse_gates = (
+            tuple(gate_program(gate, True, blocks=True) for gate in gates)
+            if with_transverse
+            else ()
         )
         self.weight_numel = self.irreps_in.num_irreps
 
@@ -488,7 +499,9 @@ class UvO2TensorProductConv(torch.nn.Module):
         cutoff = cutoff.to(features)
         if edge_features is not None:
             edge_features = edge_features.to(features)
-        if vectors is not None and vectors.dtype != features.dtype:
+        if vectors is not None and (
+            vectors.dtype != features.dtype or not self.with_transverse
+        ):
             wigner = (
                 torch_wigner.packed(self.wigner, vectors, "recursive")
                 if self.backend == "torch" and config.TORCH_REFERENCE

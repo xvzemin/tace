@@ -111,6 +111,74 @@ def test_conversion_checkpoint_and_mixed_derivatives(
     projection,
     topology,
 ):
+    check_conversion(
+        monkeypatch,
+        radial_mode,
+        scatter_norm,
+        device,
+        multi_cutoff,
+        conditioning,
+        projection,
+        topology,
+        "cgtp",
+    )
+
+
+@pytest.mark.parametrize("interaction", ["uv_o2", "uu_o2"])
+@pytest.mark.parametrize(
+    "device,cutoffs,embedding,degree,radial_mode",
+    [
+        ("cpu", None, "linear", 1, "materialize"),
+        ("cpu", [2.5, 4.0], "element", 1, "stream"),
+        ("cuda", [2.5, 4.0], "element2", 1, "materialize"),
+        ("cuda", None, "element2", 4, "materialize"),
+        ("cuda", [2.5, 4.0], "element2", 1, "stream"),
+    ],
+)
+def test_local_conversion(
+    monkeypatch, interaction, device, cutoffs, embedding, degree, radial_mode
+):
+    check_conversion(
+        monkeypatch,
+        radial_mode,
+        "cutoff",
+        device,
+        cutoffs,
+        embedding,
+        "individual",
+        "pairs",
+        interaction,
+        degree,
+    )
+
+
+@pytest.mark.parametrize("modes", [["cgtp", "uv_o2"], ["uu_o2", "cgtp"]])
+def test_mixed_local_conversion(monkeypatch, modes):
+    check_conversion(
+        monkeypatch,
+        "materialize",
+        "density",
+        "cpu",
+        [2.5, 4.0],
+        "element2",
+        "batched",
+        "pairs",
+        modes,
+    )
+
+
+def check_conversion(
+    monkeypatch,
+    radial_mode,
+    scatter_norm,
+    device,
+    multi_cutoff,
+    conditioning,
+    projection,
+    topology,
+    interaction,
+    degree=1,
+):
     pytest.importorskip("tace")
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA execution")
@@ -132,9 +200,9 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         config.update(
             num_layers=2,
             num_channel=4,
-            Lmax=1,
-            lmax=1,
-            mmax=1,
+            Lmax=degree,
+            lmax=degree,
+            mmax=degree,
             cutoff=multi_cutoff[-1] if multi_cutoff else 4.0,
             max_neighbors=None,
             mlp_type="mlp_v2",
@@ -146,7 +214,13 @@ def test_conversion_checkpoint_and_mixed_derivatives(
         config["radial_basis"].update(
             hidden=[4, 4], bias=True, apply_cutoff=False, multi_cutoff=multi_cutoff
         )
-        config["atomic_basis"].update(type="cgtp", scatter_norm=scatter_norm)
+        config["atomic_basis"].update(type=interaction, scatter_norm=scatter_norm)
+        if interaction == "uv_o2" or (
+            isinstance(interaction, list) and "uv_o2" in interaction
+        ):
+            config["atomic_basis"].update(
+                edge_nonlinear="gate", scalar_act=["silu", "tanh"]
+            )
         config["resnet"].update(type="BAB", linear_type="identity")
         config["layer_norm"].update(
             pre_norm_type=pre_norm, final_norm_type="merge_rms_norm"
@@ -408,6 +482,76 @@ def test_gated_product_rejects_nonaffine_mapping():
     metadata = repr((0, (3, 3, 3), (((0, 0, 0), 1.0, 3, (1, 1, 1)),)))
     with pytest.raises(ValueError, match="not affine"):
         gated_product_metadata(metadata, [0, 2, 1], 3)
+
+
+def test_angular_packed_product_reconstructs_all_csr_roles(monkeypatch):
+    from equivariantx.models.tace.nonlinear_ace import build_product
+    from equivariantx.models.tace.tace_oam_xl_v2 import packed_product as packed
+
+    inputs = o3.Irreps("2x1o+2x1o+2x2e")
+    outputs = o3.Irreps("2x0e+2x0e+2x1o+2x1o+2x2e")
+    paths = [(0, 0, 0), (1, 1, 1), (0, 2, 2), (1, 2, 3), (0, 1, 4)]
+    tp = o3.TensorProduct(inputs, inputs, outputs, [(*p, "uuu", False) for p in paths])
+    orders = tuple(ir_mul_order(x.simplify()) for x in (inputs, inputs, outputs))
+    metadata = channel_contiguous_metadata(build_product(tp), orders, 2)
+    gates = torch.tensor(
+        [
+            2 * i + c
+            for i, (_, ir) in enumerate(outputs)
+            for c in range(2)
+            for _ in range(ir.dim)
+        ]
+    )[orders[2]].tolist()
+    blocks = [mul * ir.dim // 2 for mul, ir in outputs.simplify()]
+    expected = packed.packed_metadata(metadata, gates, 2 * len(outputs), blocks)
+    monkeypatch.setattr(packed, "SPARSE_ROWS", 1)
+    actual = packed.angular_metadata(tp, gates, 2 * len(outputs), blocks, 2)
+    assert packed.parse_metadata(actual)[-1][0] == "wigner"
+    for role in range(4):
+        reference = packed.sparse_product_table(expected, role, torch.float64, "cpu")
+        tables = packed.sparse_product_table(actual, role, torch.float64, "cpu")
+        for a, b in zip(reference, tables):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA execution")
+def test_sparse_packed_product_program(monkeypatch):
+    from equivariantx.models.tace.tace_oam_xl_v2 import packed_product as product
+
+    torch.manual_seed(12)
+    rows = tuple(
+        ((a, b, (a + b) % 2, (a + b) % 3), (a - b + 0.4) / 5)
+        for a in range(3)
+        for b in range(3)
+    )
+    metadata = repr((4, (3, 3, 2, 3), (1, 2), rows))
+    operands = [
+        torch.randn(5, 2 * cols, dtype=torch.float64, device="cuda")[:, ::2]
+        for cols in (12, 12, 8)
+    ]
+    packed = torch.randn(5, 12, dtype=torch.float64, device="cuda")
+    operands += [packed]
+    terms = (
+        ((0, 0, 2, 3), 0, 0, 0),
+        ((0, 0, 2, 3), 1, 0, 0),
+        ((0, 1, 2, 3), 2, 1, 0),
+        ((0, 1, 2, 3), 3, 2, 0),
+    )
+    monkeypatch.setattr(product, "use_sparse_product", lambda _: False)
+    expected = product.run_packed(metadata, repr(terms), operands)
+    monkeypatch.setattr(product, "use_sparse_product", lambda _: True)
+    actual = product.run_packed(metadata, repr(terms), operands)
+    for a, b in zip(actual, expected):
+        torch.testing.assert_close(a, b, rtol=1e-12, atol=1e-12)
+    pieces = packed.reshape(-1).split((20, 40))
+    actual = product.run_packed(
+        metadata,
+        repr(terms[:-1]),
+        [*operands[:3], packed.new_empty(0, 0), *(x.view(1, -1) for x in pieces)],
+        fragments=((3, (4, 5)),),
+    )
+    for a, b in zip(actual, expected):
+        torch.testing.assert_close(a, b, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.parametrize(

@@ -118,33 +118,31 @@ class NodeRepresentation(torch.nn.Module):
             INTERACTION[interaction] for interaction in atomic_basis["type"]
         ]
         equivalent_cgtp = (O3CgtpInteraction, O2CgtpInteraction, O3IctdInteraction)
+        weighted_interactions = (*equivalent_cgtp, UvO2Interaction, UuO2Interaction)
+        self.indexed_element_layers = tuple(
+            cls in equivalent_cgtp for cls in interaction_classes
+        )
+        self.first_indexed_layer = next(
+            (i for i, indexed in enumerate(self.indexed_element_layers) if indexed),
+            None,
+        )
         if multi_cutoff is not None and any(
-            cls not in equivalent_cgtp for cls in interaction_classes
+            cls not in weighted_interactions for cls in interaction_classes
         ):
             raise ValueError(
-                "multi_cutoff supports only cgtp and its co3 and o2_cgtp equivalents."
+                "multi_cutoff requires cgtp, co3, o2_cgtp, uv_o2 or uu_o2."
             )
         self.reciprocal_radial = (
             edge_update["type"] == "identity"
-            and all(
-                cls
-                in (
-                    O3CgtpInteraction,
-                    O2CgtpInteraction,
-                    O3IctdInteraction,
-                    UuO2Interaction,
-                    UvO2Interaction,
-                )
-                for cls in interaction_classes
-            )
+            and all(cls in weighted_interactions for cls in interaction_classes)
             and edge_embedding["type"]
             in ("identity", "linear", "nonlinear", "element", "element2")
         )
         if edge_embedding["type"] in ("element", "element2") and any(
-            cls not in equivalent_cgtp for cls in interaction_classes
+            cls not in weighted_interactions for cls in interaction_classes
         ):
             raise ValueError(
-                "Element edge embedding requires CGTP convolution paths in every layer."
+                "Element edge embedding requires weighted convolution paths in every layer."
             )
         uses_so2_interaction = any(
             issubclass(interaction_cls, UvSO2Interaction)
@@ -163,6 +161,7 @@ class NodeRepresentation(torch.nn.Module):
             and not node_embedding_cls.use_wigner
         ) or any(
             not issubclass(interaction_cls, (O2CgtpInteraction, O3IctdInteraction))
+            and interaction_cls not in (UvO2Interaction, UuO2Interaction)
             for interaction_cls in interaction_classes
         )
         uses_co3_interaction = any(
@@ -259,10 +258,15 @@ class NodeRepresentation(torch.nn.Module):
             )
         else:
             self.o2_angular_basis = None
-        self.o3_angular_basis = o3.SphericalHarmonics(
-            o3.Irreps.spherical_harmonics(lmax, p=-1),
-            normalize=False,
-            normalization="component",
+        self.o3_angular_basis = (
+            o3.SphericalHarmonics(
+                o3.Irreps.spherical_harmonics(lmax, p=-1),
+                normalize=False,
+                normalization="component",
+            )
+            if self.use_o3_angular_basis
+            or issubclass(node_embedding_cls, WignerTensorNodeEmbedding)
+            else None
         )
         self.co3_angular_basis = (
             co3.CartesianHarmonics(
@@ -736,17 +740,21 @@ class NodeRepresentation(torch.nn.Module):
             if isinstance(self.edge_embedding, ElementEdgeEmbedding)
             else None
         )
+        indexed_types = None
         if (
             endpoint_types is not None
             and not directed_elements
-            and self.interactions[0].use_eqx
+            and self.first_indexed_layer is not None
+            and self.interactions[self.first_indexed_layer].use_eqx
         ):
-            endpoint_types = indexed_rows(
+            indexed_types = indexed_rows(
                 endpoint_types,
                 self.num_elements,
                 dtype=edge_feats.dtype,
                 reduce="mean",
-                backend=self.interactions[0].rejector.eqx_tp.backend,
+                backend=self.interactions[
+                    self.first_indexed_layer
+                ].rejector.eqx_tp.backend,
             )
 
         forces_embedding = None
@@ -813,7 +821,9 @@ class NodeRepresentation(torch.nn.Module):
             if isinstance(self.edge_embedding, ElementEdgeEmbedding):
                 interaction_inputs["element"] = (
                     self.edge_embedding.layer_weights(idx),
-                    endpoint_types,
+                    indexed_types
+                    if indexed_types is not None and self.indexed_element_layers[idx]
+                    else endpoint_types,
                 )
             node_feats, sc = inter(
                 node_feats,

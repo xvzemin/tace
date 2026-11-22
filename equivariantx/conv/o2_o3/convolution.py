@@ -286,6 +286,10 @@ class O2O3TensorProductConv(torch.nn.Module):
             setattr(self, name, value.to(getattr(self, name), copy=True))
         return self
 
+    def aligned_path(self, index, features):
+        """Apply one angular coupling to aligned features."""
+        return getattr(self, f"cg_{index}").to(features).T @ features
+
     def forward(
         self,
         features,
