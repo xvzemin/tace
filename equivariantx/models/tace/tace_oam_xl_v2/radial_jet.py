@@ -15,7 +15,8 @@ class AttachRadialJet(torch.autograd.Function):
     Parameters
     ----------
     value, slope : torch.Tensor
-        Per-edge values and radial derivatives, evaluated at detached radii.
+        Per-edge values and radial derivatives, optionally batched over layers,
+        evaluated at detached radii.
         Both retain their complete parameter dependence.
     radius : torch.Tensor
         Live per-edge radii of shape (edges, 1).
@@ -35,6 +36,8 @@ class AttachRadialJet(torch.autograd.Function):
     def backward(ctx, gradient):
         (slope,) = ctx.saved_tensors
         radial_gradient = (gradient * slope).sum(-1, keepdim=True)
+        if slope.ndim == 3:
+            radial_gradient = radial_gradient.sum(0)
         return gradient, None, radial_gradient.to(ctx.radius_dtype)
 
 
@@ -79,6 +82,118 @@ def activation_slope(layer, value):
     if name == "Identity":
         return torch.ones_like(value) * scale
     raise ValueError(f"Unsupported radial jet activation: {type(layer).__name__}")
+
+
+def supports_degree_jets(representation):
+    """Whether fixed jn bases feed matching, unconditioned scalar MLP stages."""
+    radial = representation.radial_basis
+    if (
+        radial.widths is None
+        or type(radial.radial_fn).__name__ != "jnSphericalBesselBasis"
+        or radial.apply_cutoff
+        or radial.use_distance_transform
+        or any(parameter.requires_grad for parameter in radial.parameters())
+        or type(representation.edge_embedding).__name__
+        not in ("ElementEdgeEmbedding", "Element2EdgeEmbedding")
+        or any(
+            type(update).__name__ != "IdentityEdgeUpdate"
+            for update in representation.edge_updates
+        )
+    ):
+        return False
+    signatures = {}
+    for layer in representation.interactions:
+        network = layer.edge_info
+        if not hasattr(network, "active") or not hasattr(network, "branches"):
+            return False
+        for degree, head in zip(network.active, network.branches):
+            signature = []
+            for stage in tuple(head.mlp)[:-1]:
+                if type(stage).__name__ == "mlpLinear":
+                    key = (
+                        "linear",
+                        stage.in_dim,
+                        stage.out_dim,
+                        stage.bias is not None,
+                    )
+                else:
+                    function = getattr(stage, "activation", stage)
+                    name = type(function).__name__
+                    if (
+                        name
+                        not in (
+                            "SiLU",
+                            "ScaledSiLU",
+                            "Tanh",
+                            "ScaledTanh",
+                            "Sigmoid",
+                            "ScaledSigmoid",
+                            "Identity",
+                        )
+                        or next(stage.parameters(), None) is not None
+                    ):
+                        return False
+                    key = (name, getattr(stage, "scale_factor", 1.0))
+                signature.append(key)
+            signature = tuple(signature)
+            if signatures.setdefault(degree, signature) != signature:
+                return False
+    return True
+
+
+def jn_slope(radial, radius):
+    """Evaluate the fixed jn basis derivative at the current detached geometry."""
+    from tace.models.radial import SphericalBesselJn
+
+    basis = radial.radial_fn
+    frequency = basis.zeros.to(torch.float64) / basis.cutoff.to(torch.float64)
+    arguments = basis.zeros.to(torch.float64) * (
+        radius.detach().to(torch.float64) / basis.cutoff.to(torch.float64)
+    )
+    derivative = torch.cat(
+        [
+            SphericalBesselJn.apply(order, 1, value, parameters)
+            for order, value, parameters in zip(
+                basis.order,
+                arguments.split(basis.num_zero, -1),
+                basis.bessel_parameters,
+            )
+        ],
+        -1,
+    )
+    return derivative * basis.normalizer.to(torch.float64) * frequency
+
+
+def packed_hidden_jets(networks, value, slope, *, batched=False):
+    """Evaluate hidden values and radial slopes in the same batched GEMMs."""
+    sequences = [tuple(network.mlp)[:-1] for network in networks]
+    if not sequences[0]:
+        if batched:
+            return (
+                value.unsqueeze(0).expand(len(networks), -1, -1),
+                slope.unsqueeze(0).expand(len(networks), -1, -1),
+            )
+        return (value,) * len(networks), (slope,) * len(networks)
+    rows = value.shape[0]
+    pair = torch.cat((value, slope), 0).unsqueeze(0)
+    for stage in range(len(sequences[0])):
+        layers = [sequence[stage] for sequence in sequences]
+        layer = layers[0]
+        if type(layer).__name__ == "mlpLinear":
+            pair = torch.matmul(
+                pair, torch.stack([item.get_weight() for item in layers])
+            )
+            if layer.bias is not None:
+                value, slope = pair.unflatten(1, (2, rows)).unbind(1)
+                value = value + torch.stack([item.bias for item in layers])[:, None]
+                pair = torch.cat((value, slope), 1)
+        elif not isinstance(layer, torch.nn.Identity):
+            value, slope = pair.unflatten(1, (2, rows)).unbind(1)
+            pair = torch.cat((layer(value), slope * activation_slope(layer, value)), 1)
+    value, slope = pair.unflatten(1, (2, rows)).unbind(1)
+    if batched:
+        return value, slope
+    return value.unbind(0), slope.unbind(0)
 
 
 def hidden_jets(representation, networks, radius, node_type, edge_index):

@@ -59,9 +59,9 @@ class CapturedTraining:
     def __call__(self, batch):
         from torch._inductor import config
 
+        from equivariantx.ops.common.cuda.graph import retain_constants
         from tace.models.compile.joint import JointTraining
         from tace.utils.loss.common import prepare_tensor_loss_counts
-        from equivariantx.ops.common.cuda.graph import retain_constants
 
         from .extensions import extension_identity
         from .precision import validate_call
@@ -80,7 +80,8 @@ class CapturedTraining:
             else (key, repr(value))
             for key, value in sorted(batch.items())
         )
-        if signature not in self.entries:
+        first_use = signature not in self.entries
+        if first_use:
             contract = (
                 batch["ptr"].numel(),
                 tuple(sorted(batch)),
@@ -115,12 +116,7 @@ class CapturedTraining:
                         retain_constants(self.constants),
                     ):
                         predictions, loss = program(static)
-                        spec = {
-                            key: (tuple(value.shape), value.dtype)
-                            for key, value in predictions.items()
-                        }
-                        loss_dtype = loss.dtype
-                        del predictions, loss
+                        self.workspace.attach_loss(loss)
                     break
                 except torch.OutOfMemoryError:
                     if attempt or not self.entries:
@@ -129,6 +125,7 @@ class CapturedTraining:
                 # temporary tensors. Parameters and optimizer state stay live.
                 torch.cuda.synchronize(device)
                 self.entries.clear()
+                self.constants.clear()
                 gc.collect()
                 self.memory_pool = torch.cuda.MemPool()
                 self.pool = self.memory_pool.id
@@ -140,10 +137,10 @@ class CapturedTraining:
             self.stream.synchronize()
             self.warmups += 1
             outputs = {
-                key: torch.empty(shape, dtype=dtype, device=device)
-                for key, (shape, dtype) in spec.items()
+                key: value.detach().clone() for key, value in predictions.items()
             }
-            loss_buffer = torch.empty((), dtype=loss_dtype, device=device)
+            loss_buffer = loss.detach().clone()
+            del predictions, loss
             graph = torch.cuda.CUDAGraph()
             # DataLoader pin-memory threads allocate independently of this graph.
             with (
@@ -174,10 +171,12 @@ class CapturedTraining:
                 self.entries.popitem(last=False)
         static, graph, result, mask = self.entries[signature]
         self.entries.move_to_end(signature)
-        for key, value in batch.items():
-            if torch.is_tensor(value):
-                static[key].copy_(value)
-        graph.replay()
+        # Warmup already evaluated the current inputs and filled the workspace.
+        if not first_use:
+            for key, value in batch.items():
+                if torch.is_tensor(value):
+                    static[key].copy_(value)
+            graph.replay()
         for parameter, view, active in zip(
             self.workspace.parameters, self.workspace.views, mask
         ):

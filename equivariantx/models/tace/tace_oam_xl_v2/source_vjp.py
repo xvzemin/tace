@@ -5,20 +5,21 @@ expressions share cotangent work between all three outputs. This alternative
 trades receiver-cotangent locality for fewer repeated loads across adjoints.
 """
 
-from .precision import require_unscaled, require_tensors
-from collections import defaultdict, deque
-from functools import lru_cache
 import os
 import re
+from collections import defaultdict, deque
+from functools import lru_cache
 
 import torch
 
-from .cg_codegen import convolution_source
-from .graph import prepare_graph
 from equivariantx.ops.common.cuda.runtime import kernels, runtime
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.outputs import o3_outputs
+
+from .cg_codegen import convolution_source
+from .graph import prepare_graph
 from .packed_edge import pack_edge_source, packed_description
+from .precision import require_tensors, require_unscaled
 
 
 @lru_cache(maxsize=128)
@@ -151,6 +152,8 @@ def source_plan(
     reuse_angular=None,
     vector_width=1,
     row_limit=0,
+    compressed=False,
+    radial_output_only=False,
 ):
     require_unscaled(radial_scale, "radial_scale")
     paths = parse_metadata(metadata)[0]
@@ -208,6 +211,10 @@ def source_plan(
             from .row_schedule import split_source
 
             source = split_source(source, row_limit)
+        if compressed:
+            from .compressed import compressed_source
+
+            source = compressed_source(source, terms, radial_output_only)
         kernel = kernels([source], device)[source]
         if (kernel.local_bytes or kernel.registers > register_limit) and len(group) > 1:
             split = len(group) // 2
@@ -238,10 +245,16 @@ def source_vjp_edges(
     owner=0,
     asynchronous=False,
     vector_width=1,
+    radial_map=None,
+    radial_rows=None,
 ):
     """Evaluate complete non-shared edge adjoints without changing terms."""
     require_unscaled(radial_scale, "radial_scale")
     require_tensors(operands)
+    if radial_map is not None and (asynchronous or vector_width != 1):
+        raise ValueError(
+            "Shared radial rows require the synchronous scalar-channel plan"
+        )
     paths, _, weighted, *_ = parse_metadata(metadata)
     terms = parse_metadata(program)
     if asynchronous and not full_row:
@@ -268,7 +281,12 @@ def source_vjp_edges(
         raise ValueError("Expected complete UVU adjoints with 128 channels")
     if any(operands[m[1]].shape[0] == 1 or operands[m[2]].numel() for m, _, _ in terms):
         raise ValueError("Source VJP requires explicit non-shared radial inputs")
-    outputs = o3_outputs(metadata, program, source, target, operands)
+    if radial_rows is None:
+        outputs = o3_outputs(metadata, program, source, target, operands)
+    else:
+        from .compressed import paired_outputs
+
+        outputs = paired_outputs(program, operands, radial_rows)
     # All source and angular reductions require initialization. Weight columns
     # are assigned once by disjoint complete paths in the production contract.
     slots = {slot for _, _, pairs in terms for role, slot in pairs if role == 1}
@@ -278,9 +296,9 @@ def source_vjp_edges(
     ):
         raise ValueError("Radial columns must form a complete nonoverlapping partition")
     for slot, out in enumerate(outputs):
-        if slot not in slots or not source.numel():
+        if slot not in slots or not source.numel() or radial_map is not None:
             out.zero_()
-        elif offsets[-1][0] + offsets[-1][1] != out.shape[1]:
+        if slot in slots and offsets[-1][0] + offsets[-1][1] != out.shape[1]:
             raise ValueError("Radial partition does not cover the result")
     if not source.numel():
         return outputs
@@ -317,6 +335,8 @@ def source_vjp_edges(
         else None,
         vector_width,
         row_limit,
+        radial_map is not None,
+        radial_rows is not None,
     )
     tasks = nodes if full_row else (source.numel() + row_size - 1) // row_size
     args = [x.data_ptr() for x in (*values, *outputs)]
@@ -332,6 +352,8 @@ def source_vjp_edges(
         jobs = prepare_segments(pointers, row_limit)
         args.append(jobs.data_ptr())
         tasks = nodes + (source.numel() + row_limit - 1) // row_limit
+    if radial_map is not None:
+        args.append(radial_map.data_ptr())
     runtime().launch(
         [
             (

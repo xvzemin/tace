@@ -5,16 +5,18 @@ forks and rejoins CUDA streams within one call, so Inductor sees its ordinary
 input/output lifetime contract and can keep its existing memory planner.
 """
 
-from functools import lru_cache
+import logging
 import operator
 import os
 from contextlib import nullcontext
+from functools import lru_cache
 
 import torch
-from .lt_matrix import selected_mm
 
 from equivariantx.utils.outputs import o3_outputs
+
 from .edge import scheduled_edges
+from .lt_matrix import selected_mm
 
 
 @lru_cache(maxsize=16)
@@ -36,6 +38,21 @@ def parallel_edge_mm(
     right: list[torch.Tensor],
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Return complete edge results and independent matrix products."""
+    return run_parallel_edges(metadata, program, source, target, operands, left, right)
+
+
+def run_parallel_edges(
+    metadata,
+    program,
+    source,
+    target,
+    operands,
+    left,
+    right,
+    radial_map=None,
+    radial_rows=None,
+):
+    """Join edge and parameter-gradient streams before returning their buffers."""
     if len(left) != len(right):
         raise ValueError("Each independent matrix product needs two operands")
     current = torch.cuda.current_stream(source.device)
@@ -46,7 +63,20 @@ def parallel_edge_mm(
 
     with torch.cuda.stream(side), sm_target(count) if count else nullcontext():
         products = [selected_mm(a, b) for a, b in zip(left, right)]
-    outputs = scheduled_edges(metadata, program, source, target, operands)
+    if radial_rows is not None:
+        from .compressed import run_paired
+
+        outputs = run_paired(
+            metadata, program, source, target, operands, radial_map, radial_rows
+        )
+    elif radial_map is None:
+        outputs = scheduled_edges(metadata, program, source, target, operands)
+    else:
+        from .compressed import run_compressed
+
+        outputs = run_compressed(
+            metadata, program, source, target, operands, radial_map
+        )
     current.wait_stream(side)
     for product in products:
         product.record_stream(current)
@@ -56,6 +86,63 @@ def parallel_edge_mm(
 @parallel_edge_mm.register_fake
 def fake_parallel(metadata, program, source, target, operands, left, right):
     return o3_outputs(metadata, program, source, target, operands), [
+        a.new_empty((a.shape[0], b.shape[1])) for a, b in zip(left, right)
+    ]
+
+
+@torch.library.custom_op(
+    "eqx_oam_xl::parallel_compressed_mm", mutates_args=(), device_types="cuda"
+)
+def parallel_compressed_mm(
+    metadata: str,
+    program: str,
+    source: torch.Tensor,
+    target: torch.Tensor,
+    operands: list[torch.Tensor],
+    radial_map: torch.Tensor,
+    left: list[torch.Tensor],
+    right: list[torch.Tensor],
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Overlap shared-radial edge contractions with independent matrix products."""
+    return run_parallel_edges(
+        metadata, program, source, target, operands, left, right, radial_map
+    )
+
+
+@parallel_compressed_mm.register_fake
+def fake_parallel_compressed(
+    metadata, program, source, target, operands, radial_map, left, right
+):
+    return fake_parallel(metadata, program, source, target, operands, left, right)
+
+
+@torch.library.custom_op(
+    "eqx_oam_xl::parallel_paired_mm", mutates_args=(), device_types="cuda"
+)
+def parallel_paired_mm(
+    metadata: str,
+    program: str,
+    source: torch.Tensor,
+    target: torch.Tensor,
+    operands: list[torch.Tensor],
+    left: list[torch.Tensor],
+    right: list[torch.Tensor],
+    radial_map: torch.Tensor,
+    rows: int,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Overlap paired radial adjoints and independent parameter matrices."""
+    return run_parallel_edges(
+        metadata, program, source, target, operands, left, right, radial_map, rows
+    )
+
+
+@parallel_paired_mm.register_fake
+def fake_parallel_paired(
+    metadata, program, source, target, operands, left, right, radial_map, rows
+):
+    from .compressed import paired_outputs
+
+    return paired_outputs(program, operands, rows), [
         a.new_empty((a.shape[0], b.shape[1])) for a, b in zip(left, right)
     ]
 
@@ -71,8 +158,8 @@ def parallel_product_mm(
     right: list[torch.Tensor],
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Overlap the complete node-product program and independent GEMMs."""
-    from .packed_product import run_packed
     from .blas import sm_target
+    from .packed_product import run_packed
 
     if len(left) != len(right):
         raise ValueError("Each independent matrix product needs two operands")
@@ -105,6 +192,48 @@ def hint(value):
     return value.node.hint if value.node.hint is not None else 4096
 
 
+def split_parameter_batches(graph, minimum_k=4096):
+    """Expose independent long-reduction BMMs to the edge/GEMM schedule."""
+    count = 0
+    for node in list(graph.nodes):
+        if node.target != torch.ops.aten.bmm.default or node.kwargs:
+            continue
+        a, b = node.args
+        av, bv = a.meta.get("val"), b.meta.get("val")
+        if av is None or bv is None or av.ndim != 3 or bv.ndim != 3:
+            continue
+        if not all(
+            isinstance(dimension, int)
+            for dimension in (av.shape[0], av.shape[1], bv.shape[2])
+        ):
+            continue
+        if (
+            not 1 < av.shape[0] <= 32
+            or hint(av.shape[2]) < minimum_k
+            or max(av.shape[1], bv.shape[2]) > 16384
+            or av.dtype not in (torch.float32, torch.float64)
+            or bv.dtype != av.dtype
+        ):
+            continue
+        with graph.inserting_before(node):
+            products = []
+            for index in range(av.shape[0]):
+                left = graph.call_function(torch.ops.aten.select.int, (a, 0, index))
+                right = graph.call_function(torch.ops.aten.select.int, (b, 0, index))
+                left.meta["val"] = av.select(0, index)
+                right.meta["val"] = bv.select(0, index)
+                product = graph.call_function(torch.ops.aten.mm.default, (left, right))
+                product.meta["val"] = node.meta["val"].select(0, index)
+                products.append(product)
+            result = graph.call_function(torch.ops.aten.stack.default, (products, 0))
+            result.meta.update(node.meta)
+        node.replace_all_uses_with(result)
+        graph.erase_node(node)
+        count += 1
+    graph.lint()
+    return count
+
+
 def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
     """Pair independent reduction GEMMs with native edges after autodiff.
 
@@ -113,12 +242,20 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
     Earlier consumers can move after the edge call only when their complete
     dependency closure excludes that edge. Chosen GEMMs must be independent.
     """
+    batched = split_parameter_batches(graph, minimum_k)
+    if batched:
+        maximum_matrices = max(maximum_matrices, 64)
+        logging.info("TACE-OAM-XL-v2 split %d parameter BMMs", batched)
     maximum_matrices = int(
         os.environ.get("EQX_XL_PARALLEL_MATRIX_LIMIT", str(maximum_matrices))
     )
     if maximum_matrices < 1:
         raise ValueError("The parallel matrix limit must be positive")
-    targets = {"eqx_oam_xl.edge.default", "eqx_oam_xl.pipeline_edge_matrix.default"}
+    targets = {
+        "eqx_oam_xl.edge.default",
+        "eqx_oam_xl.compressed_edge.default",
+        "eqx_oam_xl.pipeline_edge_matrix.default",
+    }
     if os.environ.get("EQX_XL_PARALLEL_PRODUCTS", "0") == "1":
         targets.add("eqx_oam_xl.packed_product.default")
     edge_nodes = [node for node in graph.nodes if str(node.target) in targets]
@@ -179,6 +316,7 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
             continue
         pipeline = str(edge.target) == "eqx_oam_xl.pipeline_edge_matrix.default"
         product = str(edge.target) == "eqx_oam_xl.packed_product.default"
+        compressed = str(edge.target) == "eqx_oam_xl.compressed_edge.default"
         if pipeline:
             from .pipeline import pipeline_edge_matrices
         with graph.inserting_before(edge):
@@ -187,6 +325,8 @@ def overlap_parameter_matrices(graph, minimum_k=4096, maximum_matrices=32):
                 if pipeline
                 else torch.ops.eqx_oam_xl.parallel_product_mm.default
                 if product
+                else torch.ops.eqx_oam_xl.parallel_compressed_mm.default
+                if compressed
                 else torch.ops.eqx_oam_xl.parallel_edge_mm.default,
                 (
                     *edge.args,

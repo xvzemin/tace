@@ -6,6 +6,7 @@ This module is specific to the validated OAM energy/force/stress contract.
 """
 
 import torch
+
 from tace.models.spherical.tace import SphericalTACE
 
 
@@ -50,6 +51,13 @@ def pad_batch(batch, node_multiple, edge_multiple):
     padded_edges = ((edges + edge_multiple - 1) // edge_multiple) * edge_multiple
     extra_nodes, extra_edges = padded_nodes - nodes, padded_edges - edges
     result = dict(batch)
+    for key in (
+        "edge_pair_rows",
+        "edge_pair_inverse",
+        "oam_radial_representatives",
+        "oam_radial_map",
+    ):
+        result.pop(key, None)
     node_keys = {
         "atomic_numbers",
         "positions",

@@ -226,8 +226,8 @@ class MixedGradientPass(CustomGraphPass):
     """Inductor hook with source-versioned cache identity."""
 
     def __call__(self, graph):
-        from .precision import validate_environment, validate_graph
         from .extensions import apply_graph_extensions
+        from .precision import validate_environment, validate_graph
 
         validate_environment()
         validate_graph(graph)
@@ -288,6 +288,12 @@ class MixedGradientPass(CustomGraphPass):
                 "TACE-OAM-XL-v2 calibrated radial GEMMs: %s",
                 select_radial_matrices(graph),
             )
+        from .compressed import pair_radial_gradients
+
+        logging.info(
+            "TACE-OAM-XL-v2 fused %d paired radial adjoints",
+            pair_radial_gradients(graph),
+        )
 
     def uuid(self):
         from .extensions import extension_identity
@@ -335,6 +341,10 @@ class MixedGradientPass(CustomGraphPass):
                 "cg_codegen.py",
                 "cg_convolution.py",
                 "graph.py",
+                "compressed.py",
+                "edge.py",
+                "radial_projection.py",
+                "radial_jet.py",
             )
         )
         sources.append(extension_identity().encode())

@@ -1,9 +1,7 @@
 """Native edge scheduling with exact recursively generated mixed adjoints."""
 
-from .precision import require_unscaled, require_tensors
-
-from functools import lru_cache
 import os
+from functools import lru_cache
 
 import torch
 
@@ -11,8 +9,10 @@ from equivariantx.ops.common.contraction import adjoint_program
 from equivariantx.utils.autograd import gradient_mask
 from equivariantx.utils.metadata import parse_metadata
 from equivariantx.utils.outputs import o3_outputs
+
 from .edge_codegen import edge_groups, edge_source
 from .packed_edge import pack_edge_metadata, pack_edge_source, packed_description
+from .precision import require_tensors, require_unscaled
 
 EDGE_PATH_TILE = int(os.environ.get("EQX_XL_EDGE_PATH_TILE", "0"))
 SKIP_EDGE_ZERO = os.environ.get("EQX_XL_SKIP_EDGE_ZERO", "0") == "1"
@@ -45,6 +45,7 @@ def edge_plan(
     edge_block=False,
     radial_indexed=False,
     radial_scale=0,
+    radial_output_only=False,
 ):
     """Compile static path groups, retaining weights as runtime arguments."""
     require_unscaled(radial_scale, "radial_scale")
@@ -78,7 +79,8 @@ def edge_plan(
         from .compressed import compressed_source
 
         codes = [
-            compressed_source(code, terms) for code, (_, terms, _) in zip(codes, groups)
+            compressed_source(code, terms, radial_output_only)
+            for code, (_, terms, _) in zip(codes, groups)
         ]
     from .cache_policy import source_policy
 
@@ -122,12 +124,14 @@ def run_edges(
     edge_block=False,
     radial_map=None,
     radial_scale=0,
+    radial_rows=None,
 ):
     """Execute owner-separated native kernels for the OAM-XL contract."""
     require_unscaled(radial_scale, "radial_scale")
     require_tensors(operands)
-    from .graph import prepare_graph
     from equivariantx.ops.common.cuda.runtime import runtime
+
+    from .graph import prepare_graph
 
     meta, terms = parse_metadata(metadata), parse_metadata(program)
     if node_warps not in (0, 1, 2, 4, 8):
@@ -163,7 +167,6 @@ def run_edges(
         and roles == {0, 1, 3}
         and len(meta[0]) > 5
         and meta[0][0][3] == 128
-        and radial_map is None
         and all(operands[m[1]].shape[0] != 1 for m, _, _ in terms)
         and all(
             complete_weight_columns(metadata, operands[m[1]].shape[1])
@@ -181,8 +184,15 @@ def run_edges(
             grouping="angular",
             full_row=True,
             radial_scale=radial_scale,
+            radial_map=radial_map,
+            radial_rows=radial_rows,
         )
-    results = o3_outputs(metadata, program, source, target, operands)
+    if radial_rows is None:
+        results = o3_outputs(metadata, program, source, target, operands)
+    else:
+        from .compressed import paired_outputs
+
+        results = paired_outputs(program, operands, radial_rows)
     for slot, value in enumerate(results):
         # Every edge weight column is assigned by exactly one path group.
         # Keep all other initialization unchanged, including zero-edge graphs.
@@ -224,6 +234,7 @@ def run_edges(
         edge_block,
         radial_map is not None,
         radial_scale,
+        radial_rows is not None,
     )
     mapping = terms[0][0]
     counts = {role: operands[mapping[role]].shape[0] for role in (0, 4)}

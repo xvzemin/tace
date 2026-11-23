@@ -20,6 +20,7 @@ def register_runtime_ops():
         "parallel",
         "pipeline",
         "lt_matrix",
+        "radial_projection",
         "packed_fragments",
         "ordered_reductions",
         "precise_matrix",

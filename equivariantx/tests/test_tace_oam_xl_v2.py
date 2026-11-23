@@ -48,6 +48,240 @@ from equivariantx.models.tace.tace_oam_xl_v2.training import GradientWorkspace
 from equivariantx.ops.common.channel_product import channel_product
 
 
+@pytest.fixture
+def tf32_precision():
+    previous = torch.backends.cuda.matmul.fp32_precision
+    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.fp32_precision = previous
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("rows", [0, 5])
+def test_projected_radial_heads_mixed_gradients(device, rows):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from equivariantx.models.tace.tace_oam_xl_v2.radial_projection import (
+        projected_heads,
+    )
+
+    torch.manual_seed(52)
+    widths = (6, 7)
+    inputs = [
+        torch.randn(2, rows, 4, device=device, dtype=torch.float64, requires_grad=True)
+        for _ in widths
+    ]
+    weights = [
+        torch.randn(2, 4, width, device=device, dtype=torch.float64, requires_grad=True)
+        for width in widths
+    ]
+    columns = torch.stack([torch.randperm(13, device=device) for _ in range(2)])
+    columns = list(columns.split(widths, dim=1))
+    actual = projected_heads(inputs, weights, columns, 13)
+    expected = actual.new_zeros(actual.shape)
+    for left, right, index in zip(inputs, weights, columns):
+        expected = expected.scatter(2, index[:, None].expand(-1, rows, -1), left @ right)
+    torch.testing.assert_close(actual, expected)
+    parameters = (*inputs, *weights)
+    gradients = [
+        torch.autograd.grad(value.square().sum(), parameters, create_graph=True)
+        for value in (actual, expected)
+    ]
+    seeds = [torch.randn_like(value) for value in parameters]
+    mixed = [
+        torch.autograd.grad(sum((g * seed).sum() for g, seed in zip(values, seeds)), parameters)
+        for values in gradients
+    ]
+    for result in (gradients, mixed):
+        for a, b in zip(*result):
+            torch.testing.assert_close(a, b, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("channels", [64, 128, 1024])
+def test_projected_radial_heads_round_tf32(tf32_precision, channels):
+    from equivariantx.models.tace.tace_oam_xl_v2.radial_projection import (
+        projected_heads,
+    )
+
+    torch.manual_seed(53)
+    inputs = [torch.randn(2, 65, channels, device="cuda") for _ in range(2)]
+    weights = [torch.randn(2, channels, width, device="cuda") for width in (128, 256)]
+    permutation = torch.stack([torch.randperm(384, device="cuda") for _ in range(2)])
+    columns = list(permutation.split((128, 256), dim=1))
+    actual = projected_heads(inputs, weights, columns, 384)
+    for left, right, index in zip(inputs, weights, columns):
+        expected = left @ right
+        selected = actual.gather(2, index[:, None].expand(-1, 65, -1))
+        assert (selected - expected).norm() / expected.norm() < 2e-5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("batched", [False, True])
+def test_lt_matrix_plans_read_updated_inputs(tf32_precision, batched):
+    from equivariantx.models.tace.tace_oam_xl_v2.lt_matrix import MatrixPlan
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        prefix = (3,) if batched else ()
+        left = torch.randn(*prefix, 128, 512, device="cuda").transpose(-1, -2)
+        right = torch.randn(*prefix, 128, 256, device="cuda")
+        plan = MatrixPlan(left, right, workspace_bytes=32 * 1024**2, candidates=8)
+        expected = left @ right
+        choices = []
+        for index in range(plan.count):
+            if plan.algorithms[index].status:
+                continue
+            try:
+                actual = plan.run(left, right, index)
+                error = (actual - expected).norm() / expected.norm()
+                if error < 0.001:
+                    choices.append(index)
+            except RuntimeError:
+                continue
+        assert choices
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            result = plan.run(left, right, choices[0])
+        for _ in range(3):
+            left.add_(0.01)
+            right.mul_(0.99)
+            graph.replay()
+            expected = left @ right
+            assert (result - expected).norm() / expected.norm() < 0.001
+        stream.synchronize()
+        del graph
+        plan.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_batched_matrix_plan_lifetime_and_precision(tf32_precision):
+    from equivariantx.models.tace.tace_oam_xl_v2.lt_matrix import lt_radial_bmm
+    from equivariantx.ops.common.cuda.graph import retain_constants
+
+    constants = {}
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream), retain_constants(constants):
+        left = torch.randn(3, 8192, 128, device="cuda")
+        right = torch.randn(3, 128, 256, device="cuda")
+        result = lt_radial_bmm(left, right)
+        assert constants
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream, capture_error_mode="thread_local"):
+            result = lt_radial_bmm(left, right)
+        left.add_(0.01)
+        graph.replay()
+        expected = torch.bmm(left, right)
+        assert (result - expected).norm() / expected.norm() < 0.001
+        count = len(constants)
+        a, b = left.double(), right.double()
+        torch.testing.assert_close(lt_radial_bmm(a, b), torch.bmm(a, b), rtol=0, atol=0)
+        assert len(constants) == count
+        stream.synchronize()
+        del graph
+        constants.clear()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_matrix_plan_lifetime(monkeypatch, tf32_precision):
+    import weakref
+
+    from equivariantx.models.tace.tace_oam_xl_v2.lt_matrix import PLANS, selected_mm
+    from equivariantx.ops.common.cuda.graph import retain_constants
+
+    monkeypatch.setenv("EQX_XL_LT_RADIAL", "1")
+    monkeypatch.setenv("EQX_XL_LT_ALGORITHM", "-1")
+    constants, previous = {}, set(PLANS)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream), retain_constants(constants):
+        left = torch.randn(8192, 128, device="cuda").t()
+        right = torch.randn(8192, 5376, device="cuda")
+        actual = selected_mm(left, right)
+        expected = left @ right
+        assert (actual - expected).norm() / expected.norm() < 0.001
+        assert set(PLANS) == previous
+        (plan,) = constants.values()
+        reference = weakref.ref(plan)
+        del plan
+        stream.synchronize()
+    constants.clear()
+    assert reference() is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("edges", [0, 4])
+@pytest.mark.parametrize("reset_pool", [False, True])
+def test_capture_reuses_warmup_and_tracks_live_inputs(monkeypatch, edges, reset_pool):
+    joint = pytest.importorskip("tace.models.compile.joint")
+    from equivariantx.models.tace.tace_oam_xl_v2.capture import CapturedTraining
+
+    weight = torch.nn.Parameter(torch.tensor([0.2, -0.3, 0.4], device="cuda"))
+    unused = torch.nn.Parameter(torch.ones(1, device="cuda"))
+    adapter = SimpleNamespace(prepare_property_data=lambda data: data)
+    workspace = GradientWorkspace([weight, unused])
+    executions = torch.zeros((), device="cuda", dtype=torch.int64)
+    failures = []
+
+    class ExplicitProgram:
+        def __init__(self, model, loss_fn, batch):
+            assert model is adapter
+
+        def __call__(self, batch):
+            if reset_pool and batch["positions"].shape[0] == 4 and not failures:
+                failures.append(True)
+                raise torch.OutOfMemoryError("Exercise graph-pool recovery")
+            executions.add_(1)
+            positions = batch["positions"]
+            values = positions @ weight
+            energy = values.square().sum().reshape(1)
+            residual = energy - batch["energy"]
+            gradient = 4 * residual * (positions.T @ values)
+            loss = joint.ParameterLoss.apply(
+                residual.square().sum().detach(),
+                (gradient.detach(), None),
+                weight,
+                unused,
+            )
+            return {"energy": energy}, loss
+
+    monkeypatch.setattr(joint, "JointTraining", ExplicitProgram)
+    capture = CapturedTraining(
+        adapter,
+        SimpleNamespace(loss_property=["energy"]),
+        workspace,
+        shared_graph_plan=False,
+    )
+    for index, nodes in enumerate((3, 3, 4, 3)):
+        if index == 2 and reset_pool:
+            capture.constants["previous_pool"] = torch.ones(1, device="cuda")
+        with torch.no_grad():
+            weight.add_(0.1)
+        batch = {
+            "positions": torch.arange(nodes * 3, device="cuda")
+            .float()
+            .reshape(nodes, 3)
+            / (index + 2),
+            "energy": torch.tensor([index + 0.5], device="cuda"),
+            "ptr": torch.tensor([0, nodes], device="cuda"),
+            "edge_index": torch.zeros((2, edges), device="cuda", dtype=torch.int64),
+        }
+        expected = (batch["positions"] @ weight).square().sum().reshape(1)
+        expected_loss = (expected - batch["energy"]).square().sum()
+        (expected_gradient,) = torch.autograd.grad(expected_loss, weight)
+        result, loss = capture(batch)
+        torch.testing.assert_close(result["energy"], expected)
+        torch.testing.assert_close(loss, expected_loss)
+        torch.testing.assert_close(weight.grad, expected_gradient)
+        assert unused.grad is None
+        assert executions.item() == index + 1
+    assert capture.captures == capture.warmups == 2 + int(reset_pool)
+    assert len(capture.entries) == 2
+    assert capture.pool_resets == int(reset_pool)
+    assert "previous_pool" not in capture.constants
+
+
 @pytest.mark.parametrize(
     "device,radial_mode,scatter_norm,conditioning,projection,topology",
     [
@@ -172,6 +406,31 @@ def test_spectral_radial_conversion(
     )
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("embedding", ["element", "element2"])
+@pytest.mark.parametrize("topology", ["directed", "shared"])
+@pytest.mark.parametrize("radial_jets", [False, True])
+def test_reciprocal_spectral_conversion(
+    monkeypatch, device, embedding, topology, radial_jets
+):
+    check_conversion(
+        monkeypatch,
+        "materialize",
+        "cutoff",
+        device,
+        embedding,
+        "individual",
+        topology,
+        "cgtp",
+        degree=2,
+        norm_type="soft_cap_rms_norm",
+        radial_basis=dict(radial_basis="jn", max_eigenvalue=8.0),
+        bias=False,
+        layers=3,
+        radial_jets=radial_jets,
+    )
+
+
 def check_conversion(
     monkeypatch,
     radial_mode,
@@ -184,6 +443,9 @@ def check_conversion(
     degree=1,
     norm_type=None,
     radial_basis=None,
+    bias=None,
+    layers=2,
+    radial_jets=False,
 ):
     pytest.importorskip("tace")
     if device == "cuda" and not torch.cuda.is_available():
@@ -193,20 +455,26 @@ def check_conversion(
 
     for name, value in {"EQX": "1", "MATRIX_WEIGHT": "1", "COMPILE": "0"}.items():
         monkeypatch.setenv(f"TACE_USE_{name}", value)
-    edge_mode = "scheduled" if device == "cuda" and (interaction != "cgtp" or radial_mode != "stream") else "original"
+    edge_mode = (
+        "scheduled"
+        if device == "cuda" and (interaction != "cgtp" or radial_mode != "stream")
+        else "original"
+    )
     associate_norm = scatter_norm == "cutoff" and conditioning == "linear"
     pre_norm = norm_type or (
         "const_norm" if conditioning == "element" else "merge_rms_norm"
     )
     monkeypatch.setenv("EQX_XL_ASSOCIATE_NORM", str(int(associate_norm)))
-    monkeypatch.setenv("EQX_XL_COMPRESSED_RADIAL", str(int(topology == "pairs")))
+    monkeypatch.setenv(
+        "EQX_XL_COMPRESSED_RADIAL", str(int(topology in ("pairs", "shared")))
+    )
     monkeypatch.setenv("EQX_XL_RADIAL_JET", str(int(projection == "jet")))
     previous = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
         config = deepcopy(DEFAULT_MODEL_CONFIG)
         config.update(
-            num_layers=2,
+            num_layers=layers,
             num_channel=4,
             Lmax=degree,
             lmax=degree,
@@ -236,6 +504,10 @@ def check_conversion(
         config["product_basis"].update(
             type="nonlinear_cgtp", correlation=2, num_expert=1, num_channel_per_expert=8
         )
+        if bias is not None:
+            for name in ("radial_basis", "atomic_basis", "product_basis"):
+                config[name]["bias"] = bias
+            config["readout_emlp"]["bias"] = True
         config["readout_emlp"]["hidden"] = [8]
         config["scale_shift"]["enable"] = False
         targets = ["energy", "forces", "stress"]
@@ -277,6 +549,7 @@ def check_conversion(
             radial_mode=radial_mode,
             edge_mode=edge_mode,
             radial_projection="individual" if projection == "jet" else projection,
+            radial_jets=radial_jets,
             **schedule,
         )
         original = dict(source.named_parameters())
@@ -330,6 +603,18 @@ def check_conversion(
 
                 batch = reciprocal_plan(batch)
             batch = model.prepare_property_data(batch)
+            if production and model is candidate and "edge_pair_rows" in batch:
+                from equivariantx.models.tace.tace_oam_xl_v2.adapter import (
+                    OAMCompileAdapter,
+                )
+
+                batch = OAMCompileAdapter(candidate.readout_fn).prepare_property_data(
+                    batch
+                )
+                rows = batch["edge_pair_rows"]
+                if rows.numel():
+                    assert rows.numel() >= batch["edge_index"].shape[1] // 2 + 128
+                    assert batch["edge_pair_inverse"].max() < rows.numel()
             output = model(batch)
             loss = sum(output[name].square().sum() for name in targets)
             gradients = torch.autograd.grad(
@@ -850,6 +1135,269 @@ def test_scheduled_edges_mixed_derivatives(edges):
     torch.testing.assert_close(
         paired[1][0][6], torch.zeros_like(paired[1][0][6]), rtol=0, atol=0
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_batched_parameter_force_gradients(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from equivariantx.models.tace.tace_oam_xl_v2.parallel import split_parameter_batches
+
+    torch.manual_seed(157)
+    values = [
+        (0.1 * torch.randn(shape, device=device, dtype=torch.float64)).requires_grad_()
+        for shape in ((3, 97, 5), (3, 5, 7), (3, 7))
+    ]
+
+    def compute(position, weight, output):
+        hidden = torch.bmm(position, weight)
+        energy = (hidden.sin() * output[:, None]).sum()
+        force = -torch.autograd.grad(energy, position, create_graph=True)[0]
+        loss = energy.square() * 0.01 + (force - 0.05).square().sum()
+        gradients = torch.autograd.grad(loss, (weight, output))
+        return energy, force, *gradients
+
+    graph = make_fx(compute)(*values)
+    with torch.no_grad():
+        expected = graph(*values)
+        assert split_parameter_batches(graph.graph, minimum_k=32) > 0
+        assert split_parameter_batches(graph.graph, minimum_k=32) == 0
+        graph.recompile()
+        for actual, reference in zip(graph(*values), expected):
+            torch.testing.assert_close(actual, reference, rtol=1e-12, atol=1e-12)
+        compiled = torch.compile(graph, fullgraph=True)
+        for actual, reference in zip(compiled(*values), expected):
+            torch.testing.assert_close(actual, reference, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_parallel_edge_adjoints_cuda(compressed):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from equivariantx.models.tace.tace_oam_xl_v2.compressed import compressed_edge
+    from equivariantx.models.tace.tace_oam_xl_v2.parallel import (
+        overlap_parameter_matrices,
+    )
+
+    torch.manual_seed(155)
+    product = o3.TensorProduct(
+        "4x0e",
+        "0e",
+        "4x0e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    conv = O3TensorProductConv(product, batch_paths=True).cuda().double()
+    edges = 1060
+    indices = torch.randint(7, (2, edges), device="cuda")
+    radial_map = torch.arange(edges, device="cuda") // 2
+    shapes = (
+        (7, 4),
+        (edges // 2 if compressed else edges, 4),
+        (edges, 1),
+        (7, 4),
+        (3, 16),
+        (16, 5),
+    )
+    inputs = tuple(
+        torch.randn(shape, device="cuda", dtype=torch.float64) for shape in shapes
+    )
+    program = repr((((0, 1, 2, 3, 4), False, ((0, 0), (1, 1), (3, 2))),))
+
+    def evaluate(x, weights, attrs, cotangent, left, right):
+        matrix = left @ right
+        operands = [x, weights, weights.new_empty((0, 4)), attrs, cotangent]
+        operation = compressed_edge if compressed else edge_contract
+        outputs = operation(
+            conv.kernel_metadata,
+            program,
+            indices[0],
+            indices[1],
+            operands,
+            *((radial_map,) if compressed else ()),
+        )
+        return (*outputs, matrix)
+
+    graph = make_fx(evaluate)(*inputs)
+    reference = graph(*inputs)
+    count, _ = overlap_parameter_matrices(graph.graph, minimum_k=4)
+    assert count == 1
+    graph.recompile()
+    actual = graph(*inputs)
+    for a, b in zip(reference, actual):
+        torch.testing.assert_close(a, b, rtol=1e-11, atol=1e-10)
+    capture = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(capture):
+        actual = graph(*inputs)
+    capture.replay()
+    for a, b in zip(reference, actual):
+        torch.testing.assert_close(a, b, rtol=1e-11, atol=1e-10)
+
+
+@pytest.mark.parametrize("paired", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("roles", [(0, 1), (0, 1, 3)])
+def test_shared_source_adjoints_cuda(monkeypatch, paired, packed, roles):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    from equivariantx.models.tace.tace_oam_xl_v2.compressed import (
+        compressed_edge,
+        paired_edge,
+    )
+    from equivariantx.models.tace.tace_oam_xl_v2.edge import scheduled_edges
+    from equivariantx.models.tace.tace_oam_xl_v2.packed_edge import pack_edge_metadata
+
+    torch.manual_seed(155)
+    irreps = o3.Irreps("128x0e+128x1o+128x2e")
+    harmonics = o3.Irreps("0e+1o+2e")
+    instructions, outputs = [], []
+    for i, (_, left) in enumerate(irreps):
+        for j, (_, right) in enumerate(harmonics):
+            for output in left * right:
+                if output in [ir for _, ir in irreps]:
+                    instructions.append((i, j, len(outputs), "uvu", True))
+                    outputs.append((128, output))
+    product = o3.TensorProduct(
+        irreps,
+        harmonics,
+        o3.Irreps(outputs),
+        instructions,
+        internal_weights=False,
+        shared_weights=False,
+    )
+    conv = O3TensorProductConv(product, batch_paths=True).cuda().double()
+    metadata = (
+        pack_edge_metadata(conv.kernel_metadata) if packed else conv.kernel_metadata
+    )
+    edges = 1060
+    indices = torch.randint(7, (2, edges), device="cuda")
+    radial_map = torch.arange(edges, device="cuda") // 2
+    shapes = (
+        (7, irreps.dim),
+        (edges if paired else edges // 2, product.weight_numel),
+        (0, product.weight_numel),
+        (edges, harmonics.dim),
+        (7, conv.output_dim),
+    )
+    operands = [
+        torch.randn(shape, device="cuda", dtype=torch.float64) for shape in shapes
+    ]
+    program = repr(
+        (
+            (
+                (0, 1, 2, 3, 4),
+                False,
+                tuple((role, slot) for slot, role in enumerate(roles)),
+            ),
+        )
+    )
+    results = []
+    if paired:
+        reference = scheduled_edges(metadata, program, indices[0], indices[1], operands)
+        slot = roles.index(1)
+        value = reference[slot]
+        reference[slot] = value.new_zeros((edges // 2, value.shape[1])).index_add_(
+            0, radial_map, value
+        )
+    monkeypatch.setenv("EQX_XL_SOURCE_ROW_LIMIT", "16")
+    monkeypatch.setenv("EQX_XL_MIXED_ROW_LIMIT", "16")
+    monkeypatch.setenv("EQX_XL_MIXED_REUSE_ANGULAR", "1")
+    for enabled in ("0", "1"):
+        monkeypatch.setenv("EQX_XL_SOURCE_VJP", enabled)
+        monkeypatch.setenv("EQX_XL_MIXED_OWNER", "source" if enabled == "1" else "off")
+        results.append(
+            (paired_edge if paired else compressed_edge)(
+                metadata,
+                program,
+                indices[0],
+                indices[1],
+                operands,
+                radial_map,
+                *((edges // 2,) if paired else ()),
+            )
+        )
+    for a, b in zip(*results):
+        torch.testing.assert_close(a, b, rtol=1e-11, atol=1e-10)
+    if paired:
+        for actual, expected in zip(results[-1], reference):
+            torch.testing.assert_close(actual, expected, rtol=1e-11, atol=1e-10)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "parallel,extra_use,edges",
+    [
+        (False, False, 1060),
+        (True, False, 1060),
+        (True, True, 1060),
+        (False, False, 0),
+    ],
+)
+def test_paired_radial_gradient_graph(parallel, extra_use, edges):
+    from equivariantx.models.tace.tace_oam_xl_v2.compressed import pair_radial_gradients
+    from equivariantx.models.tace.tace_oam_xl_v2.parallel import (
+        overlap_parameter_matrices,
+    )
+
+    product = o3.TensorProduct(
+        "4x0e",
+        "0e",
+        "4x0e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    conv = O3TensorProductConv(product, batch_paths=True).cuda().double()
+    indices = torch.randint(7, (2, edges), device="cuda")
+    shapes = ((7, 4), (edges, 4), (edges, 1), (7, 4), (3, 16), (16, 5))
+    inputs = [
+        torch.randn(shape, device="cuda", dtype=torch.float64) for shape in shapes
+    ]
+    inputs += [
+        torch.arange(edges // 2, device="cuda"),
+        torch.arange(edges, device="cuda") // 2,
+    ]
+    program = repr((((0, 1, 2, 3, 4), False, ((0, 0), (1, 1), (3, 2))),))
+
+    def evaluate(x, weights, attrs, cotangent, left, right, representatives, inverse):
+        matrix = left @ right
+        values = edge_contract(
+            conv.kernel_metadata,
+            program,
+            indices[0],
+            indices[1],
+            [x, weights, weights.new_empty((0, 4)), attrs, cotangent],
+        )
+        radial = (
+            values[1]
+            .new_zeros((representatives.shape[0], 4))
+            .index_put((inverse,), values[1], accumulate=True)
+        )
+        return (
+            values[0],
+            radial,
+            values[2],
+            matrix,
+            *((values[1].sum(),) if extra_use else ()),
+        )
+
+    graph = make_fx(evaluate)(*inputs)
+    if parallel:
+        assert overlap_parameter_matrices(graph.graph, minimum_k=4)[0] == 1
+    assert pair_radial_gradients(graph.graph) == int(not extra_use)
+    graph.recompile()
+    graph(*inputs)
+    captured = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(captured):
+        actual = graph(*inputs)
+    for _ in range(2):
+        inputs[0].add_(0.01)
+        inputs[-1].copy_(inputs[-1].flip(0))
+        captured.replay()
+        expected = evaluate(*inputs)
+        for a, b in zip(actual, expected):
+            torch.testing.assert_close(a, b, rtol=1e-11, atol=1e-10)
 
 
 def function(x, a, b, layout):

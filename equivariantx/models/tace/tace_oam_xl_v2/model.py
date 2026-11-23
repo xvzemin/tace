@@ -17,6 +17,7 @@ from torch.nn import functional as F
 
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.ops.common.weights import ConvolutionWeights
+from equivariantx.utils.layout import permute
 
 from .angular import aligned_convolution, packed_frame
 from .gated import gated_product, gated_product_metadata
@@ -236,8 +237,8 @@ def grouped_networks(
                 if any(tuple(item.parameters()) for item in layers):
                     raise ValueError("Unsupported parameterized radial activation")
                 values = layer(values)
-        for offset, index in enumerate(ids):
-            outputs[index] = values[offset]
+        for index, value in zip(ids, values.unbind(0)):
+            outputs[index] = value
     return outputs
 
 
@@ -295,8 +296,8 @@ def grouped_projections(
             value = torch.bmm(torch.stack([hidden[i] for i in indices]), weight)
         if has_bias:
             value = value + torch.stack([layer.bias for layer in layers])[:, None, :]
-        for offset, index in enumerate(indices):
-            outputs[index] = value[offset]
+        for index, output in zip(indices, value.unbind(0)):
+            outputs[index] = output
     return outputs
 
 
@@ -321,11 +322,25 @@ def project_radial(network, features, materialize, affine):
 
 
 def degree_projections(
-    networks, updates, radial, source, target, mode, embedding, basis, materialize
+    networks, updates, radial, source, target, mode, embedding, basis, materialize,
+    jet=None,
 ):
     """Batch each harmonic degree across layers and restore convolution path order."""
+    if (
+        jet is not None
+        and materialize
+        and embedding is None
+        and all(type(update).__name__ == "IdentityEdgeUpdate" for update in updates)
+        and all(
+            head.mlp[-1].bias is None for network in networks for head in network.branches
+        )
+    ):
+        from .radial_projection import project_degree_jets
+
+        return project_degree_jets(networks, radial, jet)
     parts = radial.split(networks[0].in_features, -1)
     basis_parts = basis.split(embedding.widths, -1) if embedding is not None else ()
+    slopes = jet[1].split(networks[0].in_features, -1) if jet is not None else ()
     blocks = [[] for _ in networks]
     for degree, part in enumerate(parts):
         ids = [i for i, net in enumerate(networks) if degree in net.active]
@@ -333,16 +348,25 @@ def degree_projections(
             continue
         heads = [networks[i].branches[networks[i].active.index(degree)] for i in ids]
         conditioning = [updates[i] for i in ids]
-        hidden = grouped_networks(
-            heads,
-            conditioning,
-            part,
-            source,
-            target,
-            hidden=True,
-            embedding=embedding.embeddings[degree] if embedding is not None else None,
-            basis=basis_parts[degree] if embedding is not None else None,
-        )
+        if jet is None:
+            hidden = grouped_networks(
+                heads,
+                conditioning,
+                part,
+                source,
+                target,
+                hidden=True,
+                embedding=embedding.embeddings[degree] if embedding is not None else None,
+                basis=basis_parts[degree] if embedding is not None else None,
+            )
+        else:
+            from .radial_jet import AttachRadialJet, packed_hidden_jets
+
+            values, tangents = packed_hidden_jets(heads, part.detach(), slopes[degree])
+            hidden = [
+                AttachRadialJet.apply(value, tangent, jet[0])
+                for value, tangent in zip(values, tangents)
+            ]
         values = (
             grouped_projections(heads, conditioning, hidden, part, source, target, mode)
             if materialize
@@ -355,7 +379,7 @@ def degree_projections(
         features = torch.cat(values, -1) if values else radial[:, :0]
         if materialize:
             if net.output_order is not None:
-                features = features.index_select(-1, net.output_order)
+                features = permute(features, net.output_order, net.inverse_order)
             projection = features.new_empty((0, net.out_features))
         else:
             # The aligned kernel consumes a single shared projection matrix.
@@ -367,17 +391,20 @@ def degree_projections(
                     (projection, torch.cat([head.bias for head in heads])[None]), 0
                 )
             if net.output_order is not None:
-                projection = projection.index_select(1, net.output_order)
+                projection = permute(projection, net.output_order, net.inverse_order)
         results.append((features, projection))
     return results
 
 
-def add_element_weights(features, projection, table, endpoints, materialize):
+def add_element_weights(
+    features, projection, table, endpoints, materialize, offset=None
+):
     """Add the mean of the endpoint path weights."""
     source, target = endpoints
     left, right = table if isinstance(table, tuple) else (table, table)
     if materialize:
-        offset = left[source] + right[target]
+        if offset is None:
+            offset = left[source] + right[target]
         return torch.add(features, offset.to(features), alpha=0.5), projection
     elements = torch.arange(left.size(0), device=source.device)
     a = (source[:, None] == elements).to(features)
@@ -516,11 +543,15 @@ class Representation(torch.nn.Module):
             raise ValueError("TACE-OAM-XL-v2 currently implements training graphs")
         node_type = graph.node_type
         edge_index = data["edge_index"]
-        radial_map = data.get("oam_radial_map")
+        radial_map = data.get("oam_radial_map", data.get("edge_pair_inverse"))
         if radial_map is None:
             radial_index, length = edge_index, graph.edge_length
         else:
-            representatives = data["oam_radial_representatives"]
+            representatives = data[
+                "oam_radial_representatives"
+                if "oam_radial_map" in data
+                else "edge_pair_rows"
+            ]
             radial_index, length = (
                 edge_index[:, representatives],
                 graph.edge_length[representatives],
@@ -608,6 +639,8 @@ class Representation(torch.nn.Module):
             radial_map is not None
             and self.edge_mode == "scheduled"
             and not self.has_local_interactions
+            and getattr(self.edge_embedding, "table_names", ())
+            != ("source_embedding", "target_embedding")
             and nodes.is_cuda
             and os.environ.get("EQX_XL_COMPRESSED_RADIAL", "0") == "1"
         )
@@ -646,6 +679,11 @@ class Representation(torch.nn.Module):
                 )
         if self.degree_radial:
             if not degree_stream:
+                jet = None
+                if self.training and self.radial_jets:
+                    from .radial_jet import jn_slope
+
+                    jet = length, jn_slope(self.radial_basis, length).to(radial)
                 degree_embedding = (
                     self.edge_embedding
                     if self.radial_projection == "composed"
@@ -664,6 +702,7 @@ class Representation(torch.nn.Module):
                     degree_embedding,
                     basis,
                     self.radial_mode == "materialize",
+                    jet=jet,
                 )
         elif radial_jet:
             from .radial_jet import AttachRadialJet, hidden_jets
@@ -724,6 +763,7 @@ class Representation(torch.nn.Module):
                 [layer.scatter_norm.alpha for layer in self.interactions]
             )
         descriptors = []
+        element_tables, element_offsets = {}, {}
         flash_indices = (
             edge_index.to(torch.int32) if self.edge_mode == "flashtp" else None
         )
@@ -777,16 +817,38 @@ class Representation(torch.nn.Module):
                     self.radial_mode == "materialize",
                     self.affine_radial,
                 )
+            layer_radial_map = radial_map
             if not degree_stream and hasattr(self.edge_embedding, "layer_weights"):
+                group = self.element_path_groups[index]
+                if group not in element_tables:
+                    element_tables[group] = self.edge_embedding.layer_weights(index)
+                table = element_tables[group]
+                endpoints = source_types, target_types
+                if radial_map is not None and isinstance(table, tuple):
+                    # Distance features are shared; directed element offsets are not.
+                    features = features[radial_map]
+                    layer_radial_map = None
+                    endpoints = node_type[edge_index[0]], node_type[edge_index[1]]
+                if (
+                    self.radial_mode == "materialize"
+                    and group not in element_offsets
+                ):
+                    left, right = table if isinstance(table, tuple) else (table, table)
+                    element_offsets[group] = left[endpoints[0]] + right[endpoints[1]]
                 features, projection = add_element_weights(
                     features,
                     projection,
-                    self.edge_embedding.layer_weights(index),
-                    (source_types, target_types),
+                    table,
+                    endpoints,
                     self.radial_mode == "materialize",
+                    element_offsets.get(group),
                 )
-            if radial_map is not None and not compressed_radial and not degree_stream:
-                features = features[radial_map]
+            if (
+                layer_radial_map is not None
+                and not compressed_radial
+                and not degree_stream
+            ):
+                features = features[layer_radial_map]
             if mode in ("uv_o2", "uu_o2"):
                 rejector = inter.rejector
                 envelope = message_cutoff
@@ -1037,6 +1099,7 @@ class TACEOAMXLV2(torch.nn.Module):
         affine_radial=False,
         compose_gate=False,
         padded_batches=False,
+        radial_jets=False,
     ):
         """Convert module execution, sharing every original trainable parameter.
 
@@ -1085,6 +1148,10 @@ class TACEOAMXLV2(torch.nn.Module):
         affine_radial : bool, optional
             Keep the radial projection's bias as an addmm epilogue instead of
             augmenting its inner dimension with a constant-one channel.
+        radial_jets : bool, optional
+            Evaluate fixed jn radial MLP values and slopes together during
+            E/F/S training. Preserves their parameter gradients, but not
+            coordinate Hessians. Disabled for evaluation. Defaults to False.
 
         Returns
         -------
@@ -1188,9 +1255,24 @@ class TACEOAMXLV2(torch.nn.Module):
         representation.radial_mode = radial_mode
         representation.affine_radial = affine_radial
         representation.radial_projection = radial_projection
+        representation.radial_jets = radial_jets
+        if radial_jets:
+            from .radial_jet import supports_degree_jets
+
+            if radial_mode != "materialize" or not supports_degree_jets(representation):
+                raise ValueError("Radial jets require fixed jn bases and matching scalar MLPs")
         representation.angular_mode = angular_mode
         representation.edge_mode = edge_mode
         representation.interaction_modes = interaction_modes
+        representation.element_path_groups = tuple(range(representation.num_layers))
+        embedding = representation.edge_embedding
+        if hasattr(embedding, "layer_weights"):
+            groups, representatives = [], {}
+            for layer in range(representation.num_layers):
+                index = getattr(embedding, f"path_index_{layer}")
+                key = None if index is None else tuple(index.cpu().tolist())
+                groups.append(representatives.setdefault(key, layer))
+            representation.element_path_groups = tuple(groups)
         representation.cg_layers = tuple(
             i
             for i, mode in enumerate(representation.interaction_modes)

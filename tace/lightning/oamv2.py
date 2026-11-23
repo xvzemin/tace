@@ -1,4 +1,7 @@
-"""Compiled E/F/S training with canonical TACE checkpoint state."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
 import copy
 import gc
@@ -87,6 +90,10 @@ class OAMLightningModule(LightningWrapperModel):
             )
         require_tensors((*self.model.parameters(), *self.model.buffers()))
         original = self.model
+        from equivariantx.models.tace.tace_oam_xl_v2.radial_jet import (
+            supports_degree_jets,
+        )
+
         stream = (
             memory_first()
             and original.readout_fn.representation.radial_basis.widths is not None
@@ -104,6 +111,12 @@ class OAMLightningModule(LightningWrapperModel):
             compose_products=True,
             affine_radial=True,
             padded_batches=True,
+            radial_jets=(
+                not stream
+                and set(self.loss_fn.loss_property)
+                <= {"energy", "forces", "stress", "virials"}
+                and supports_degree_jets(original.readout_fn.representation)
+            ),
         )
         object.__setattr__(self, "canonical_model", original)
         self.training_loss = register_padded_force_loss(copy.deepcopy(self.loss_fn))
@@ -130,7 +143,7 @@ class OAMLightningModule(LightningWrapperModel):
             )
         data = dict(batch.items())
         nodes = data["positions"].shape[0]
-        predictions, value = self.captured_training(pad_batch(data, 128, 4096))
+        predictions, value = self.captured_training(pad_batch(data, 64, 1024))
         loss = value.detach()
         predictions = {
             key: tensor[:nodes] if key in ("forces", "node_energy") else tensor

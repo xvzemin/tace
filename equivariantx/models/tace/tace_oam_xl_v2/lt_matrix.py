@@ -6,10 +6,11 @@ output buffers. Calibration runs before CUDA Graph capture.
 """
 
 import ctypes as ct
-from functools import lru_cache
-import os
 import json
+import os
+from functools import lru_cache
 from pathlib import Path
+
 import torch
 
 
@@ -90,8 +91,14 @@ class MatrixPlan:
     def __init__(
         self, left, right, workspace_bytes=128 * 1024 * 1024, candidates=32, sm_count=0
     ):
+        self.closed = False
         if left.dtype != torch.float32 or right.dtype != torch.float32:
             raise TypeError("The calibrated TF32 plan requires FP32 operands")
+        if left.ndim != right.ndim or left.ndim not in (2, 3):
+            raise ValueError("Supply matrices or matching matrix batches")
+        if left.ndim == 3 and left.shape[0] != right.shape[0]:
+            raise ValueError("Matrix batch counts differ")
+        self.shape = (*left.shape[:-1], right.shape[-1])
         self.lib = lib = library()
         self.handle = ct.c_void_p()
         self.desc = ct.c_void_p()
@@ -107,14 +114,14 @@ class MatrixPlan:
             )
         self.layouts = []
 
-        def layout(tensor):
-            if tensor.stride(1) == 1:
-                rows, cols = tensor.shape
-                leading = tensor.stride(0)
+        def layout(shape, strides):
+            if strides[-1] == 1:
+                rows, cols = shape[-2:]
+                leading = strides[-2]
                 trans = 0
-            elif tensor.stride(0) == 1:
-                cols, rows = tensor.shape
-                leading = tensor.stride(1)
+            elif strides[-2] == 1:
+                cols, rows = shape[-2:]
+                leading = strides[-1]
                 trans = 1
             else:
                 raise ValueError("Dense matrices or transposes required")
@@ -133,12 +140,25 @@ class MatrixPlan:
                 "order",
             )
             self.layouts.append(pointer)
+            if len(shape) == 3:
+                for attribute, value in (
+                    (5, ct.c_int(shape[0])),
+                    (6, ct.c_int64(strides[0])),
+                ):
+                    checked(
+                        lib.cublasLtMatrixLayoutSetAttribute(
+                            pointer, attribute, ct.byref(value), ct.sizeof(value)
+                        ),
+                        "batch layout",
+                    )
             return pointer, trans
 
-        example = left.new_empty((left.shape[0], right.shape[1]), dtype=torch.float32)
-        self.a, ta = layout(left)
-        self.b, tb = layout(right)
-        self.d, _ = layout(example)
+        self.a, ta = layout(left.shape, left.stride())
+        self.b, tb = layout(right.shape, right.stride())
+        strides = (self.shape[-1], 1)
+        if left.ndim == 3:
+            strides = (self.shape[-2] * self.shape[-1], *strides)
+        self.d, _ = layout(self.shape, strides)
         for attribute, value in ((3, ta), (4, tb)):
             datum = ct.c_int(value)
             checked(
@@ -181,7 +201,7 @@ class MatrixPlan:
 
     def run(self, left, right, index, out=None):
         if out is None:
-            out = left.new_empty((left.shape[0], right.shape[1]), dtype=torch.float32)
+            out = left.new_empty(self.shape, dtype=torch.float32)
         algorithm = self.algorithms[index]
         checked(
             self.lib.cublasLtMatmul(
@@ -200,13 +220,16 @@ class MatrixPlan:
                 ct.byref(algorithm.algo),
                 self.workspace.data_ptr(),
                 self.workspace.numel(),
-                torch.cuda.current_stream().cuda_stream,
+                torch.cuda.current_stream(left.device).cuda_stream,
             ),
             "matmul",
         )
         return out
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         for pointer in self.layouts:
             checked(self.lib.cublasLtMatrixLayoutDestroy(pointer), "destroy layout")
         checked(
@@ -215,8 +238,110 @@ class MatrixPlan:
         checked(self.lib.cublasLtMatmulDescDestroy(self.desc), "destroy desc")
         checked(self.lib.cublasLtDestroy(self.handle), "destroy handle")
 
+    def __del__(self):
+        try:
+            self.close()
+        except (AttributeError, RuntimeError):
+            pass
+
 
 PLANS = {}
+BATCHED_PLANS = {}
+
+
+def graph_time(call, repeats=8):
+    """Measure replay on the same stream used to initialize library workspaces."""
+    parent = torch.cuda.current_stream()
+    stream = parent if parent.cuda_stream else torch.cuda.Stream()
+    stream.wait_stream(parent)
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            call()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream, capture_error_mode="thread_local"):
+            call()
+        for _ in range(5):
+            graph.replay()
+        start, end = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+        start.record()
+        for _ in range(repeats):
+            graph.replay()
+        end.record()
+        end.synchronize()
+    parent.wait_stream(stream)
+    return start.elapsed_time(end) / repeats
+
+
+def calibrate_batched(left, right):
+    """Use a live-validated TF32 batch plan only when it beats torch.bmm."""
+    expected = torch.bmm(left, right)
+    if not torch.isfinite(expected).all():
+        return None
+    plan = MatrixPlan(left, right, workspace_bytes=32 * 1024**2, candidates=8)
+    output = torch.empty_like(expected)
+    best = graph_time(lambda: torch.bmm(left, right, out=output))
+    plan.choice = -1
+    scale = expected.norm().clamp_min(1e-30)
+    for index in range(plan.count):
+        if plan.algorithms[index].status:
+            continue
+        try:
+            plan.run(left, right, index, output)
+            if (
+                not torch.isfinite(output).all()
+                or (output - expected).norm() / scale > 0.001
+            ):
+                continue
+            elapsed = graph_time(lambda: plan.run(left, right, index, output))
+            if elapsed < best * 0.98:
+                best, plan.choice = elapsed, index
+        except RuntimeError:
+            continue
+    if plan.choice < 0:
+        plan.close()
+        return None
+    return plan
+
+
+@torch.library.custom_op(
+    "eqx_oam_xl::lt_radial_bmm", mutates_args=(), device_types="cuda"
+)
+def lt_radial_bmm(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Read current operands with a graph-owned, stream-local TF32 plan."""
+    from equivariantx.ops.common.cuda.graph import CAPTURE_CONSTANTS
+
+    from .precision import require_tensors
+
+    require_tensors((left, right))
+    if (
+        left.dtype != torch.float32
+        or torch.backends.cuda.matmul.fp32_precision != "tf32"
+    ):
+        return torch.bmm(left, right)
+    retained = CAPTURE_CONSTANTS.get()
+    plans = BATCHED_PLANS if retained is None else retained
+    key = (
+        "oam_batched_matrix",
+        left.device,
+        torch.cuda.current_stream(left.device).cuda_stream,
+        tuple(left.shape),
+        tuple(right.shape),
+        left.stride(),
+        right.stride(),
+    )
+    if key not in plans:
+        if torch.cuda.is_current_stream_capturing():
+            return torch.bmm(left, right)
+        plans[key] = calibrate_batched(left, right)
+    plan = plans[key]
+    return (
+        torch.bmm(left, right) if plan is None else plan.run(left, right, plan.choice)
+    )
+
+
+@lt_radial_bmm.register_fake
+def fake_lt_radial_bmm(left, right):
+    return left.new_empty((left.shape[0], left.shape[1], right.shape[2]))
 
 
 def eligible(left, right):
@@ -297,15 +422,20 @@ def calibrate(left, right):
 
 def selected_mm(left, right):
     """Reuse only algorithm plans; every call reads current operand values."""
+    from equivariantx.ops.common.cuda.graph import CAPTURE_CONSTANTS
+
     from .precision import require_tensors
 
     require_tensors((left, right))
     if os.environ.get("EQX_XL_LT_RADIAL", "0") != "1" or not eligible(left, right):
         return torch.mm(left, right)
     stream = torch.cuda.current_stream(left.device)
+    retained = CAPTURE_CONSTANTS.get()
+    plans = PLANS if retained is None else retained
     # Separate workspaces for independent streams; repeated calls on a stream
     # are ordered. Including stream avoids concurrent scratchpad reuse.
     key = (
+        "oam_matrix",
         left.device.index,
         stream.cuda_stream,
         tuple(left.shape),
@@ -313,21 +443,22 @@ def selected_mm(left, right):
         int(os.environ.get("EQX_XL_LT_SM_TARGET", "0")),
         int(os.environ.get("EQX_XL_LT_ALGORITHM", "-1")),
     )
-    plan = PLANS.get(key)
+    plan = plans.get(key)
     if plan is None:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "Warm up the live radial GEMM plan on this stream before capture"
             )
         plan = calibrate(left, right)
-        PLANS[key] = plan
+        plans[key] = plan
         manifest = os.environ.get("EQX_XL_LT_MANIFEST")
         if manifest:
             Path(manifest).write_text(
                 json.dumps(
                     [
                         dict(key=list(key), **value.measurements)
-                        for key, value in PLANS.items()
+                        for key, value in plans.items()
+                        if isinstance(key, tuple) and key[0] == "oam_matrix"
                     ],
                     indent=2,
                 )
@@ -358,9 +489,32 @@ def select_radial_matrices(graph):
 
     count = 0
     for node in graph.nodes:
-        if node.target != torch.ops.aten.mm.default or node.kwargs:
+        if (
+            node.target not in (torch.ops.aten.mm.default, torch.ops.aten.bmm.default)
+            or node.kwargs
+        ):
             continue
         a, b = (item.meta.get("val") for item in node.args)
+        if node.target == torch.ops.aten.bmm.default:
+            if (
+                isinstance(a, torch.Tensor)
+                and isinstance(b, torch.Tensor)
+                and a.dtype == b.dtype == torch.float32
+                and a.device.type == "cuda"
+                and a.ndim == b.ndim == 3
+                and isinstance(a.shape[0], int)
+                and 1 < a.shape[0] <= 32
+                and isinstance(a.shape[2], int)
+                and a.shape[2] == 128
+                and isinstance(b.shape[2], int)
+                and b.shape[2] >= 128
+                and hint(a.shape[1]) >= 4096
+                and a.stride(-1) == b.stride(-1) == 1
+            ):
+                node.target = torch.ops.eqx_oam_xl.lt_radial_bmm.default
+                refresh_inputs(node)
+                count += 1
+            continue
         if (
             isinstance(a, torch.Tensor)
             and isinstance(b, torch.Tensor)
