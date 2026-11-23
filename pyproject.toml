@@ -1,6 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=74.1", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[[tool.setuptools.ext-modules]]
+name = "tace.dataset._connectivity"
+sources = ["tace/dataset/connectivity.c"]
+optional = true
 
 [project]
 name = "TACE"

@@ -842,6 +842,11 @@ class GraphDataModule(LightningDataModule):
                 self.train_dataset,
                 self.filter_options,
                 graph_cutoff=self.graph_config["cutoff"],
+                group=(
+                    dist.group.WORLD
+                    if dist.is_available() and dist.is_initialized()
+                    else None
+                ),
             )
         dataset = self._filtered_train_dataset
         if self.augmentation:

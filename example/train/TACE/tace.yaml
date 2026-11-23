@@ -167,13 +167,18 @@ dataset:
   # Compression level and LMDB transaction/shard limits are internal, not YAML options.
   filter: # train only; statistics, validation and test use the complete data
     enabled: false
-    max_edges: null # inclusive directed-edge limit; omit or set to null for no limit
     max_atoms: null # inclusive atom-count limit; null disables
-    min_covalent_ratio: 0.5 # minimum distance / (R_cov_i + R_cov_j); null disables
+    max_edges: null # inclusive directed-edge limit; omit or set to null for no limit
     drop_isolated: true # require a neighbor for each atom in multi-atom structures
-    max_forces: 200.0 # maximum per-atom force norm (eV/angstrom); null disables
+    drop_disconnected: true # require one connected component in the cutoff graph
+    max_translation_forces_rmse: 1e-2 # per-component net-force correction RMSE (eV/angstrom); null disables
+    max_rotation_forces_rmse: 1e-4 # finite-component rotational force RMSE (eV/angstrom); null disables
+    max_forces_stress_residual: 1e-6 # constrained force-virial / stress mismatch (eV/angstrom^3); null disables
+    min_covalent_ratio: null # minimum distance / (R_cov_i + R_cov_j); null disables
+    max_forces: null # maximum per-atom force norm (eV/angstrom); null disables
     max_energy_per_atom: null # signed energy/atom upper bound, not absolute value; null disables
-    max_stress: 6.0 # stress tensor Frobenius norm (eV/angstrom^3); null disables
+    max_stress: null # stress tensor Frobenius norm (eV/angstrom^3); null disables
+
   shard_dirs: # reusable graph and record caches; source files remain unchanged
     - graphCache
   # Source-record cache for formats without random access; separate from graph shards.

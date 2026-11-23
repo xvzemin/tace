@@ -191,7 +191,8 @@ def compress_array_record(value):
     )
 
 
-def decode_array_record(value, kind, fields=None):
+def decode_array_record(value, kind, fields=None, *, numpy_views=False):
+    """Decode owned arrays, or borrow NumPy views for a transaction-local scan."""
     view = memoryview(value)
     if len(view) < _HEADER.size:
         raise ValueError("Truncated typed-array record")
@@ -261,17 +262,14 @@ def decode_array_record(value, kind, fields=None):
                 or payload_start + offset + nbytes > len(view)
             ):
                 raise ValueError("Invalid typed-array payload bounds")
-            # Own the returned storage: no tensor can outlive a transaction buffer.
-            array = (
-                np.frombuffer(
-                    view, dtype=dtype, count=count, offset=payload_start + offset
-                )
-                .copy()
-                .reshape(shape)
-            )
+            array = np.frombuffer(
+                view, dtype=dtype, count=count, offset=payload_start + offset
+            ).reshape(shape)
+            if not numpy_views:
+                array = array.copy()
             if not array.dtype.isnative:
                 array = array.astype(array.dtype.newbyteorder("="))
-            result = torch.from_numpy(array) if tensor else array
+            result = torch.from_numpy(array) if tensor and not numpy_views else array
             decoded[content] = result
             return result
         if tag == "d":
@@ -530,6 +528,17 @@ class GraphDatasetLMDB(Dataset):
 
     def __getitem__(self, index):
         return self.__getitems__([index])[0]
+
+    def map_shard(self, shard, indices, decode):
+        """Process increasing, unique shard-local records inside their transaction."""
+        keys = [f"{i:09d}".encode("ascii") for i in indices]
+        with _ENV_LOCK, self._transaction(shard).cursor() as cursor:
+            values = cursor.getmulti(keys)
+            if len(values) != len(keys):
+                raise IndexError(
+                    f"Missing record in LMDB shard {self.lmdb_paths[shard]}"
+                )
+            return [decode(value) for _, value in values]
 
     def __getitems__(self, indices):
         self._ensure_process()

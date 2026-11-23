@@ -7,7 +7,9 @@ import pickle
 import shutil
 import struct
 import zlib
+from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import lmdb
 import numpy as np
@@ -21,6 +23,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
 import tace.dataset.cache as cache_module
+import tace.dataset.filter as filter_module
 import tace.dataset.statistics as statistics_module
 from tace.dataset.cache import (
     ARRAY_CODEC,
@@ -1048,7 +1051,17 @@ def test_cached_graph_filters_are_inclusive_and_readonly(
     else:
         dataset = write_graphs(graphs, [tmp_path], "train", shard_size=2)
     before = file_snapshot(tmp_path)
-    bounds = filter_options(options)
+    bounds = filter_options(
+        dict(
+            options,
+            drop_disconnected=False,
+            max_rotation_forces_rmse=None,
+            max_translation_forces_rmse=None,
+            max_forces_stress_residual=None,
+        )
+        if options is not None
+        else None
+    )
     if not set(bounds) & {"max_forces", "max_energy_per_atom", "max_stress"}:
         with monkeypatch.context() as patch:
             patch.setattr(
@@ -1080,6 +1093,80 @@ def test_cached_graph_filters_are_inclusive_and_readonly(
     selected.close()
     dataset.close()
     assert file_snapshot(tmp_path) == before
+
+
+def run_distributed_filter(rank, rendezvous, view):
+    dist = torch.distributed
+    dist.init_process_group(
+        "gloo",
+        store=dist.FileStore(rendezvous, 2),
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=90),
+    )
+    try:
+        with (
+            patch.object(filter_module, "FILTER_ROWS_PER_RANK", 2),
+            patch.object(
+                filter_module, "accepts_graph", wraps=filter_module.accepts_graph
+            ) as accepts,
+        ):
+            selected = filter_graphs(
+                view, {"max_energy_per_atom": 7}, group=dist.group.WORLD
+            )
+            assert selected.indices.tolist() == [0, 2, 3, 4, 7]
+            count = torch.tensor(accepts.call_count)
+            dist.all_reduce(count)
+            assert count.item() == len(view)
+            selected.close()
+
+        memory = GraphDatasetLMDB([], in_memory=True)
+        energy = Data(num_nodes=2, energy=torch.zeros(1), energy_weight=torch.ones(1))
+        memory.data_list = [energy, Data(num_nodes=2, energy=torch.zeros(1))]
+        memory.length = len(memory.data_list)
+        with pytest.raises(ValueError, match="Graph lacks energy"):
+            filter_graphs(memory, {"max_energy_per_atom": 7}, group=dist.group.WORLD)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("distributed", [False, True])
+def test_parallel_filter_preserves_order_and_reads_only_once(
+    tmp_path, monkeypatch, distributed
+):
+    if distributed and not (
+        torch.distributed.is_available() and torch.distributed.is_gloo_available()
+    ):
+        pytest.skip("Gloo required")
+    directory = tmp_path / "graphs"
+    graphs = [
+        Data(
+            num_nodes=2,
+            atomic_numbers=torch.tensor([1, 1]),
+            edge_index=torch.tensor([[0, 1], [1, 0]]),
+            energy=torch.tensor([2 * i], dtype=torch.float64),
+            energy_weight=torch.ones(1, dtype=torch.float64),
+        )
+        for i in range(13)
+    ]
+    store = write_graphs(graphs, [directory], "train", shard_size=4)
+    view = store.select([0, 2, 3, 4, 7, 8, 9, 11, 12]).project(["atomic_numbers"])
+    before = file_snapshot(directory)
+    if distributed:
+        torch.multiprocessing.spawn(
+            run_distributed_filter, args=(str(tmp_path / "rendezvous"), view), nprocs=2
+        )
+    else:
+        monkeypatch.setattr(filter_module, "filter_workers", lambda *args: 2)
+        rng = torch.get_rng_state()
+        selected = filter_graphs(view, {"max_energy_per_atom": 7})
+        assert selected.indices.tolist() == [0, 2, 3, 4, 7]
+        assert set(selected[0].keys()) == {"num_nodes", "atomic_numbers"}
+        assert torch.equal(torch.get_rng_state(), rng)
+        selected.close()
+    view.close()
+    store.close()
+    assert file_snapshot(directory) == before
 
 
 @pytest.mark.parametrize("storage", ["memory", "lmdb", "clmdb"])
@@ -1124,7 +1211,7 @@ def test_min_covalent_ratio_filters_periodic_graphs(tmp_path, storage):
     before = file_snapshot(tmp_path)
     view = dataset.project(["energy"])
     options = filter_options(
-        {"enabled": True, "max_edges": None, "min_covalent_ratio": 0.5}
+        {"enabled": True, "drop_disconnected": False, "min_covalent_ratio": 0.5}
     )
     cutoff = config["cutoff"] if storage == "memory" else None
     selected = filter_graphs(view, options, graph_cutoff=cutoff)
@@ -1189,7 +1276,14 @@ def test_drop_isolated_keeps_single_atoms_and_uses_the_graph_cutoff(
     before = file_snapshot(tmp_path)
     view = dataset.project(["atomic_numbers"])
     options = filter_options(
-        {"enabled": True, "max_edges": None, "drop_isolated": True}
+        {
+            "enabled": True,
+            "drop_disconnected": False,
+            "max_rotation_forces_rmse": None,
+            "max_translation_forces_rmse": None,
+            "max_forces_stress_residual": None,
+            "drop_isolated": True,
+        }
     )
     selected = filter_graphs(view, options)
     assert selected.indices.tolist() == expected
@@ -1212,6 +1306,206 @@ def test_drop_isolated_keeps_single_atoms_and_uses_the_graph_cutoff(
     assert file_snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("storage", ["memory", "clmdb"])
+def test_topology_filters_are_independent_and_periodic(tmp_path, storage):
+    def chain(x):
+        return Atoms(numbers=[1] * len(x), positions=[[a, 0, 0] for a in x])
+
+    pair = Atoms("H2", positions=[[0.2, 0, 0], [9.8, 0.3, 0]], cell=[10] * 3, pbc=True)
+    periodic = chain([0, 0.9, 1.8])
+    periodic.set_cell([2.7, 10, 10])
+    periodic.set_pbc([True, False, False])
+    mixed = periodic + Atoms("H2", positions=[[0, 4, 0], [0.7, 4, 0]])
+    frames = [
+        chain([0]),
+        chain([0, 0.7, 4, 4.7]),
+        pair,
+        pair.copy(),
+        periodic,
+        chain([0, 0.7, 4, 4.7]),
+        mixed,
+        pair.copy(),
+        Atoms("H3", positions=[[0, 0, 0], [1, 0, 0], [0, 1, 0]]),
+    ]
+    for atoms in frames[:-1]:
+        atoms.arrays["forces"] = np.zeros((len(atoms), 3))
+    frames[1].arrays["forces"][:] = [0, 1, 0]  # Translation is not rotation.
+    frames[1].arrays["forces"][2:] *= -1  # Opposite fragment drifts cancel globally.
+    frames[2].arrays["forces"][1] = [-0.4, 0.3, 0]  # Along the unwrapped bond.
+    frames[2].arrays["forces"][0] = -frames[2].arrays["forces"][1]
+    for i in (3, 4, 5, 6):
+        frames[i].arrays["forces"][-1, 2] = 1
+    # No force label in frame 7. Frame 8 has a pure rigid-rotation force field.
+    del frames[7].arrays["forces"]
+    frames[8].arrays["forces"] = np.cross(
+        [0, 0, 1], frames[8].positions - frames[8].positions.mean(axis=0)
+    )
+    for atoms, forces in (
+        (chain([0]), [[1.0, 0.0, 0.0]]),
+        (chain([0, 5]), [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+    ):
+        atoms.arrays["forces"] = np.asarray(forces)
+        frames.append(atoms)
+    config = {"cutoff": 1.1, "max_neighbors": None}
+    dataset = create_graphs(
+        frames,
+        build_element_lookup([1]),
+        dict(
+            config,
+            keyspec=KeySpecification.from_defaults(),
+            target_property=["forces"],
+            embedding_property=[],
+            neighborlist_backend="ase",
+        ),
+        "train",
+        [tmp_path],
+        storage_mode=storage,
+        graph_config=config,
+    )
+    view = dataset.project(["atomic_numbers"])
+    assert filter_options({"enabled": True}) == {
+        "drop_disconnected": True,
+        "max_rotation_forces_rmse": 1e-4,
+        "max_translation_forces_rmse": 0.01,
+        "max_forces_stress_residual": 1e-6,
+    }
+    for overrides, expected in (
+        ({}, [0, 2, 7, 9]),
+        ({"drop_disconnected": False}, [0, 2, 7, 9]),
+        ({"max_rotation_forces_rmse": None}, [0, 2, 7, 8, 9]),
+        ({"max_translation_forces_rmse": None}, [0, 2, 4, 7, 9]),
+        (
+            {"drop_disconnected": False, "max_translation_forces_rmse": None},
+            [0, 1, 2, 4, 7, 9, 10],
+        ),
+        ({"drop_disconnected": False, "max_rotation_forces_rmse": None}, [0, 2, 7, 8, 9]),
+    ):
+        selected = filter_graphs(
+            view,
+            filter_options({"enabled": True, **overrides}),
+            graph_cutoff=config["cutoff"],
+        )
+        assert selected.indices.tolist() == expected
+        assert "forces" not in selected[0]
+        selected.close()
+    view.close()
+    dataset.close()
+
+
+def test_topology_cutoff_and_rotation_threshold():
+    # Only one directed edge is necessary for connectivity. A bond exactly
+    # at the cutoff is inactive, even if a neighbor backend stored it.
+    g = dict(
+        positions=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+        edge_index=torch.tensor([[1], [0]]),
+        edge_shifts=torch.zeros(1, 3).long(),
+        lattice=torch.eye(3),
+        forces=torch.tensor([[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]),
+        forces_weight=torch.ones(1),
+    )
+    assert not filter_module.accepts_graph(g, {"drop_disconnected": True}, 2, 1.0)
+    assert filter_module.accepts_graph(g, {"drop_disconnected": True}, 2, 1.1)
+    limit = np.sqrt(1.0 / 3.0)
+    assert filter_module.accepts_graph(g, {"max_rotation_forces_rmse": limit}, 2, 1.1)
+    assert not filter_module.accepts_graph(
+        g, {"max_rotation_forces_rmse": np.nextafter(limit, 0.0)}, 2, 1.1
+    )
+    # An unconnected singleton and a dimer with opposite resultant forces.
+    g["positions"] = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
+    g["forces"] = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [-2.0, 0.0, 0.0]])
+    limit = np.sqrt(2.0 / 3.0)
+    assert filter_module.accepts_graph(
+        g, {"max_translation_forces_rmse": limit}, 3, 1.1
+    )
+    assert not filter_module.accepts_graph(
+        g, {"max_translation_forces_rmse": np.nextafter(limit, 0.0)}, 3, 1.1
+    )
+
+
+@pytest.mark.parametrize("storage", ["memory", "clmdb"])
+def test_forces_stress_filter(tmp_path, storage):
+    def frame(pos, indices, shifts):
+        return Data(
+            num_nodes=len(pos),
+            positions=torch.tensor(pos, dtype=torch.float64),
+            atomic_numbers=torch.ones(len(pos), dtype=torch.long),
+            edge_index=torch.tensor(indices, dtype=torch.long).reshape(2, -1),
+            edge_shifts=torch.tensor(shifts, dtype=torch.long).reshape(-1, 3),
+            lattice=2 * torch.eye(3, dtype=torch.float64).unsqueeze(0),
+            pbc=torch.ones((1, 3), dtype=torch.bool),
+            forces=torch.zeros(len(pos), 3, dtype=torch.float64),
+            stress=torch.zeros(1, 3, 3, dtype=torch.float64),
+            forces_weight=torch.ones(1, dtype=torch.float64),
+            stress_weight=torch.ones(1, dtype=torch.float64),
+        )
+
+    # One directed edge crossing a face is still a finite dimer, length 0.5.
+    pair = frame([[0.25, 0, 0], [1.75, 0, 0]], [[0], [1]], [[-1, 0, 0]])
+    pair.forces[:, 0] = torch.tensor([-1.0, 1.0])
+    pair.stress[0, 0, 0] = 0.5 / 8
+    wrong_sign = pair.clone()
+    wrong_sign.stress.neg_()
+    chain = frame([[0, 0, 0]], [[0], [0]], [[1, 0, 0]])
+    chain.stress[0, 0, 0] = 20  # Free winding direction, regardless of magnitude.
+    chain_bad = chain.clone()
+    chain_bad.stress[0, 1, 1] = 1
+    bulk = frame([[0, 0, 0]], [[0] * 3, [0] * 3], np.eye(3, dtype=int))
+    bulk.stress.fill_(7)
+    isolated = frame([[0, 0, 0]], [[], []], [])
+    isolated.stress[0, 2, 2] = 1
+    missing = isolated.clone()
+    missing.forces_weight.zero_()
+    nonperiodic = isolated.clone()
+    nonperiodic.pbc.zero_()
+    frames = [pair, wrong_sign, chain, chain_bad, bulk, isolated, missing, nonperiodic]
+    bounds = {"max_forces_stress_residual": 1e-5}
+    if storage == "memory":
+        store = GraphDatasetLMDB([], in_memory=True)
+        store.data_list, store.length = frames, len(frames)
+    else:
+        store = write_graphs(frames, [tmp_path], "train", shard_size=3)
+    view = store.project(["atomic_numbers"])
+    selected = filter_graphs(view, bounds, graph_cutoff=2.1)
+    assert selected.indices.tolist() == [0, 2, 4, 5, 6, 7]
+    assert filter_module.accepts_graph(
+        isolated, {"max_forces_stress_residual": 1}, 1, 2.1
+    )
+    assert filter_module.accepts_graph(
+        chain, bounds, 1, 2.0
+    )  # No active image at the cutoff: isolated reference.
+    # Count, missing-label and physical bounds cannot discard references.
+    assert filter_graphs(
+        view,
+        {"max_atoms": 0, "max_edges": 0, "max_energy_per_atom": -1},
+        graph_cutoff=2.1,
+    ).indices.tolist() == [5, 6, 7]
+    selected.close()
+    view.close()
+    store.close()
+
+
+def test_bulk_filter_certificate():
+    from tace.dataset.topology import bulk_certificate, native_bulk
+
+    # Three shifted edges are winding witnesses only if a tree of active
+    # zero-shift edges already connects their endpoints and all other sites.
+    x = np.array([[0.0, 0.0, 0.0], [0.25, 0.0, 0.0], [0.5, 0.0, 0.0]])
+    cell = np.eye(3)
+    edges = np.array([[0, 1, 0, 0, 0], [1, 2, 0, 0, 0]], dtype=np.int64)
+    shifts = np.vstack((np.zeros((2, 3), dtype=np.int64), np.eye(3, dtype=np.int64)))
+    for keep, cutoff, expected in [
+        ([0, 1, 2, 3, 4], 1.1, True),
+        ([0, 1, 2, 3, 4], 1.0, False),
+        ([0, 2, 3, 4], 1.1, False),
+        ([0, 1, 2, 3], 1.1, False),
+    ]:
+        e = np.ascontiguousarray(edges[:, keep])
+        s = shifts[keep]
+        assert bulk_certificate(*e, s, x, cell, cutoff) == expected
+        if native_bulk is not None:
+            assert native_bulk(e, s, x, cell, cutoff**2) == expected
+
+
 @pytest.mark.parametrize(
     "options,error",
     [
@@ -1223,6 +1517,10 @@ def test_drop_isolated_keeps_single_atoms_and_uses_the_graph_cutoff(
         ({"enabled": True, "min_covalent_ratio": True}, TypeError),
         ({"enabled": True, "drop_isolated": 6.0}, TypeError),
         ({"enabled": True, "drop_isolated": None}, TypeError),
+        ({"enabled": True, "drop_disconnected": 1}, TypeError),
+        ({"enabled": True, "max_rotation_forces_rmse": -1e-4}, ValueError),
+        ({"enabled": True, "max_forces_stress_residual": -1e-5}, ValueError),
+        ({"enabled": True, "max_translation_forces_rmse": -0.01}, ValueError),
         ({"enabled": True, "min_distance": 0.5}, ValueError),
         ({"enabled": True, "max_energy_per_atom": float("inf")}, ValueError),
         ({"enabled": True, "max_stress": float("nan")}, ValueError),
@@ -1256,6 +1554,7 @@ def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch
     old_key = statistics_cache_key(cfg, ["energy"], [], keyspec)
     cfg["dataset"]["filter"] = {
         "enabled": True,
+        "max_translation_forces_rmse": None,  # Synthetic labels are uniform forces.
         "max_energy_per_atom": -1,
         "max_forces": 2,
     }
@@ -1319,16 +1618,14 @@ def test_cached_filter_only_changes_training_loader(tmp_path, monkeypatch, epoch
             40,
         ]
         evaluation_loader.dataset.close()
-    with pytest.raises(ValueError, match="removed all"):
-        filter_graphs(datasets[0], {"max_atoms": 0})
+    assert filter_graphs(datasets[0], {"max_atoms": 0}).indices.tolist() == [0]
     with pytest.raises(ValueError, match="lack fields"):
         filter_graphs(datasets[0], {"max_stress": 1})
-    # Even an empty training selection must not block statistics or evaluation.
+    # The isolated reference is retained independently of the training limits.
     cfg["dataset"]["filter"]["max_atoms"] = 0
     rejected = load_cached_datamodule(cfg, ["energy"], [], keyspec)
     assert len(rejected.train_dataset) == len(rejected.val_dataset) == 4
-    with pytest.raises(ValueError, match="removed all"):
-        rejected.train_dataloader()
+    assert rejected.train_dataloader().dataset.indices.tolist() == [0]
     rejected.train_dataset.close()
     rejected.val_dataset.close()
     loader.dataset.close()

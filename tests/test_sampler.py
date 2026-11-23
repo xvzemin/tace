@@ -16,7 +16,7 @@ from torch_geometric.data import Data
 from tace.dataset.augmentation import AugmentedDataset
 from tace.dataset.dataloader import build_graph_dataloader
 from tace.dataset.datamodule import GraphDataModule
-from tace.dataset.filter import filter_graphs, filter_options
+from tace.dataset.filter import filter_graphs
 from tace.dataset.quantity import KeySpecification
 from tace.dataset.sampler import EpochSampler
 from tace.dataset.store import write_graphs
@@ -550,7 +550,7 @@ def test_filtered_lmdb_sampling_coverage_ranks_and_resume(tmp_path, shuffle, bal
         for i in range(12)
     ]
     source = write_graphs(graphs, [tmp_path], "train", shard_size=3)
-    selected = filter_graphs(source, filter_options({"enabled": True, "max_atoms": 2}))
+    selected = filter_graphs(source, {"max_atoms": 2})
     dataset = AugmentedDataset(selected, ["time_reversal"])
     expected = [i for i in range(12) if i % 3 < 2]
     assert len(dataset) == len(expected)

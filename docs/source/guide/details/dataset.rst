@@ -159,10 +159,12 @@ Training filters
 ----------------
 
 ``dataset.filter`` selects complete training graphs without rewriting the cache.
-It is disabled by default. When enabled, omitted or ``null`` numeric bounds
-impose no limit, and ``drop_isolated`` defaults to ``false``. A structure must
-satisfy every specified bound. For example, to keep graphs with at most
-24,000 directed edges:
+It is disabled by default. When enabled, connectivity, translational and rotational
+force consistency, and force–stress consistency are checked. Other numeric bounds default to ``null``
+(no limit). An isolated reference atom (one site with no periodic image inside
+the cutoff) always passes, regardless of its labels or any enabled limit.
+One-site crystals with an active periodic image, and all multi-atom structures,
+are subject to the enabled rules. For example:
 
 .. code-block:: yaml
 
@@ -173,6 +175,10 @@ satisfy every specified bound. For example, to keep graphs with at most
        max_atoms: null
        min_covalent_ratio: null
        drop_isolated: false
+       drop_disconnected: true
+       max_translation_forces_rmse: 0.01
+       max_rotation_forces_rmse: 1.0e-4
+       max_forces_stress_residual: 1.0e-6
        max_forces: null
        max_energy_per_atom: null
        max_stress: null
@@ -187,16 +193,47 @@ satisfy every specified bound. For example, to keep graphs with at most
 * ``drop_isolated: true`` rejects a multi-atom structure if any atom has no
   neighbor within the graph cutoff. Single-atom structures pass this filter.
   Nonzero-shift periodic images count as neighbors.
+* ``drop_disconnected`` rejects multi-atom structures with more than one
+  connected component in the cutoff graph, even if every atom has neighbors.
+  Periodic bonds connect their two sites in the input cell.
+* ``max_translation_forces_rmse`` bounds the minimum force correction required
+  for zero net force in each connected component, including periodic and
+  single-atom components. For :math:`N` atoms the metric is
+  :math:`[\sum_C |\sum_{i\in C}\mathbf F_i|^2/(3N |C|)]^{1/2}` in
+  eV/Angstrom. For a connected graph it is the norm of the mean force divided
+  by :math:`\sqrt{3}`. Values equal to the bound pass. Missing or zero-weight
+  force labels skip this rule; ``null`` disables it. Labels are not modified.
+* ``max_rotation_forces_rmse`` bounds the force component incompatible with an
+  independently rotatable, finite fragment, in eV/Angstrom. Finite fragments
+  are unwrapped across cell boundaries. Components with periodic winding and
+  single atoms contribute zero. The squared Cartesian force corrections are
+  summed over fragments and divided by :math:`3N` for the entire structure
+  before taking the square root. Net translation is not included. Structures
+  without a positive-weight force label skip this rule. Set it to ``null`` to
+  disable it independently of ``drop_disconnected``.
 * ``max_forces`` bounds the largest atomic force norm in eV/Angstrom.
+* ``max_forces_stress_residual`` bounds the Frobenius norm of the stress
+  mismatch with the force virial in eV/Angstrom^3, not the stress magnitude.
+  It applies to configurational stress (ASE tensile-positive convention) for
+  a short-range energy without explicit cell terms. Stress components
+  undetermined by the periodic cutoff graph are projected out; any component
+  winding in three independent directions leaves the total stress unconstrained.
+  Nonperiodic structures, zero-volume cells and records without positive-weight
+  force and stress labels skip this rule. Values equal to the bound pass.
+  Set it to ``null`` to disable it independently of the force thresholds.
 * ``max_energy_per_atom`` bounds signed total energy divided by the atom count,
   in eV/atom, without subtracting atomic reference energies.
 * ``max_stress`` bounds the Frobenius norm of the full stress matrix in
   eV/Angstrom^3.
 
-Energy, force and stress bounds require cached labels and weights. Nonfinite or zero-weight
+The maximum energy, force norm and stress bounds require cached labels and weights. Nonfinite or zero-weight
 labels fail the bound. Missing fields or an empty selection raise an error.
-Filtering scans counts first and decodes only the required degrees, geometry or labels.
-The selection is retained in memory and reused each epoch.
+Edgeless reference atoms pass using the shard count index alone. Other filters
+read the required fields with CPU readers. Connected bulk structures with three
+independent periodic winding directions need no rotational or stress projection.
+In distributed training, ranks scan
+disjoint ranges and exchange a bit-packed selection mask. All ranks retain the
+same ordered selection in memory and reuse it each epoch.
 
 Filters support disk and ``memory`` caches. ``on_the_fly`` requires preparing a
 completed cache first. Only training is filtered; validation and test traverse
