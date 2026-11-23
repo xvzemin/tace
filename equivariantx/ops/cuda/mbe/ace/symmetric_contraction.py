@@ -29,12 +29,16 @@ def linear(module, features, weight, node_type, stage):
     )[0]
 
 
-def uuu_fully_connected(module, features, weights, node_type):
+def uuu_fully_connected(module, features, weights, node_type, prefix=()):
     """Accumulate native contractions without forming the final product tensor."""
     correlation = features
     output = linear(module, features, weights[0], node_type, 0)
     for stage, weight in enumerate(weights[1:]):
         final = stage == len(module.product_dims) - 1
+        if stage < len(prefix):
+            correlation = prefix[stage]
+            output = output + linear(module, correlation, weight, node_type, stage + 1)
+            continue
         program, operands = ace_inputs(
             correlation,
             features,

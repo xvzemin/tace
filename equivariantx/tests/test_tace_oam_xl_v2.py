@@ -100,18 +100,32 @@ def test_projected_radial_heads_mixed_gradients(device, rows):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("channels", [64, 128, 1024])
-def test_projected_radial_heads_round_tf32(tf32_precision, channels):
+@pytest.mark.parametrize(
+    "channels,widths",
+    [
+        (64, (128, 256)), (128, (128, 256)), (1024, (128, 256)),
+        (17, (11, 5)), (3, (32768, 17)),
+    ],
+)
+def test_projected_radial_heads_round_tf32(tf32_precision, channels, widths):
     from equivariantx.models.tace.tace_oam_xl_v2.radial_projection import (
         projected_heads,
     )
 
     torch.manual_seed(53)
-    inputs = [torch.randn(2, 65, channels, device="cuda") for _ in range(2)]
-    weights = [torch.randn(2, channels, width, device="cuda") for width in (128, 256)]
-    permutation = torch.stack([torch.randperm(384, device="cuda") for _ in range(2)])
-    columns = list(permutation.split((128, 256), dim=1))
-    actual = projected_heads(inputs, weights, columns, 384)
+    inputs = [torch.randn(2, 65, channels, device="cuda") for _ in widths]
+    weights = [torch.randn(2, channels, width, device="cuda") for width in widths]
+    if channels % 8:
+        # Exactly representable in TF32 even when cuBLAS selects an IEEE tail kernel.
+        def strided(x):
+            return x.mul(64).round().div(64).mT.contiguous().mT
+
+        inputs = [strided(x) for x in inputs]
+        weights = [strided(x) for x in weights]
+    width = sum(widths)
+    permutation = torch.stack([torch.randperm(width, device="cuda") for _ in range(2)])
+    columns = list(permutation.split(widths, dim=1))
+    actual = projected_heads(inputs, weights, columns, width)
     for left, right, index in zip(inputs, weights, columns):
         expected = left @ right
         selected = actual.gather(2, index[:, None].expand(-1, 65, -1))
@@ -1628,12 +1642,12 @@ import importlib.abc
 import sys
 import torch
 
-class WithoutTACE(importlib.abc.MetaPathFinder):
+class WithoutOptionalPackages(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'tace' or fullname.startswith('tace.'):
-            raise ModuleNotFoundError('This check runs without TACE')
+        if fullname.split('.')[0] in {'tace', 'triton'}:
+            raise ModuleNotFoundError(fullname)
 
-sys.meta_path.insert(0, WithoutTACE())
+sys.meta_path.insert(0, WithoutOptionalPackages())
 from equivariantx.models.tace.tace_oam_xl_v2 import TACEOAMXLV2, register_runtime_ops
 assert TACEOAMXLV2.name == 'TACE-OAM-XL-v2'
 assert TACEOAMXLV2.__module__ == 'equivariantx.models.tace.tace_oam_xl_v2.model'
@@ -1641,6 +1655,8 @@ register_runtime_ops()
 register_runtime_ops()
 assert hasattr(torch.ops.eqx_oam_xl, 'edge')
 assert hasattr(torch.ops.eqx_oam_xl, 'linear')
+for name in ('projected_heads', 'split_columns', 'join_columns'):
+    assert hasattr(torch.ops.eqx_oam_xl, name)
 assert 'tace' not in sys.modules
 """,
         ],

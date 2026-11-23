@@ -37,24 +37,40 @@ class UuuTensorProduct(torch.nn.Module):
         use_fused: bool = False,
         symmetric_paths: Union[SymmetricProductPaths, None] = None,
         use_eqt: Union[bool, None] = None,
+        instructions=None,
     ) -> None:
         super().__init__()
 
-        instructions, actual_irreps_out = generate_paths(
-            irreps_out=irreps_out,
-            irreps_in1=irreps_in1,
-            irreps_in2=irreps_in2,
-            l1l2=l1l2,
-            l2l3=l2l3,
-            l3l1=l3l1,
-            e3nn_mode="uuu",
-            trainable=trainable,
-            identical_inputs=identical_inputs,
-        )
-        if symmetric_paths is not None:
-            instructions, actual_irreps_out = symmetric_paths.filter(
-                instructions, actual_irreps_out, irreps_in2
+        if instructions is None:
+            instructions, actual_irreps_out = generate_paths(
+                irreps_out=irreps_out,
+                irreps_in1=irreps_in1,
+                irreps_in2=irreps_in2,
+                l1l2=l1l2,
+                l2l3=l2l3,
+                l3l1=l3l1,
+                e3nn_mode="uuu",
+                trainable=trainable,
+                identical_inputs=identical_inputs,
             )
+            if symmetric_paths is not None:
+                instructions, actual_irreps_out = symmetric_paths.filter(
+                    instructions, actual_irreps_out, irreps_in2
+                )
+        else:
+            if any(
+                not 0 <= i < len(irreps_in1)
+                or not 0 <= j < len(irreps_in2)
+                or o3.Irrep(ir) not in irreps_in1[i].ir * irreps_in2[j].ir
+                for i, j, ir in instructions
+            ):
+                raise ValueError("Invalid uuu coupling instruction.")
+            actual_irreps_out = o3.Irreps(
+                [(irreps_in1[i].mul, ir) for i, _, ir in instructions]
+            )
+            instructions = [
+                (i, j, k, "uuu", trainable) for k, (i, j, _) in enumerate(instructions)
+            ]
 
         self.tp = o3.TensorProduct(
             irreps_in1,

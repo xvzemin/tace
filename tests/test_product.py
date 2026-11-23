@@ -15,8 +15,10 @@ from tace.models.linear import e3nnElementLinear, e3nnMoEElementLinear
 from tace.models.spherical.fused import UuuTensorProduct, UvuTensorProduct
 from tace.models.spherical.paths import (
     SymmetricProductPaths,
+    asymmetric_contraction_paths,
     generate_paths,
     satisfy,
+    symmetric_contraction_paths,
     to_possible_tp_irreps,
 )
 from tace.models.spherical.prod import PRODUCT, CgtpACE, MaceACE
@@ -29,6 +31,126 @@ from tace.models.time_reversal import spherical_harmonics_irreps, supports_time_
 from tace.utils.env import EQX_KERNELS, acceleration_enabled
 
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "kind,full",
+    [("cgtp", False), ("nonlinear_cgtp", False), ("tace", False), ("tace", True)],
+)
+@pytest.mark.parametrize("correlation", [2, 3, 4])
+def test_generalized_product(monkeypatch, device, kind, full, correlation):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setenv("TACE_USE_EQX", str(int(device == "cuda")))
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    cls = PRODUCT[kind]
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1e+1o"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[correlation],
+        l1l2=None,
+        parity=True,
+    )
+    if kind == "tace":
+        monkeypatch.setattr(cls, "fully_connected", full)
+    models = []
+    for enabled in (False, True):
+        with monkeypatch.context() as patch:
+            patch.setattr(cls, "use_generalized_cg", enabled)
+            model = cls(**kwargs).to(device=device, dtype=torch.float64)
+            if enabled and full and correlation == 4:
+                model.coefficient_workspace = 128
+        models.append(model)
+    params = dict(models[0].named_parameters())
+    assert params.keys() == dict(models[1].named_parameters()).keys()
+    with torch.no_grad():
+        for name, param in params.items():
+            if name.endswith("bias"):
+                param.normal_()
+    models[1].load_state_dict(models[0].state_dict(), strict=True)
+    x = torch.randn(4, 8, device=device, dtype=torch.float64, requires_grad=True)
+    types = torch.tensor([0, 1, 1, 0], device=device)
+    delta = torch.randn_like(x)
+    residual = x.new_ones((4, models[0].irreps_out.dim))
+
+    def derivatives(model):
+        y = model(x, types, residual, None)
+        g = torch.autograd.grad(y.square().sum(), x, create_graph=True)[0]
+        h = torch.autograd.grad(
+            (g * delta).sum(), (x, *model.parameters()), allow_unused=True
+        )
+        return y, g, *h
+
+    for a, b in zip(derivatives(models[0]), derivatives(models[1])):
+        torch.testing.assert_close(a, b, rtol=2e-9, atol=2e-9)
+
+
+def test_product_instruction_selection(monkeypatch):
+    inp = o3.Irreps("2x0e+2x1o")
+    targets = [o3.Irreps("1e")]
+    assert symmetric_contraction_paths(inp, targets) == ((),)
+    paths = asymmetric_contraction_paths(inp, targets)
+    assert paths == (((1, 1, o3.Irrep("1e")),),)
+    kwargs = dict(
+        layer=0,
+        num_layers=1,
+        num_elements=1,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=targets[0],
+        irreps_in=inp,
+        correlation=[2],
+        l1l2=None,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    model = PRODUCT["tace"](**kwargs)
+    x = torch.randn(3, 8)
+    types = torch.zeros(3, dtype=torch.long)
+    torch.testing.assert_close(model(x, types, None, None), torch.zeros(3, 6))
+    model = PRODUCT["tace"](**kwargs, instructions=paths)
+    assert model(x, types, None, None).abs().max() > 0
+
+
+def test_tace_groups_equal_irreps(monkeypatch):
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    source = o3.Irreps("2x1o+2x0e+2x1o")
+    model = PRODUCT["tace"](
+        layer=0,
+        num_layers=1,
+        num_elements=2,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=source,
+        correlation=[3],
+        l1l2=None,
+    )
+    assert model.linear_up.irreps_in == source.sort().irreps.simplify()
+    assert (
+        model.linear_up.irreps_out
+        == model.linear_up.irreps_out.sort().irreps.simplify()
+    )
+    x = torch.randn(3, source.dim)
+    z = torch.tensor([0, 1, 0])
+    rot = -o3.rand_matrix()
+    expected = model(x, z, None, None) @ model.irreps_out.D_from_matrix(rot).T
+    actual = model(x @ source.D_from_matrix(rot).T, z, None, None)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ for module in (
     "equivariantx.ops.common.cuda.sparse_axis",
     "equivariantx.ops.common.cuda.sparse_bilinear",
     "equivariantx.ops.common.cuda.sparse_chain",
+    "equivariantx.ops.cuda.mbe.ace.generalized",
     "equivariantx.ops.common.cuda.scalar",
     "equivariantx.ops.common.cuda.grid",
     "equivariantx.ops.common.cuda.attention",

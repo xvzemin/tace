@@ -3,9 +3,9 @@
 from functools import lru_cache
 
 import torch
-from e3nn import o3
 
 from ...co3 import Projector
+from ...mbe.ace.generalized import spherical_rows
 from ...mbe.ace.ictd_symmetric_contraction import coupling_entries
 from ...ops.common.edge import evaluate
 from ...utils.metadata import numeric_rows
@@ -26,14 +26,6 @@ def angular_layout(program, value, irreps, inverse=False):
         blocks.append(program.transpose(block, rows, columns))
         offset += mul * ir.dim
     return program.concatenate(blocks)
-
-
-@lru_cache(maxsize=1024)
-def spherical_rows(l1, l2, l3):
-    """Return nonzero real Wigner coefficients before path scaling."""
-    cg = o3.wigner_3j(l1, l2, l3, dtype=torch.float64, device="cpu")
-    a, b, c = cg.nonzero(as_tuple=True)
-    return tuple(zip(a.tolist(), b.tolist(), c.tolist(), cg[a, b, c].tolist()))
 
 
 def product_metadata(product):
@@ -128,17 +120,14 @@ def build_product(product):
     return numeric_rows(0, tuple(entries.dim for entries in irreps), rows)
 
 
-def build(module):
-    """Build one expression for all projections, gates and recursive products."""
+def product_program(module, num_inputs):
     program, bindings = Program(), []
-    features = program.input(0, "edge", module.irreps_in.dim)
-    embedding = program.input(1, "edge", module.num_hidden_channel)
 
     def parameter(path, name, width):
         binding = path, name
         if binding not in bindings:
             bindings.append(binding)
-        return program.input(2 + bindings.index(binding), "shared", width)
+        return program.input(num_inputs + bindings.index(binding), "shared", width)
 
     def linear(value, path):
         layer = module.get_submodule(path)
@@ -190,6 +179,21 @@ def build(module):
             blocks.append(block)
         return program.concatenate(blocks)
 
+    return program, bindings, linear, parameter
+
+
+def generalized_product(program, block, operands, channels, dimensions):
+    args = [*operands, program.constant(block.width * channels, 0)]
+    return program.product(
+        args, (channels, (*dimensions, block.width), block.angular_rows()), block.arity
+    )
+
+
+def build(module):
+    """Build one expression for the factor projections, gates and product maps."""
+    program, bindings, linear, parameter = product_program(module, 2)
+    features = program.input(0, "edge", module.irreps_in.dim)
+    embedding = program.input(1, "edge", module.num_hidden_channel)
     projected = program.gather(
         linear(features, "linear_up"), module.factor_index.tolist()
     )
@@ -217,8 +221,26 @@ def build(module):
         for i in range(module.num_inputs)
     ]
     corr, contributions = factors[0], []
+    if module.use_generalized_cg:
+        op = module.generalized
+        packed = [angular_layout(program, x, module.irreps_hidden) for x in factors]
+        previous = [packed[0]]
     for degree, (start, stop) in enumerate(module.gate_slices):
-        if degree:
+        if degree and module.use_generalized_cg:
+            block = op.blocks[degree - 1]
+            dims = (op.angular_dims[block.start],) + (op.angular_dims[0],) * (
+                degree - block.start
+            )
+            args = [previous[block.start]] + [
+                packed[j if module.asymmetric else 0]
+                for j in range(block.start + 1, degree + 1)
+            ]
+            value = generalized_product(program, block, args, op.channels, dims)
+            previous.append(value)
+            corr = angular_layout(
+                program, value, op.irreps_orders[degree], inverse=True
+            )
+        elif degree:
             corr = tensor_product(
                 program,
                 module.aces[degree - 1].tp,
@@ -237,9 +259,93 @@ def build(module):
     return repr((tuple(program.nodes), ((output, 0, "edge"),))), paths
 
 
-def run(module, features, embedding):
+def build_path_gates(module):
+    """Build the asymmetric product with one invariant coefficient per path."""
+    program, bindings, linear, _ = product_program(module, 1)
+    c, op = module.num_hidden_channel, module.generalized
+    features = program.input(0, "edge", module.irreps_in.dim)
+    projected = linear(features, "linear_up")
+    order = module.factor_index.tolist()
+    factors = [
+        program.gather(projected, order[k : k + module.irreps_hidden.dim])
+        for k in range(0, len(order), module.irreps_hidden.dim)
+    ]
+    gates = activate(
+        program,
+        program.slice(projected, module.gate_start, module.weight_numel),
+        module.activation,
+    )
+    gate = program.gather(
+        gates, [p for p in range(module.weight_numel) for _ in range(c)]
+    )
+    packed = [factors[0]]
+    for degree, block in enumerate(op.blocks, 1):
+        args = [packed[block.start], *factors[block.start + 1 : degree + 1]]
+        dims = [op.angular_dims[block.start]] + [module.angular_dim] * (
+            degree - block.start
+        )
+        if op.gated and degree == len(op.blocks):
+            args.append(
+                program.slice(
+                    gate, (module.weight_numel - op.gate_count) * c, op.gate_count * c
+                )
+            )
+            dims.append(op.gate_count)
+        packed.append(generalized_product(program, block, args, c, dims))
+    out_dim = module.irreps_coefs_out.dim // c
+    rows = [[] for _ in packed]
+    last = []
+    base = 0
+    for j, (dim, blocks, scale) in enumerate(module.groups):
+        for stage, offset, paths, start, _ in blocks:
+            if op.gated and stage == len(op.blocks):
+                continue
+            rows[stage].extend(
+                ((offset + p * dim + m, start + p, base + m), scale)
+                for p in range(paths)
+                for m in range(dim)
+            )
+        if op.gated:
+            offset, tiles = op.gate_slices[j]
+            last.extend(
+                ((offset + t * dim + m, base + m), scale)
+                for t in range(tiles)
+                for m in range(dim)
+            )
+        base += dim
+    zero = program.constant(out_dim * c, 0)
+    terms = [
+        program.product(
+            (value, gate, zero),
+            (c, (op.angular_dims[i], module.weight_numel, out_dim), tuple(entries)),
+            2,
+        )
+        for i, (value, entries) in enumerate(zip(packed, rows))
+        if entries
+    ]
+    if last:
+        terms.append(
+            program.product(
+                (packed[-1], zero), (c, (op.blocks[-1].width, out_dim), tuple(last)), 1
+            )
+        )
+    output = linear(
+        angular_layout(
+            program,
+            program.sum(terms, out_dim * c),
+            module.irreps_coefs_out,
+            inverse=True,
+        ),
+        "linear",
+    )
+    return repr((tuple(program.nodes), ((output, 0, "edge"),))), tuple(
+        (path, name) for path, name in bindings
+    )
+
+
+def run(module, features, embedding=None):
     """Execute the cached expression without registering duplicate parameters."""
-    inputs = [features, embedding]
+    inputs = [features] if embedding is None else [features, embedding]
     for path in module.eqx_bindings:
         value = module
         for name in path:

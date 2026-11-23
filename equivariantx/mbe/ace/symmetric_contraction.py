@@ -441,7 +441,7 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
             module._apply(fn)
         return self
 
-    def forward(self, features, weights, node_type):
+    def forward(self, features, weights, node_type, *, prefix=()):
         """Return coefficient contributions from all correlation orders.
 
         Parameters
@@ -453,6 +453,8 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
             including order one.
         node_type : torch.Tensor
             Element index for each node, or zeros for shared coefficients.
+        prefix : sequence of torch.Tensor, optional
+            Successive nonterminal CUDA products, starting at degree two.
         """
         validate_module_precision(self, (features, weights, node_type))
         if len(weights) != len(self.weight_numels):
@@ -470,10 +472,27 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
                 raise ValueError("Weights must have shape (elements, weight_numel).")
             if weight.device != features.device or weight.dtype != features.dtype:
                 raise ValueError("Weights and features must share a device and dtype.")
+        if prefix and (
+            not features.is_cuda
+            or self.backend != "cuda"
+            or len(prefix) >= len(self.product_dims)
+        ):
+            raise ValueError("Supply only nonterminal products for the CUDA backend.")
+        for dim, value in zip(self.product_dims, prefix):
+            if (
+                value.shape != (features.shape[0], dim)
+                or value.device != features.device
+                or value.dtype != features.dtype
+            ):
+                raise ValueError(
+                    "Prefix products must match the stage shape, dtype and device."
+                )
         if features.is_cuda and self.backend == "cuda":
             from ...ops.cuda.mbe.ace import symmetric_contraction as cuda_kernel
 
-            return cuda_kernel.uuu_fully_connected(self, features, weights, node_type)
+            return cuda_kernel.uuu_fully_connected(
+                self, features, weights, node_type, prefix
+            )
         return torch_kernel.uuu_fully_connected(self, features, weights, node_type)
 
     def linear(self, features, weight, node_type, stage):

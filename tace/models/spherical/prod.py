@@ -3,12 +3,18 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from itertools import groupby
+from math import sqrt
 from typing import Dict
 
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import UuuFullyConnectedSymmetricContraction
+from equivariantx.mbe.ace import (
+    ContractionInstruction,
+    GeneralizedContraction,
+    UuuFullyConnectedSymmetricContraction,
+)
 from tace.utils.env import acceleration_enabled, select_acceleration
 
 from ..layout import LayoutTransform
@@ -22,13 +28,68 @@ from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
 from .fused import UuuSymmetricContraction, UuuTensorProduct
-from .paths import SymmetricProductPaths
+from .paths import SymmetricProductPaths, symmetric_contraction_paths
 
 
-class CgtpACE(Product):
-    """Channel-wise ACE with element-dependent or element-independent coefficients."""
+class PathProduct(Product):
+    def __init__(self, *args, instructions=None, **kwargs):
+        self.instructions = (
+            None
+            if instructions is None
+            else tuple(
+                tuple(ContractionInstruction(i, j, o3.Irrep(ir)) for i, j, ir in order)
+                for order in instructions
+            )
+        )
+        self.use_generalized_cg = bool(self.use_generalized_cg)
+        super().__init__(*args, **kwargs)
+
+    def validate_instructions(self):
+        if self.instructions is None:
+            return
+        if len(self.instructions) != self.correlation - 1:
+            raise ValueError(
+                "Provide one instruction list per correlation order starting at two."
+            )
+        for d, (paths, targets) in enumerate(
+            zip(self.instructions, self.irreps_tp_out_list), 2
+        ):
+            allowed = {ir for _, ir in targets}
+            if any(ir not in allowed for _, _, ir in paths):
+                raise ValueError(
+                    f"Instruction output is not an allowed degree-{d} target."
+                )
+
+    def build_generalized(self, shared):
+        orders = [
+            [(i, j, tp.irreps_out[k].ir) for i, j, k, _, _ in tp.instructions]
+            for tp in self.aces
+        ]
+        return GeneralizedContraction(
+            self.irreps_hidden,
+            orders,
+            shared_inputs=shared,
+            backend="cuda"
+            if acceleration_enabled("eqx", kernel="product")
+            else "torch",
+        )
+
+
+class CgtpACE(PathProduct):
+    """Channel-wise ACE with element-dependent or element-independent coefficients.
+
+    Parameters
+    ----------
+    instructions : sequence of sequences, optional
+        Ordered coupling paths for degrees two and above.
+    **kwargs
+        Parameters of :class:`~tace.models.spherical.base.Product`.
+    """
+
+    use_generalized_cg = False
 
     def _setup(self):
+        self.validate_instructions()
         self.use_eqx = select_acceleration("eqx", "eqt", kernel="product") == "eqx"
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
@@ -61,12 +122,18 @@ class CgtpACE(Product):
                 l1l2=self.l1l2,
                 trainable=False,
                 identical_inputs=nu == 2,
-                warning=self.correlation > 2 and self.layer == 0 and not self.use_eqx,
+                warning=self.correlation > 2
+                and self.layer == 0
+                and not self.use_eqx
+                and not self.use_generalized_cg,
                 use_fused=self.correlation > 2
                 and not self.use_time_reversal
                 and not self.use_eqx,
                 symmetric_paths=symmetric_paths,
-                use_eqt=False if self.use_eqx else None,
+                use_eqt=False if self.use_eqx or self.use_generalized_cg else None,
+                instructions=None
+                if self.instructions is None
+                else self.instructions[nu - 2],
             )
             self.aces.append(ace)
             self.coefs.append(
@@ -79,6 +146,8 @@ class CgtpACE(Product):
             )
             product_in1 = ace.irreps_out
 
+        if self.use_generalized_cg:
+            self.generalized = self.build_generalized(True)
         if self.use_eqx and self.aces:
             self.eqx_ace = UuuFullyConnectedSymmetricContraction(
                 [ace.tp for ace in self.aces],
@@ -139,7 +208,13 @@ class CgtpACE(Product):
                 if self.agnostic
                 else node_type
             )
-            outs = self.eqx_ace(node_feats, weights, types)
+            if self.use_generalized_cg and len(self.aces) > 1:
+                prefix = self.generalized(node_feats, max_degree=self.correlation - 1)[
+                    1:
+                ]
+                outs = self.eqx_ace(node_feats, weights, types, prefix=prefix)
+            else:
+                outs = self.eqx_ace(node_feats, weights, types)
             for coef in self.coefs:
                 if coef.bias is not None:
                     bias = (
@@ -150,6 +225,11 @@ class CgtpACE(Product):
                     outs = (
                         outs + bias.index_select(-1, coef._bias_index) * coef._bias_mask
                     )
+        elif self.use_generalized_cg:
+            features = self.generalized(node_feats)
+            outs = self.coefs[0](features[0], **for_coefs)
+            for i, coef in enumerate(self.coefs[1:], 1):
+                outs = outs + coef(features[i], **for_coefs)
         else:
             outs = self.coefs[0](corr_feats, **for_coefs)
             for index, ace in enumerate(self.aces):
@@ -262,27 +342,22 @@ class MaceACE(Product):
         return output
 
 
-class NonlinearCgtpACE(Product):
+class NonlinearCgtpACE(PathProduct):
     """Channel-wise recursive products with invariant path gates.
 
     Parameters
     ----------
     **kwargs
         Parameters of :class:`~tace.models.spherical.base.Product`.
-
-    Notes
-    -----
-    Select with ``product_basis.type: nonlinear_cgtp``. Linear up produces
-    independent factors and invariant scalars. Scalars and element embeddings
-    generate one scaled-SiLU coefficient per path and channel. Ordinary Linear
-    maps mix the gated products. Only symmetric-product paths are retained.
-    Set the class attribute ``asymmetric=False`` before construction to reuse
-    one factor at every order. No additional model parameter is required.
+    instructions : sequence of sequences, optional
+        Ordered coupling paths for degrees two and above.
     """
 
     asymmetric = True
+    use_generalized_cg = False
 
     def _setup(self) -> None:
+        self.validate_instructions()
         self.asymmetric = bool(self.asymmetric)
         if self.correlation < 1:
             raise ValueError("Nonlinear products require a positive correlation.")
@@ -308,6 +383,10 @@ class NonlinearCgtpACE(Product):
                     self.irreps_tp_out_list[degree - 2],
                     l1l2=self.l1l2,
                     symmetric_paths=paths,
+                    instructions=None
+                    if self.instructions is None
+                    else self.instructions[degree - 2],
+                    use_eqt=False if self.use_generalized_cg else None,
                 )
                 self.aces.append(product)
                 irreps = product.irreps_out
@@ -363,16 +442,24 @@ class NonlinearCgtpACE(Product):
         )
         if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0.0:
             self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
-        self.build_eqx()
+        if self.use_generalized_cg:
+            self.generalized = self.build_generalized(not self.asymmetric)
+        if not self.use_generalized_cg or (
+            self.generalized.codegen_supported
+            and acceleration_enabled("eqx", kernel="product")
+        ):
+            self.build_eqx()
 
     def build_eqx(self) -> None:
         """Build the fused product from its operators and parameters."""
         from equivariantx.models.tace.nonlinear_ace import build, build_product
 
         self.eqx_metadata, self.eqx_bindings = build(self)
-        self.eqx_products = tuple(
-            (build_product(product.tp), product.irreps_out.dim) for product in self.aces
-        )
+        if not self.use_generalized_cg:
+            self.eqx_products = tuple(
+                (build_product(product.tp), product.irreps_out.dim)
+                for product in self.aces
+            )
 
     def forward(
         self,
@@ -382,7 +469,8 @@ class NonlinearCgtpACE(Product):
         batch: torch.Tensor,
     ) -> torch.Tensor:
         if (
-            node_feats.is_cuda
+            hasattr(self, "eqx_metadata")
+            and node_feats.is_cuda
             and node_feats.dtype in (torch.float32, torch.float64)
             and acceleration_enabled("eqx", kernel="product")
             # Inductor reuses the native factors across force derivatives.
@@ -406,7 +494,8 @@ class NonlinearCgtpACE(Product):
             start, stop = self.gate_slices[0]
             output = self.coefs[0](corr * weight[:, start:stop][:, self.gate_index_1])
             fused_products = (
-                node_feats.is_cuda
+                not self.use_generalized_cg
+                and node_feats.is_cuda
                 and node_feats.dtype in (torch.float32, torch.float64)
                 and acceleration_enabled("eqx", kernel="product")
                 and self.training
@@ -414,9 +503,14 @@ class NonlinearCgtpACE(Product):
             )
             if fused_products:
                 from equivariantx.ops.common.channel_product import channel_product
+            expanded = (
+                self.generalized(*factors.unbind(1)) if self.use_generalized_cg else ()
+            )
             for index, (product, linear) in enumerate(zip(self.aces, self.coefs[1:])):
                 factor = factors[:, index + 1 if self.asymmetric else 0]
-                if fused_products:
+                if self.use_generalized_cg:
+                    corr = expanded[index + 1]
+                elif fused_products:
                     metadata, output_dim = self.eqx_products[index]
                     corr = channel_product(
                         metadata,
@@ -438,10 +532,245 @@ class NonlinearCgtpACE(Product):
         return output
 
 
+class TaceACE(PathProduct):
+    """Contract independently projected factors with invariant path coefficients.
+
+    Parameters
+    ----------
+    instructions : sequence of sequences, optional
+        Couplings per order starting at two, indexed in the previous order's
+        output. Defaults to :func:`~tace.models.spherical.paths.symmetric_contraction_paths`.
+    **kwargs
+        Parameters of :class:`~tace.models.spherical.base.Product`.
+    """
+
+    use_generalized_cg = True
+    fully_connected = False
+    coefficient_workspace = 16 << 20
+
+    def _setup(self):
+        self.validate_instructions()
+        if self.correlation < 1 or self.num_expert != 1 or self.use_shared_expert:
+            raise ValueError(
+                "TACE requires a positive correlation and a single expert."
+            )
+        if self.nonlinear is not None or not any(
+            ir.is_scalar() for _, ir in self.irreps_in
+        ):
+            raise ValueError(
+                "TACE requires invariant scalar inputs and nonlinear=None."
+            )
+        orders = self.instructions
+        if orders is None:
+            orders = symmetric_contraction_paths(
+                self.irreps_hidden, self.irreps_tp_out_list, l1l2=self.l1l2
+            )
+        c = self.num_hidden_channel
+        self.fully_connected = bool(self.fully_connected)
+        irreps = [self.irreps_hidden]
+        self.aces = torch.nn.ModuleList()
+        for stage, paths in enumerate(orders):
+            if not self.use_generalized_cg:
+                product = UuuTensorProduct(
+                    irreps[-1],
+                    self.irreps_hidden,
+                    self.irreps_tp_out_list[stage],
+                    instructions=paths,
+                    use_eqt=False,
+                )
+                for module in product.modules():
+                    module._non_persistent_buffers_set.update(module._buffers.keys())
+                self.aces.append(product)
+            irreps.append(o3.Irreps([(c, ir) for _, _, ir in paths]))
+        if self.use_generalized_cg:
+            self.generalized = GeneralizedContraction(
+                self.irreps_hidden,
+                orders,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="product")
+                else "torch",
+                gated_output=None if self.fully_connected else self.irreps_coefs_out,
+            )
+        else:
+            self.layouts = torch.nn.ModuleList(
+                [
+                    LayoutTransform(order) if order else torch.nn.Identity()
+                    for order in irreps
+                ]
+            )
+        self.angular_dim = self.irreps_hidden.dim // c
+        groups = {ir: [] for _, ir in self.irreps_coefs_out}
+        self.weight_numel = 0
+        for stage, order in enumerate(irreps):
+            offset = 0
+            for ir, run in groupby(order, key=lambda block: block.ir):
+                paths = sum(1 for _ in run)
+                if ir in groups:
+                    width = paths * (c * c if self.fully_connected else 1)
+                    groups[ir].append((stage, offset, paths, self.weight_numel, width))
+                    self.weight_numel += width
+                offset += paths * ir.dim
+        self.groups = tuple(
+            (
+                ir.dim,
+                tuple(groups[ir]),
+                1
+                / sqrt(
+                    max(
+                        1,
+                        sum(b[2] for b in groups[ir])
+                        * (c if self.fully_connected else 1),
+                    )
+                ),
+            )
+            for _, ir in self.irreps_coefs_out
+        )
+        up = (
+            o3.Irreps([(self.weight_numel, "0e")])
+            + self.irreps_hidden * self.correlation
+        )
+        sort = up.sort()
+        starts = [0] * len(up)
+        offset = 0
+        for index in sort.inv:
+            starts[index] = offset
+            offset += up[index].dim
+        self.gate_start = starts[0]
+        indices = []
+        for i, (_, ir) in enumerate(up[1:], 1):
+            block = torch.arange(c * ir.dim).reshape(c, ir.dim)
+            if self.use_generalized_cg:
+                block = block.T
+            indices.append(starts[i] + block.reshape(-1))
+        self.register_buffer("factor_index", torch.cat(indices), persistent=False)
+        source = self.irreps_in.simplify()
+        sort_in = source.sort()
+        grouped = sort_in.irreps.simplify()
+        input_index = None
+        if len(source) != len(grouped):
+            slices = source.slices()
+            input_index = torch.cat(
+                [torch.arange(slices[i].start, slices[i].stop) for i in sort_in.inv]
+            )
+            source = grouped
+        self.register_buffer("input_index", input_index, persistent=False)
+        self.linear_up = e3nnLinear(source, sort.irreps.simplify(), bias=self.use_bias)
+        self.activation = ACTIVATION["scaled_silu"]()
+        self.linear = e3nnLinear(
+            self.irreps_coefs_out, self.irreps_out, bias=self.use_bias
+        )
+        if (
+            self.use_generalized_cg
+            and self.generalized.codegen_supported
+            and not self.fully_connected
+            and acceleration_enabled("eqx", kernel="product")
+        ):
+            from equivariantx.models.tace.nonlinear_ace import build_path_gates
+
+            self.eqx_metadata, self.eqx_bindings = build_path_gates(self)
+        if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0:
+            self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
+
+    def contract(self, x):
+        n, c = x.shape[0], self.num_hidden_channel
+        projected = self.linear_up(x)
+        gates = self.activation(projected.narrow(1, self.gate_start, self.weight_numel))
+        raw = projected.index_select(1, self.factor_index)
+        if self.use_generalized_cg:
+            factors = raw.reshape(n, self.correlation, self.angular_dim, c).unbind(1)
+            folded = self.generalized.gated
+            count = self.generalized.gate_count
+            values = self.generalized.packed(
+                factors,
+                gates.narrow(1, self.weight_numel - count, count) if folded else None,
+            )
+        else:
+            folded = False
+            factors = raw.reshape(n, self.correlation, self.angular_dim * c).unbind(1)
+            current = factors[0]
+            values = [self.layouts[0](current)]
+            for i, (tp, layout) in enumerate(zip(self.aces, self.layouts[1:]), 1):
+                current = tp(current, factors[i])
+                values.append(layout(current))
+        parts = []
+        for j, (dim, blocks, scale) in enumerate(self.groups):
+            total = None
+            if folded:
+                offset, tiles = self.generalized.gate_slices[j]
+                if tiles:
+                    part = values[-1][:, offset : offset + tiles * dim]
+                    total = (
+                        part if tiles == 1 else part.reshape(n, tiles, dim, c).sum(1)
+                    )
+            for stage, offset, paths, start, width in blocks:
+                if folded and stage == self.correlation - 1:
+                    continue
+                value = values[stage][:, offset : offset + paths * dim]
+                weight = gates.narrow(1, start, width)
+                if self.fully_connected:
+                    value = (
+                        value.reshape(n, paths, dim, c)
+                        .transpose(1, 2)
+                        .reshape(n, dim, paths * c)
+                    )
+                    result = torch.bmm(value, weight.reshape(n, paths * c, c))
+                else:
+                    result = torch.bmm(
+                        weight.reshape(n, 1, paths), value.reshape(n, paths, dim * c)
+                    ).reshape(n, dim, c)
+                total = result if total is None else total + result
+            if total is None:
+                total = x.new_zeros((n, dim, c))
+            parts.append((total * scale).transpose(1, 2).flatten(1))
+        return self.linear(torch.cat(parts, 1))
+
+    def forward(self, node_feats, node_type, sc, batch):
+        if self.input_index is not None:
+            node_feats = node_feats.index_select(1, self.input_index)
+        if (
+            hasattr(self, "eqx_metadata")
+            and node_feats.is_cuda
+            and acceleration_enabled("eqx", kernel="product")
+            and not (self.training and acceleration_enabled("compile"))
+            and not any(has_lora(linear) for linear in (self.linear_up, self.linear))
+        ):
+            from equivariantx.models.tace.nonlinear_ace import run
+
+            outs = run(self, node_feats)
+        elif self.fully_connected and self.weight_numel:
+            from torch.utils.checkpoint import checkpoint
+
+            tile = max(
+                1,
+                self.coefficient_workspace
+                // (node_feats.element_size() * self.weight_numel),
+            )
+            if node_feats.shape[0] > tile:
+                blocks = node_feats.split(tile)
+                outs = torch.cat(
+                    [
+                        checkpoint(self.contract, v, use_reentrant=False)
+                        if torch.is_grad_enabled()
+                        else self.contract(v)
+                        for v in blocks
+                    ]
+                )
+            else:
+                outs = self.contract(node_feats)
+        else:
+            outs = self.contract(node_feats)
+        if hasattr(self, "stochastic_depth"):
+            outs = self.stochastic_depth(outs, batch)
+        return (
+            torch.add(sc, outs, alpha=self.residual_scale) if sc is not None else outs
+        )
+
+
 PRODUCT: Dict[str, torch.nn.Module] = {
     "cgtp": CgtpACE,
     "mace": MaceACE,
     "nonlinear_cgtp": NonlinearCgtpACE,
+    "tace": TaceACE,
 }
 
 product_aliases = {

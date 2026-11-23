@@ -5,6 +5,7 @@ import torch
 from e3nn import o3
 
 from equivariantx.mbe.ace import (
+    GeneralizedContraction,
     UuuFullyConnectedSymmetricContraction,
     UuuSymmetricContraction,
 )
@@ -15,6 +16,57 @@ from .testing import (
     check_parent_aoti,
     check_parent_provider,
 )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_generalized_ordered_factors(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    backend = "cuda" if device == "cuda" else "torch"
+    op = GeneralizedContraction("2x1o", [[(0, 0, "1e")]], backend=backend).to(
+        device=device, dtype=torch.float64
+    )
+    x, y = (
+        torch.randn(3, 6, device=device, dtype=torch.float64, requires_grad=True)
+        for _ in range(2)
+    )
+    cross = (
+        torch.linalg.cross(x.reshape(3, 2, 3), y.reshape(3, 2, 3)).flatten(1) / 2**0.5
+    )
+    z = op(x, y)[-1]
+    torch.testing.assert_close(z, cross)
+    torch.testing.assert_close(op(y, x)[-1], -z)
+    torch.testing.assert_close(op(x, x)[-1], torch.zeros_like(z))
+    assert torch.autograd.gradgradcheck(
+        lambda a, b: op(a, b)[-1], (x, y), fast_mode=True
+    )
+    tangent = torch.func.jvp(lambda a: op(a, y)[-1], (x,), (y,))[1]
+    torch.testing.assert_close(tangent, torch.zeros_like(z))
+
+
+def test_generalized_explicit_empty_order():
+    op = GeneralizedContraction("2x1o", [[], []], backend="torch").double()
+    x = torch.randn(3, 6, requires_grad=True, dtype=torch.float64)
+    *_, empty = op(x, x, x)
+    assert empty.shape == (3, 0)
+    torch.testing.assert_close(
+        torch.autograd.grad(empty.sum(), x)[0], torch.zeros_like(x)
+    )
+
+
+def test_generalized_path_time_parity():
+    try:
+        spin = o3.Irrep("1eo")
+    except ValueError:
+        pytest.skip("Time-reversal irreps are unavailable.")
+    inp = o3.Irreps([(2, spin)])
+    from equivariantx.mbe.ace import asymmetric_contraction_paths
+
+    targets = o3.Irreps("0ee+1ee+1eo")
+    paths = asymmetric_contraction_paths(inp, [targets])
+    assert tuple(path.ir_out for path in paths[0]) == (o3.Irrep("0ee"), o3.Irrep("1ee"))
+    with pytest.raises(ValueError, match="Invalid degree"):
+        GeneralizedContraction(inp, [[(0, 0, "1eo")]])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU GEMM schedule")

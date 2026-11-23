@@ -1,72 +1,48 @@
-"""Joint radial projections and permutation adjoints with TF32 rounding."""
+"""Joint radial projections and their column-permutation adjoints."""
 
 import torch
-import triton
-import triton.language as tl
 
+from ....ops.common.cuda.pointwise import launch, scalar_type
 from .precision import require_tensors
 
 
-@triton.jit
-def project_columns(
-    A,
-    B,
-    Columns,
-    C,
-    M,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    W: tl.constexpr,
-    A0,
-    A1: tl.constexpr,
-    A2: tl.constexpr,
-    B0: tl.constexpr,
-    B1: tl.constexpr,
-    B2: tl.constexpr,
-    BM: tl.constexpr,
-    BN: tl.constexpr,
-    BK: tl.constexpr,
-):
-    row = tl.program_id(0) * BM + tl.arange(0, BM)
-    column = tl.program_id(1) * BN + tl.arange(0, BN)
-    batch = tl.program_id(2).to(tl.int64)
-    inner = tl.arange(0, BK)
-    result = tl.zeros((BM, BN), tl.float32)
-    for start in range(triton.cdiv(K, BK)):
-        k = start * BK + inner
-        a = tl.load(
-            A + batch * A0 + row[:, None] * A1 + k[None, :] * A2,
-            (row[:, None] < M) & (k[None, :] < K),
-            other=0,
-        )
-        b = tl.load(
-            B + batch * B0 + k[:, None] * B1 + column[None, :] * B2,
-            (k[:, None] < K) & (column[None, :] < N),
-            other=0,
-        )
-        # Round explicitly: Triton's implicit TF32 conversion may truncate.
-        a = tl.inline_asm_elementwise(
-            "cvt.rn.tf32.f32 $0, $1;",
-            constraints="=f,f",
-            args=[a],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
-        b = tl.inline_asm_elementwise(
-            "cvt.rn.tf32.f32 $0, $1;",
-            constraints="=f,f",
-            args=[b],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
-        result += tl.dot(a, b, input_precision="tf32")
-    mapped = tl.load(Columns + batch * N + column, column < N, other=0)
-    tl.store(
-        C + batch * M * W + row[:, None] * W + mapped[None, :],
-        result,
-        (row[:, None] < M) & (column[None, :] < N),
+def permute_projected_columns(output, columns):
+    """Permute each projected row in place on the current CUDA stream."""
+    batch, rows, width = output.shape
+    order = torch.cat(columns, dim=1).long()
+    row_bytes = width * output.element_size()
+    blocks = min(batch * rows, 65535)
+    args = (output, order)
+    if row_bytes <= 48 * 1024:
+        shared, pointer, storage = row_bytes, "", "extern __shared__ T tile[];"
+    else:
+        # Bound scratch independently of the number of edges.
+        blocks = min(blocks, max(1, (16 << 20) // row_bytes))
+        args += (output.new_empty((blocks, width)),)
+        shared, pointer = 0, "T* workspace,"
+        storage = "T* tile = workspace + I(blockIdx.x) * width;"
+    source = f"""
+    using T = {scalar_type(output.dtype)};
+    using I = long long;
+    extern "C" __global__ void run(
+        T* output, const I* columns, {pointer} I rows, I width, I count
+    ) {{
+        {storage}
+        for (I r = blockIdx.x; r < count; r += gridDim.x) {{
+            T* row = output + r * width;
+            const I* order = columns + (r / rows) * width;
+            for (I j = threadIdx.x; j < width; j += blockDim.x)
+                tile[order[j]] = row[j];
+            __syncthreads();
+            for (I j = threadIdx.x; j < width; j += blockDim.x)
+                row[j] = tile[j];
+            __syncthreads();
+        }}
+    }}
+    """
+    launch(
+        source, args, (rows, width, batch * rows),
+        blocks * 128, threads=128, shared=shared,
     )
 
 
@@ -82,34 +58,17 @@ def projected_heads(
     first = features[0]
     batch, rows = first.shape[:2]
     output = first.new_empty((batch, rows, width))
-    if not rows:
+    if not output.numel():
         return output
-    for left, right, index in zip(features, weights, columns):
-        index = index.contiguous()
-        if (
-            first.is_cuda
-            and first.dtype == torch.float32
-            and torch.backends.cuda.matmul.fp32_precision == "tf32"
-        ):
-            size, inner = right.shape[-1], left.shape[-1]
-            project_columns[(triton.cdiv(rows, 32), triton.cdiv(size, 128), batch)](
-                left,
-                right,
-                index,
-                output,
-                rows,
-                size,
-                inner,
-                width,
-                *left.stride(),
-                *right.stride(),
-                32,
-                128,
-                32,
-                num_warps=4,
-                num_stages=3,
-            )
-        else:
+    if first.is_cuda and torch.version.hip is None:
+        offset = 0
+        for left, right in zip(features, weights):
+            size = right.shape[-1]
+            torch.bmm(left, right, out=output.narrow(-1, offset, size))
+            offset += size
+        permute_projected_columns(output, columns)
+    else:
+        for left, right, index in zip(features, weights, columns):
             output.scatter_(2, index[:, None].expand(batch, rows, -1), left @ right)
     return output
 
@@ -142,63 +101,15 @@ def backward(ctx, gradient):
 projected_heads.register_autograd(backward, setup_context=setup_context)
 
 
-@triton.jit
-def columns_kernel(
-    A,
-    Columns,
-    C,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    W: tl.constexpr,
-    A0: tl.constexpr,
-    A1: tl.constexpr,
-    A2: tl.constexpr,
-    JOIN: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    batch = tl.program_id(1).to(tl.int64)
-    row, column = index // N, index % N
-    mapped = tl.load(Columns + batch * N + column, index < M * N, other=0)
-    if JOIN:
-        address = batch * A0 + row * A1 + column * A2
-        destination = batch * M * W + row * W + mapped
-    else:
-        address = batch * A0 + row * A1 + mapped * A2
-        destination = batch * M * N + index
-    value = tl.load(A + address, index < M * N, other=0)
-    tl.store(C + destination, value, index < M * N)
-
-
 @torch.library.custom_op("eqx_oam_xl::split_columns", mutates_args=())
 def split_columns(
     value: torch.Tensor, columns: list[torch.Tensor]
 ) -> list[torch.Tensor]:
     """Gather the complete column partition with one inverse adjoint."""
-    if not value.is_cuda or not value.shape[1]:
-        return [
-            value.gather(2, index[:, None].expand(-1, value.shape[1], -1))
-            for index in columns
-        ]
-    output = []
-    batch, rows, width = value.shape
-    for index in columns:
-        index = index.contiguous()
-        size = index.shape[-1]
-        result = value.new_empty((batch, rows, size))
-        columns_kernel[(triton.cdiv(rows * size, 1024), batch)](
-            value,
-            index,
-            result,
-            rows,
-            size,
-            width,
-            *value.stride(),
-            False,
-            1024,
-        )
-        output.append(result)
-    return output
+    return [
+        value.gather(2, index[:, None].expand(-1, value.shape[1], -1))
+        for index in columns
+    ]
 
 
 @split_columns.register_fake
@@ -235,25 +146,8 @@ def join_columns(
     first = values[0]
     batch, rows = first.shape[:2]
     output = first.new_empty((batch, rows, width))
-    if not rows:
-        return output
     for value, index in zip(values, columns):
-        index = index.contiguous()
-        if first.is_cuda:
-            size = index.shape[-1]
-            columns_kernel[(triton.cdiv(rows * size, 1024), batch)](
-                value,
-                index,
-                output,
-                rows,
-                size,
-                width,
-                *value.stride(),
-                True,
-                1024,
-            )
-        else:
-            output.scatter_(2, index[:, None].expand(-1, rows, -1), value)
+        output.scatter_(2, index[:, None].expand(-1, rows, -1), value)
     return output
 
 
