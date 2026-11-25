@@ -42,3 +42,55 @@ def test_functional_derivatives(compiler, double_precision):
         values,
         compiler,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native CUDA products")
+def test_wide_bilinear_input_adjoints(monkeypatch):
+    from equivariantx.ops.common.cuda import bilinear
+
+    launches = set()
+    generate = bilinear.inputs_source
+
+    def source(dtype, metadata, branches, roles, large_batch):
+        result = generate(dtype, metadata, branches, roles, large_batch)
+        launches.add((roles, result[-1]))
+        return result
+
+    monkeypatch.setattr(bilinear, "inputs_source", source)
+    nodes = 1025
+    tp = o3.TensorProduct(
+        "256x1o",
+        "256x0e",
+        "256x1o",
+        [(0, 0, 0, "uuu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    linear = o3.Linear("256x1o", "64x1o", internal_weights=False, shared_weights=False)
+    module = BilinearContraction(tp, linear, backend="cuda").cuda()
+    types = torch.arange(nodes, device="cuda") % 2
+    inputs = tuple(
+        (0.3 * torch.randn(shape, device="cuda", dtype=torch.float32)).requires_grad_()
+        for shape in ((nodes, 768), (nodes, 256), (nodes, 256), (2, 256 * 64))
+    )
+    seed = torch.randn(nodes, 192, device="cuda", dtype=torch.float32).requires_grad_()
+    direction = torch.randn_like(inputs[0])
+
+    def derivatives(output, values, cotangent):
+        first = torch.autograd.grad(output, values, cotangent, create_graph=True)
+        mixed = torch.autograd.grad(first[0], (*values[1:], cotangent), direction)
+        return output, *first, *mixed
+
+    actual = derivatives(module(*inputs, types), inputs, seed)
+    assert ((0, 1, 4), 256) in launches
+    x, y, gates, weights = values = tuple(
+        v.detach().double().requires_grad_() for v in inputs
+    )
+    product = tp.cuda().double()(x, y, gates)
+    linear = linear.cuda().double()
+    reference = torch.where(
+        types[:, None] == 0, linear(product, weights[0]), linear(product, weights[1])
+    )
+    expected = derivatives(reference, values, seed.detach().double().requires_grad_())
+    for result, ref in zip(actual, expected, strict=True):
+        torch.testing.assert_close(result.double(), ref, atol=2e-5, rtol=3e-5)

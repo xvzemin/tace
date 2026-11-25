@@ -481,6 +481,121 @@ def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
         ]
 
 
+def test_rra_order_linear_preserves_parameters_and_derivatives(double_precision):
+    from equivariantx.models.tace.tece_oam_rra.model import OrderLinear
+
+    ref = o2.Linear("3x0e+4x1m+2x2m", "2x0e+3x1m+4x2m", biases=True, backend="torch").double()
+    lowered = OrderLinear(ref)
+    assert lowered.weight is ref.weight and lowered.bias is ref.bias
+    x = torch.randn(7, ref.irreps_in.dim, dtype=torch.float64, requires_grad=True)
+    variables = (x, ref.weight, ref.bias)
+    projected = []
+    for module in (ref, lowered):
+        y = module(x)
+        first = torch.autograd.grad(y.square().sum(), variables, create_graph=True)
+        second = torch.autograd.grad(sum(g.square().sum() for g in first), variables)
+        projected.append((y, *first, *second))
+    for actual, expected in zip(*projected, strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rra_indexed_frame_derivatives():
+    from equivariantx.models.tace.tece_oam_rra.model import (
+        IndexedFrame,
+        rotation_layout,
+    )
+    from equivariantx.utils.outputs import EDGE, NODE
+
+    rng = torch.Generator(device="cuda").manual_seed(972)
+
+    def sample(*shape):
+        return torch.randn(
+            *shape,
+            generator=rng,
+            dtype=torch.float64,
+            device="cuda",
+            requires_grad=True,
+        )
+
+    x, w = sample(7, 16), sample(13, 10)
+    index = torch.arange(13, device="cuda") % len(x)
+    order = torch.tensor([0, 2, 1, 3], device="cuda")
+    layout = rotation_layout(order, 1, 4)
+    empty = x.new_empty((0, 16))
+    results = []
+    for indexed in (False, True):
+        if indexed:
+            local = IndexedFrame.apply(x, w, empty, index, x.shape[0], layout, EDGE)
+            y = IndexedFrame.apply(
+                empty, w, local.sin(), index, x.shape[0], layout, NODE
+            )
+        else:
+            mat = w[:, 1:].reshape(-1, 3, 3)
+            v = x[index].reshape(-1, 4, 4)
+            local = torch.cat(
+                (w[:, :1, None] * v[:, :1], torch.bmm(mat, v[:, 1:])), dim=1
+            )[:, order]
+            v = local.sin()[:, order.argsort()]
+            back = torch.cat(
+                (w[:, :1, None] * v[:, :1], torch.bmm(mat.transpose(1, 2), v[:, 1:])),
+                dim=1,
+            )
+            y = torch.zeros_like(x).index_add(0, index, back.flatten(1))
+        grad = torch.autograd.grad(y.sin().sum(), (x, w), create_graph=True)
+        grad2 = torch.autograd.grad(sum(t.square().sum() for t in grad), (x, w))
+        results.append((y, *grad, *grad2))
+    for a, b in zip(*results, strict=True):
+        torch.testing.assert_close(a, b)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rra_edge_expansion_derivatives():
+    from equivariantx.models.tace.tece_oam_rra.model import edge_expansion
+
+    channels = 4
+    rows = (
+        ((0, -1, -1, -1, -1, 0), 1.0),
+        ((0, -1, 0, -1, -1, 0), 1.0),
+        ((0, 1, -1, 0, -1, 0), 1.0),
+        ((-1, -1, -1, -1, 0, 0), 1.0),
+        ((1, -1, -1, -1, -1, 1), 1.0),
+        ((1, 0, -1, 1, -1, 1), -0.5),
+    )
+    metadata = repr((channels, (2, 2, 1, 2, 1, 2), rows))
+    rng = torch.Generator(device="cuda").manual_seed(2047)
+    inputs = tuple(
+        torch.randn(
+            9,
+            width * channels,
+            generator=rng,
+            device="cuda",
+            dtype=torch.float64,
+            requires_grad=True,
+        )
+        for width in (2, 1, 2, 1)
+    )
+    tangents = tuple(torch.ones_like(x) for x in inputs)
+
+    def reference(x, g, w, s):
+        a, b = x.chunk(2, dim=1)
+        u, v = w.chunk(2, dim=1)
+        return torch.cat((a + a * g + a * b * u + s, b - 0.5 * b * a * v), dim=1)
+
+    def native(*args):
+        return edge_expansion(metadata, *args)
+
+    results = []
+    for fn in (reference, native):
+        y = fn(*inputs)
+        gradient = torch.autograd.grad(y.sin().sum(), inputs, create_graph=True)
+        second = torch.autograd.grad(sum(t.square().sum() for t in gradient), inputs)
+        _, jvp = torch.func.jvp(fn, inputs, tangents)
+        results.append((y, *gradient, *second, jvp))
+    for a, b in zip(*results, strict=True):
+        torch.testing.assert_close(a, b)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("mmax", [0, 1, 2])
 @pytest.mark.parametrize("ece", [False, True])
@@ -920,7 +1035,7 @@ def test_uu_o2_compile_and_empty_graph(double_precision):
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("memory_first", [None, "1"])
+@pytest.mark.parametrize("memory_first", [None, "0"])
 @pytest.mark.parametrize(
     "interaction,bias,convert",
     [
@@ -1004,6 +1119,10 @@ def test_streaming_force_training(
             raise AssertionError("The streamed convolution must not call an edge TP")
 
         for layer in representation.interactions:
+            if interaction == "uu_o2":
+                assert layer.rejector.eqx_tp.radial_mode == (
+                    "last" if memory_first == "0" else "full"
+                )
             if getattr(layer, "use_eqx", False) and hasattr(layer.rejector, "tp"):
                 if device == "cuda" or interaction != "co3":
                     monkeypatch.setattr(layer.rejector.tp, "forward", no_edge_message)

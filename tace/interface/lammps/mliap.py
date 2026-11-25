@@ -173,6 +173,9 @@ class TACEAOTILammpsCalc(TACELammpsCalc):
         Model precision.
     """
 
+    local_owners = False
+    single_threaded = False
+
     def __init__(
         self,
         package_path: Union[str, Path],
@@ -211,7 +214,15 @@ class TACEAOTILammpsCalc(TACELammpsCalc):
             package_path = os.path.join(tmpdir, self.package_filename)
             with open(package_path, "wb") as package_file:
                 package_file.write(self.package_bytes)
-            self.model = load_lammps_aotinductor(package_path, device)
+            self.model = load_lammps_aotinductor(
+                package_path, device, single_threaded=self.single_threaded
+            )
+        if (
+            self.model.metadata.get("tace_lammps_local_owners") == "1"
+        ) != self.local_owners:
+            raise ValueError(
+                "LAMMPS wrapper and compiled package use different ghost layouts."
+            )
         logging.info(f"TACE AOTI model initialized on device: {device}")
         self.initialized = True
 

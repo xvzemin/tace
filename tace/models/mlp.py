@@ -29,8 +29,8 @@ def convolution_radial(network, features):
     Returns
     -------
     radial : torch.Tensor or tuple
-        Hidden features when ``TACE_MEMORY_FIRST`` is unset or ``0``;
-        original input partitions when it is ``1``.
+        Original input partitions by default, or hidden features when
+        ``TACE_MEMORY_FIRST=0``.
     layers : torch.nn.Sequential
         Final affine layer, or the complete radial MLP when streaming it.
 

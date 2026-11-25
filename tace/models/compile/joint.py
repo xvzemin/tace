@@ -342,7 +342,7 @@ class JointTraining:
             if cache is not None:
                 self.run = cache.save(self.run, output_schema, constants)
 
-    def __call__(self, data):
+    def __call__(self, data, *, return_gradients=False):
         state = model_state_values(self.module, self.parameter_names, self.buffer_names)
         inputs = [data[key].detach().contiguous() for key in self.keys]
         inputs.extend([value.detach() for value in state])
@@ -351,11 +351,14 @@ class JointTraining:
         split = 1 + len(self.trainable)
         loss, gradients, predictions = values[0], values[1:split], values[split:]
         parameters = [state[i] for i in self.trainable]
+        outputs = dict(zip(self.module.model.output_keys, predictions))
+        if return_gradients:
+            return outputs, loss, zip(parameters, gradients, strict=True)
         loss = ParameterLoss.apply(loss, gradients, *parameters)
-        return dict(zip(self.module.model.output_keys, predictions)), loss
+        return outputs, loss
 
 
-def joint_training(model, loss_fn, data):
+def joint_training(model, loss_fn, data, *, return_gradients=False):
     if not supports_joint_loss(model, loss_fn):
         raise ValueError(
             "Compiled training requires PyTorch with explicit dynamic shapes, "
@@ -396,4 +399,4 @@ def joint_training(model, loss_fn, data):
     )
     if key not in model._compiled_cache:
         model._compiled_cache[key] = JointTraining(model, loss_fn, data)
-    return model._compiled_cache[key](data)
+    return model._compiled_cache[key](data, return_gradients=return_gradients)

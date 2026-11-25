@@ -111,7 +111,7 @@ def prepare_tensor_loss_counts(label, properties):
         world_size = dist.get_world_size()
         dist.all_reduce(counts, op=dist.ReduceOp.SUM)
     label.update(zip(names, counts))
-    label["_loss_world_size"] = counts.new_tensor(world_size)
+    label["_loss_world_size"] = counts.new_full((), world_size)
     return label
 
 

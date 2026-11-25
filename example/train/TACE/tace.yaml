@@ -30,7 +30,7 @@ misc:
     # TACE_USE_EQT: "1" # EquiTorch ACE; unset enables selected correlation > 2 paths
     # TACE_USE_CUE: "1" # supported cuEquivariance operators
     # Per-operator priority: EQX > Luna > OEQ > EQT > CUEQ.
-    # TACE_MEMORY_FIRST: "0" # default/unset: final radial layer only; 1: full MLP + backward recomputation
+    # TACE_MEMORY_FIRST: "1" # default: stream the full radial MLP; 0: fuse only the final projection
     # EQX_USE_CUDA_GRAPH: "1" # unset: eligible node products; 0: off; 1: all supported native captures
     # Native EQX replay is independent of torch.compile and can retain extra capture memory.
     # Prefer dtype.matmul; explicit environment values must agree with it and each other.

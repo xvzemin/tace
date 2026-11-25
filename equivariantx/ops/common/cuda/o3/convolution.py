@@ -238,6 +238,8 @@ def contract_direct(
     initialize=(),
     batch_paths=False,
     pair_index=None,
+    *,
+    group_nodes=True,
 ):
     """Share angular factors across derivative terms and reduce on their owners."""
     operands, results = [], []
@@ -270,7 +272,7 @@ def contract_direct(
             shared_values.get(i, value.size(0) == 1) for i, value in enumerate(operands)
         ),
         "float" if operands[0].dtype == torch.float32 else "double",
-        indexed and count >= 1024,
+        group_nodes and indexed and count >= 1024,
         operands[0].device,
         tuple(result_ids[id(value)] for value in initialize),
         batch_paths,

@@ -115,9 +115,9 @@ but its first derivative need not be. The graph cutoff envelope still acts
 on the physical distance :math:`r`.
 
 Both bases support ``cgtp``, its Cartesian and edge-aligned equivalents,
-and CGTP in ``tace-train-oamv2``. OAMv2 evaluates degree-specific radial heads
-in batches by default. Set ``TACE_MEMORY_FIRST=1`` to stream the grouped MLP
-through the EQX convolution instead.
+and CGTP in ``tace-train-oamv2``. OAMv2 streams degree-specific radial heads
+through the EQX convolution by default. Set ``TACE_MEMORY_FIRST=0`` to
+evaluate them in batches instead.
 
 Degree-specific spherical Bessel basis
 --------------------------------------

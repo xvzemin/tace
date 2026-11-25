@@ -184,9 +184,9 @@ EQX in TACE
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx.models.tace.nonlinear_ace``
 
-Except for ``uv_o2`` and ``uv_o2_mag``, EQX-backed convolutions default to fusing
-the final radial MLP projection; hidden layers use PyTorch. Set
-``TACE_MEMORY_FIRST=1`` to fuse the complete radial MLP instead. See
+Supported EQX-backed convolutions stream the complete radial MLP by default.
+Set ``TACE_MEMORY_FIRST=0`` to fuse only its final projection in convolutions
+with a selectable fusion boundary. See
 :ref:`tace-memory-first` for the supported convolutions and memory tradeoff.
 
 Compiled ``nonlinear_cgtp`` training evaluates EQX bilinear products directly in
@@ -199,7 +199,7 @@ rotation, radial weighting, Linear--Gate--Linear, inverse rotation and node
 aggregation in one differentiable, tiled convolution. Channel maps use GEMM
 within each tile; tile-local hidden features are recomputed for force training
 instead of being saved by autograd. This path is enabled by ``TACE_USE_EQX=1``
-and does not require ``torch.compile`` or ``TACE_MEMORY_FIRST=1``. RRA uses a
+independently of ``torch.compile`` and ``TACE_MEMORY_FIRST``. RRA uses a
 separate path with query/key projections and graph softmax.
 
 EQX uses bounded CUDA Graph replay for eligible node products, independently
@@ -348,3 +348,101 @@ Compile for a compatible deployment OS, PyTorch/CUDA ABI, and GPU architecture.
 A CUDA package cannot be loaded on CPU. Set backend flags before exporting a
 full model or AOTI graph; they do not replace operators in an already compiled
 artifact.
+
+Specialized TACE-OAM-L execution
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For the released five-layer, 64-channel TACE-OAM-L checkpoint, an opt-in
+lowering preserves the original readout, normalization, cutoff, and learned
+parameters. It does not apply to other OAM checkpoints. To build the
+single-rank FP32 CUDA ML-IAP loader:
+
+.. code-block:: bash
+
+   tace-export-lammps -m TACE-OAM-L.pt --device cuda --backend eqx-oam-l \
+     -o oam-l-mliap.pt
+
+Use ``oam-l-mliap.pt`` with ``pair_style mliap/kk unified`` as above.
+The capacity loader selects a compiled force graph or receiver tiles
+using the pair count and available device memory. If the whole-system
+node states no longer fit, it can recompute them or split the atomic
+energies into domains. The throughput-only loader uses
+``--backend eqx-oam-l-throughput``. Both use LAMMPS periodic image
+vectors and require **one MPI rank**. See :doc:`lammps` for deployment.
+
+For direct PyTorch use, convert the canonical loaded adapter:
+
+.. code-block:: python
+
+   from equivariantx.models.tace.tace_oam_l import optimize_oam_l
+   from tace.lightning import load_tace
+
+   ref = load_tace("TACE-OAM-L.pt", device="cuda", dtype="float32")
+   ref.eval().requires_grad_(False)
+   model = optimize_oam_l(ref, memory_mode="stream", fused_geometry=True)
+
+The wrapper is independent but its parameter objects are **shared** with
+``ref``; optimizer updates through either model change both. The canonical
+state-dict keys and requested properties do not change. For training,
+leave the parameters trainable, call ``train()``, and use the same optimizer
+and property-loss code as for the source model.
+
+For single-stream E/F/S training with FP32 model parameters and fused AdamW,
+unchanged minibatches with the same number of structures can share CUDA
+Graph workspaces. Set maximum real atom and directed-edge counts per bucket:
+
+.. code-block:: python
+
+   from equivariantx.models.tace.training import MultiBucketEFSTrainingStep
+
+   step = MultiBucketEFSTrainingStep(
+       model, optimizer, capacities, share_workspace=True, native_product=True
+   )
+   predictions = step(batch)
+
+For any of the released L, 7M and TECE-RRA models (OAM or OMat24), use
+the architecture-specific differentiable model before creating the optimizer:
+
+.. code-block:: python
+
+   from equivariantx.models.tace.foundation import optimize_foundation
+   from tace.lightning import load_tace
+
+   ref = load_tace("TACE-OAM-7M.pt", device="cuda", dtype="float32",
+                   target_property=["energy", "forces", "stress"])
+   model = optimize_foundation(ref).train()
+   optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, fused=True)
+   step = MultiBucketEFSTrainingStep(model, optimizer, capacities, share_workspace=True)
+   step.prepare_all(example_batches)
+
+For 7M and TECE keep ``native_product=False`` (the default). If memory is
+limited, TECE can also use the original model with the same replay step.
+For the released TECE FP32 layout, the optimized training model evaluates
+the local edge expansion, its input gradients, and the mixed second derivative
+needed by force and stress losses in CUDA. Higher-order differentiation uses
+the same products in PyTorch. FP64 retains the ordinary expansion.
+``prepare_all`` warms the supplied shapes before capturing their graphs;
+it does not advance the optimizer. Other buckets are captured on first use.
+
+For the L architecture, each step computes the first scalar lift on the species table, gathers
+edge endpoint types once, and reduces the final invariant quadratic
+contraction to the squared norms of the six angular irreps. The frozen
+coefficient adjoint applies transposed per-species matrices without saving
+primal quadratic features. Two inference schedules are available:
+
+* ``memory_mode="stream"`` retains the narrow edge state for the force
+  derivative and projects the 2,688 late-layer path weights in tiles.
+  ``fused_projection=True`` keeps the bias explicit for a 128-channel GPU
+  matrix product without padded activation lanes.
+* ``memory_mode="recompute"`` trades compute for capacity: derive the two
+  edge heads again from the shared 64-channel embedding and tile both the
+  quadratic contraction and its wide coefficient adjoint by atom.
+
+``fused_geometry=True`` fuses all six angular degrees with the physical
+cutoff, retaining the direction normalization and geometry precision.
+``grouped_coefficients=True`` optionally groups frozen FP32 coefficient
+maps by species without packing the wide feature tensors. Its native
+kernel selects the original implementation for small maps; selection uses
+actual dimensions at runtime, not the example used for export. Neither
+option selects a new precision policy. Timing depends on the graph, model
+dtype, and hardware; measure complete MD steps or optimizer updates.

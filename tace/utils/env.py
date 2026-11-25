@@ -185,5 +185,5 @@ def get_tace_use_matrix_weight():
 
 
 def memory_first() -> bool:
-    """Recompute the complete radial MLP in EQX when TACE_MEMORY_FIRST=1."""
-    return os.environ.get("TACE_MEMORY_FIRST", "0") == "1"
+    """Stream the full radial MLP by default; set TACE_MEMORY_FIRST=0 to opt out."""
+    return os.environ.get("TACE_MEMORY_FIRST", "1") == "1"

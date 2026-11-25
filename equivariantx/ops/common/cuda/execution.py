@@ -1190,7 +1190,7 @@ def tile_rows(metadata, element_size, workspace):
     return max(256, rows // 128 * 128)
 
 
-def launch(metadata, inputs, source, target, outputs, tile_size=None):
+def launch(metadata, inputs, source, target, outputs, tile_size=None, *, tile_class=None):
     """Evaluate a program with bounded intermediate edge storage."""
     plan = execution_plan(metadata)
     if source.numel():
@@ -1207,9 +1207,11 @@ def launch(metadata, inputs, source, target, outputs, tile_size=None):
         for slot, output in zip(slots, outputs)
     }
     shared, node_adjoints = {}, {}
+    if tile_class is None:
+        tile_class = TiledProgram
     for begin in range(0, source.numel(), tile_size):
         end = min(begin + tile_size, source.numel())
-        tile = TiledProgram(plan, inputs, source, target, begin, end, shared)
+        tile = tile_class(plan, inputs, source, target, begin, end, shared)
         tile.destinations = {
             root: destinations[slot]
             for root, slot, kind in descriptions

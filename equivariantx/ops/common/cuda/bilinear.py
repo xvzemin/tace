@@ -185,13 +185,28 @@ def transpose_source(dtype, metadata, terms):
 
 
 @lru_cache(maxsize=128)
-def inputs_source(dtype, metadata, branches, roles):
+def inputs_source(dtype, metadata, branches, roles, large_batch=False):
     plans = decode_plans(metadata)
     paths = defaultdict(list)
     for branch, (plan, mapping) in enumerate(branches):
         for _, entries in plans[plan][2][3]:
             for r, _ in entries:
                 paths[r[10]].append((plan, mapping, r, branch))
+    narrow_output = (
+        large_batch
+        and dtype == torch.float32
+        and roles == (0, 1, 4)
+        and len(branches) == 1
+        and all(
+            r[4:6] == (256, 64) for entries in paths.values() for _, _, r, _ in entries
+        )
+    )
+    lanes = 8 if narrow_output else 32
+    shuffle = (
+        "__shfl_down_sync(0xffu << (t & 24),sum[m],s,8)"
+        if narrow_output
+        else "__shfl_down_sync(0xffffffff,sum[m],s)"
+    )
     cases = []
     shared_size = 1
     for index, (gate, entries) in enumerate(sorted(paths.items())):
@@ -213,13 +228,13 @@ def inputs_source(dtype, metadata, branches, roles):
         parts = [
             f"case {index}: {{",
             f"for(int start=0;start<{width};start+={tile_width}) {{",
-            f"for(int u=start+t/32;u<{width} && u<start+{tile_width};u+=blockDim.x/32) {{ scalar sum[{dz}]={{}};",
+            f"for(int u=start+t/{lanes};u<{width} && u<start+{tile_width};u+=blockDim.x/{lanes}) {{ scalar sum[{dz}]={{}};",
         ]
         for (plan, indices, sw, so, shift, ci, co, _), scale in maps.items():
             z = "0" if plan else "types[n]"
             parts += [
                 f"if(u>={shift} && u<{shift + ci}) {{ scalar part[{dz}]={{}};",
-                f"for(int v=t%32;v<{co};v+=32) {{",
+                f"for(int v=t%{lanes};v<{co};v+={lanes}) {{",
                 f"scalar w=p{indices[2]}[{z}*{plans[plan][0][2]}+{sw}+(u-{shift})*{co}+v];",
                 f"#pragma unroll\nfor(int m=0;m<{dz};++m) "
                 f"part[m]+=w*p{indices[3]}[n*{dims[3]}+{so}+v*{dz}+m]; }}",
@@ -228,8 +243,8 @@ def inputs_source(dtype, metadata, branches, roles):
             ]
         parts += [
             f"#pragma unroll\nfor(int m=0;m<{dz};++m) {{",
-            "for(int s=16;s>0;s/=2) sum[m]+=__shfl_down_sync(0xffffffff,sum[m],s);",
-            f"if(t%32==0) adj[(u-start)*{dz}+m]=sum[m]; }} }}",
+            f"for(int s={lanes // 2};s>0;s/=2) sum[m]+={shuffle};",
+            f"if(t%{lanes}==0) adj[(u-start)*{dz}+m]=sum[m]; }} }}",
             "__syncthreads();",
             f"for(int u=start+t;u<{width} && u<start+{tile_width};u+=blockDim.x) {{",
             f"scalar gx[{dx}]={{}}, gy[{dy}]={{}}, gg=0;",
@@ -273,6 +288,7 @@ def inputs_source(dtype, metadata, branches, roles):
     }}""",
         len(paths),
         count,
+        256 if narrow_output else 128,
     )
 
 
@@ -371,11 +387,13 @@ def execution_jobs(metadata, program, node_type, operands, outputs):
             and len({s for _, _, s in by_role[r]}) == 1
             for r in roles
         ):
-            code, groups, count = inputs_source(dtype, metadata, branches, roles)
+            code, groups, count, threads = inputs_source(
+                dtype, metadata, branches, roles, nodes >= 1024
+            )
             if groups:
                 args = [v.data_ptr() for v in operands[:count]] + [node_type.data_ptr()]
                 args += [outputs[by_role[r][0][2]].data_ptr() for r in roles] + [nodes]
-                jobs.append((code, args, nodes, groups, 128, 0))
+                jobs.append((code, args, nodes, groups, threads, 0))
         else:
             for term in terms:
                 grouped[term[2], term[3]].append(term)

@@ -37,7 +37,6 @@ For Python scripts, set import-time options before importing TACE:
    import os
 
    os.environ["TACE_USE_EQX"] = "1"
-   os.environ["TACE_MEMORY_FIRST"] = "0"
 
    from tace.lightning import load_tace
 
@@ -52,7 +51,6 @@ inherited values with the same names. All values must be quoted strings:
      env:
        TACE_USE_EQX: "1"
        TACE_USE_COMPILE: "1"
-       TACE_MEMORY_FIRST: "0"
        WANDB_MODE: "offline"
 
 Use the shell for ``TACE_USE_MATRIX_WEIGHT``, CUDA device visibility, and
@@ -131,13 +129,12 @@ enabled, independently of this option. Edge embedding remains unchanged.
 
    * - Value
      - Behavior
-   * - Unset or ``0``
-     - Evaluate hidden layers with PyTorch and fuse only the final projection
-       into the convolution. This is the default; ``torch.compile`` can
-       optimize hidden activations and their force-training derivatives.
-   * - ``1``
+   * - Unset or ``1`` (default)
      - Fuse the complete radial MLP into bounded edge tiles and recompute its
        hidden activations during backward, reducing retained radial activations.
+   * - ``0``
+     - Evaluate hidden layers with PyTorch and fuse only the final projection
+       into the convolution.
 
 Set this option before model construction or compilation. It applies to
 training and evaluation without changing model parameters or checkpoint
@@ -147,11 +144,11 @@ memory cost also depends on the convolution and derivative workload.
 
 .. code-block:: bash
 
-   # Default: fuse only the final radial projection.
+   # Default: fuse the complete radial MLP.
    TACE_USE_EQX=1 TACE_USE_COMPILE=1 tace-train -cn tace.yaml
 
-   # Fuse the complete radial MLP.
-   TACE_USE_EQX=1 TACE_USE_COMPILE=1 TACE_MEMORY_FIRST=1 tace-train -cn tace.yaml
+   # Fuse only the final radial projection.
+   TACE_USE_EQX=1 TACE_USE_COMPILE=1 TACE_MEMORY_FIRST=0 tace-train -cn tace.yaml
 
 FP32 matrix multiplication
 --------------------------

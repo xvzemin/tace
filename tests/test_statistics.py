@@ -527,7 +527,7 @@ def test_u_shift_preserves_raw_statistics_fit_and_filter(
     tmp_path, monkeypatch, compressed, loader_type
 ):
     numbers = [[26], [8], [26, 8], [26, 26, 8], [28, 9, 9], [26, 8]]
-    raw = [-2.0, -1.0, -2.0, -3.0, -3.0, 999.0]
+    raw = [-2.0, -1.0, -2.0, -4.5, -3.0, 999.0]
     atoms_list, graphs = [], []
     for index, (zs, energy) in enumerate(zip(numbers, raw)):
         atoms = Atoms(numbers=zs, positions=np.arange(len(zs) * 3).reshape(-1, 3))
@@ -578,14 +578,17 @@ def test_u_shift_preserves_raw_statistics_fit_and_filter(
     for batch in loader:
         accumulator.update(batch)
     actual = accumulator.result()[0]
-    selected = filter_graphs(dataset, {"max_energy_per_atom": -1.5})
-    assert selected.indices.tolist() == [0]
-    assert float(selected[0].energy) == raw[0]
-    selected.close()
-    monkeypatch.setenv("TACE_USE_U_SHIFT", "0")
-    selected = filter_graphs(dataset, {"max_energy_per_atom": -1.5})
-    assert selected.indices.tolist() == [0]
-    selected.close()
+    # Both isolated references pass. Fe2O meets the raw threshold exactly;
+    # FeO would pass only if the training-time U shift leaked into filtering.
+    expected_indices = [0, 1, 3]
+    for use_u_shift in ("1", "0"):
+        monkeypatch.setenv("TACE_USE_U_SHIFT", use_u_shift)
+        selected = filter_graphs(dataset, {"max_energy_per_atom": -1.5})
+        assert selected.indices.tolist() == expected_indices
+        assert [float(graph.energy) for graph in selected] == [
+            raw[i] for i in expected_indices
+        ]
+        selected.close()
     expected = _accumulator(graphs, options, batch_size=2).result()[0]
     _assert_statistics_equal(actual, expected)
     assert [float(graph.energy) for graph in dataset] == raw

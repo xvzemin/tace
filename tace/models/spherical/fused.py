@@ -731,6 +731,7 @@ class UuO2TensorProductConv(torch.nn.Module):
             self.linear,
             self.local_frame_out,
             backend="cuda",
+            radial_mode="full" if memory_first() else "last",
             with_transverse=max(self.irreps_in.lmax, self.irreps_out.lmax) < 4,
         )
 

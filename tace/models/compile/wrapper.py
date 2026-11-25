@@ -384,6 +384,8 @@ class FlatLammpsModel(torch.nn.Module):
         self,
         model: CompileTensorModel,
         input_keys: Sequence[str],
+        *,
+        local_owners: bool = False,
     ) -> None:
         super().__init__()
         if "energy" not in model.get_target_property():
@@ -391,6 +393,7 @@ class FlatLammpsModel(torch.nn.Module):
         self.readout_fn = model.readout_fn
         self.input_keys = tuple(input_keys)
         self.fidelity_idx = model.fidelity_idx
+        self.local_owners = local_owners
 
     def forward(self, *args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         data = {key: value for key, value in zip(self.input_keys, args)}
@@ -422,7 +425,7 @@ class FlatLammpsModel(torch.nn.Module):
         edge_length = torch.linalg.vector_norm(edge_vector, dim=-1, keepdim=True)
         return Graph(
             lmp=True,
-            lmp_data=AOTI_LAMMPS_GHOST_EXCHANGE,
+            lmp_data=None if self.local_owners else AOTI_LAMMPS_GHOST_EXCHANGE,
             lmp_natoms=(nlocal, nghosts),
             num_graphs=2,
             displacement=None,

@@ -1161,7 +1161,7 @@ def test_element2_projects_nodes_before_gather(
         lambda module, inputs: sizes.append(inputs[0].size(0))
     )
     radial, layers = convolution_radial(mlp, module(None, attrs, feats, edges, None))
-    assert len(layers) == (len(mlp.mlp) if memory_first == "1" else 1)
+    assert len(layers) == (1 if memory_first == "0" else len(mlp.mlp))
     actual = layers(materialize(radial, edges))
     hook.remove()
     assert sizes == [attrs.size(0)]

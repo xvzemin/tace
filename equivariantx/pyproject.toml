@@ -51,6 +51,8 @@ packages = [
     "equivariantx.models.prophet",
     "equivariantx.models.sevennet",
     "equivariantx.models.tace",
+    "equivariantx.models.tace.tace_oam_7m",
+    "equivariantx.models.tace.tace_oam_l",
     "equivariantx.models.tace.tace_oam_xl_v2",
     "equivariantx.models.tace.tece_oam_rra",
     "equivariantx.nn",

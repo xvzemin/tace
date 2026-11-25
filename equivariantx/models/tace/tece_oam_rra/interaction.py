@@ -109,6 +109,12 @@ def stream(
         raise ValueError("backend='cuda' requires CUDA inputs.")
     if backend == "cuda" and forward_ad_active():
         from ....ops.common.torch.tece import interaction as execute
+    elif backend == "cuda" and getattr(module, "save_force_primals", False):
+        from .force import capped_program
+        from .force import saved_interaction as execute
+
+        if getattr(module, "primal_edge_limit", None) is not None:
+            metadata = capped_program(metadata, module.primal_edge_limit)
     else:
         execute = (
             interaction

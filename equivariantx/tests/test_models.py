@@ -17,6 +17,172 @@ from equivariantx.models.sevennet import convert_sevennet_to_eqx
 from equivariantx.utils import copy_model
 
 
+def test_frozen_endpoint_adjoint_layout():
+    from equivariantx.models.tace.tece_oam_rra.expressions import (
+        packed_layout,
+        paired_features,
+    )
+    from equivariantx.models.tace.tece_oam_rra.force import adjoint_programs
+    from equivariantx.models.tace.tece_oam_rra.frame import (
+        ENDPOINT_MATRIX,
+        lower_endpoint,
+        lower_endpoint_matrix,
+    )
+    from equivariantx.utils.frame_program import rotate
+    from equivariantx.utils.metadata import parse_metadata
+    from equivariantx.utils.program import Program
+
+    p = Program()
+    p.constant(64, 0.5)
+    s, t = p.input(0, "source", 1600), p.input(0, "target", 1600)
+    w = p.input(5, "edge", 165)
+    x = paired_features(p, s, t, 25, 64)
+    z = rotate(p, packed_layout(5, 4, 128), x, w, 25, 25, packed=True)
+    seed = p.input(2, "edge", 3200)
+    outs = p.adjoint((z,), (seed,), (0, 5))
+    nodes = tuple(p.nodes)
+    new = lower_endpoint(nodes, outs)
+    changed = [i for i, (a, b) in enumerate(zip(nodes, new)) if a != b]
+    assert len(changed) == 1
+    (i,) = changed
+    assert new[i][3][0][2] == ("frozen_endpoint_adjoint",)
+    assert new[i][2][:2] == (seed, w)
+    op, n, args, ids = nodes[i]
+    wrong = (*nodes[:i], (op, n, args, ids[::-1]), *nodes[i + 1 :])
+    assert lower_endpoint(wrong, outs) is wrong
+    (matrix,) = [j for j, slot, kind in outs if (slot, kind) == (5, "edge")]
+    frozen = repr((new, outs))
+    full, tail = adjoint_programs(repr((frozen, frozen)))
+    for spec in (full, tail):
+        lowered, roots = parse_metadata(spec)
+        assert roots == outs
+        assert [j for j, (a, b) in enumerate(zip(new, lowered)) if a != b] == [matrix]
+        assert lowered[matrix][3][0] == ENDPOINT_MATRIX
+    op, n, args, data = new[matrix]
+    wrong = (*new[:matrix], (op, n, args[::-1], data), *new[matrix + 1 :])
+    for unmatched in (nodes, wrong):
+        original = repr((unmatched, outs))
+        assert lower_endpoint_matrix(original) == original
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
+def test_frozen_endpoint_adjoint_values():
+    from equivariantx.models.tace.tece_oam_rra.frame import (
+        endpoint_adjoint,
+        endpoint_matrix_adjoint,
+    )
+
+    rng = torch.Generator(device="cuda").manual_seed(19)
+    w = torch.randn(17, 330, generator=rng, device="cuda")[:, ::2]
+    x = torch.randn(17, 25, 256, generator=rng, device="cuda")[:, :, ::2]
+    order = [
+        l * l + l + k
+        for m in range(5)
+        for k in ((0,) if m == 0 else (m, -m))
+        for l in range(m, 5)
+    ]
+    y = x[:, torch.tensor(order).argsort()].double()
+    blocks = []
+    for l in range(5):
+        d = 2 * l + 1
+        off = l * (4 * l * l - 1) // 3
+        mat = w[:, off : off + d * d].reshape(-1, d, d).double()
+        blocks.append(mat.mT @ y[:, l * l : (l + 1) ** 2])
+    expected = (
+        torch.cat(blocks, 1).reshape(-1, 25, 2, 64).transpose(1, 2).reshape(17, 3200)
+    )
+    inp = x.flatten(1)
+    out = torch.empty(17, 6400, device="cuda")[:, ::2]
+    assert endpoint_adjoint(inp, w, out) is out
+    torch.testing.assert_close(out.double(), expected, atol=3e-6, rtol=1e-5)
+    assert endpoint_adjoint(inp[:0], w[:0]).shape == (0, 3200)
+    src = torch.randint(7, (17,), device="cuda", generator=rng)
+    dst = torch.randint(7, (17,), device="cuda", generator=rng)
+    for offset in (0, 1):
+        node = torch.randn(
+            7 * 1600 + offset, dtype=torch.float32, device="cuda", generator=rng
+        )[offset:].reshape(7, 25, 64)
+        g = torch.randn(
+            17 * 3200 + offset, dtype=torch.float32, device="cuda", generator=rng
+        )[offset:].reshape(17, 3200)
+        assert node.is_contiguous() and bool(node.data_ptr() % 16) == bool(offset)
+        assert g.is_contiguous() and bool(g.data_ptr() % 16) == bool(offset)
+        pair = torch.cat((node[src], node[dst]), -1).double()
+        D = w.detach().double().requires_grad_()
+        seeds = g.reshape(17, 25, 128)[:, torch.tensor(order).argsort()].double()
+        objective = D.new_zeros(())
+        for l in range(5):
+            d = 2 * l + 1
+            off = l * (4 * l * l - 1) // 3
+            x_l = pair[:, l * l : (l + 1) ** 2]
+            adj = seeds[:, l * l : (l + 1) ** 2]
+            objective = (
+                objective
+                + ((D[:, off : off + d * d].reshape(-1, d, d) @ x_l) * adj).sum()
+            )
+        (ref,) = torch.autograd.grad(objective, D)
+        dest = torch.empty(17, 330, device="cuda", dtype=torch.float32)[:, ::2]
+        assert endpoint_matrix_adjoint(node, g, src, dst, dest) is dest
+        torch.testing.assert_close(dest.double(), ref, atol=1.2e-5, rtol=5e-6)
+        assert endpoint_matrix_adjoint(node, g[:0], src[:0], dst[:0]).shape == (0, 165)
+    with pytest.raises(ValueError):
+        endpoint_matrix_adjoint(node.double(), g, src, dst)
+    with pytest.raises(ValueError):
+        endpoint_matrix_adjoint(node, g, src.int(), dst)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
+def test_frozen_seven_reciprocal_rows_follow_geometry_and_topology():
+    from equivariantx.models.tace.tace_oam_7m.reciprocal import pair_rows
+
+    # Six unrelated two-way links, two different periodic images, a self image and a one-way link.
+    src = torch.tensor(
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 12, 13, 14, 15], device="cuda"
+    )
+    dst = torch.tensor(
+        [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 13, 12, 14, 16], device="cuda"
+    )
+    types = torch.zeros(17, dtype=torch.long, device="cuda")
+    types[11] = 1
+    rng = torch.Generator(device="cuda").manual_seed(214)
+    f, df = (
+        torch.randn(9, 64, device="cuda", generator=rng).repeat_interleave(2, 0)
+        for _ in range(2)
+    )
+    order = torch.randperm(len(src), device="cuda", generator=rng)
+
+    def validate(ids, inverse, y, dy):
+        assert torch.equal(y[ids][inverse], y)
+        assert torch.equal(dy[ids][inverse], dy)
+        groups = inverse[order.argsort()]
+        return groups[:12:2] == groups[1:12:2]
+
+    for broken in range(3):
+        if broken == 1:
+            f[1, 0] += 1
+        elif broken == 2:
+            df[3, 1] += 1
+        y, dy = (v[order].T.contiguous().T for v in (f, df))
+        ids, inv = pair_rows(src[order], dst[order], types, y, dy)
+        match = validate(ids, inv, y, dy)
+        assert match[:5].sum() == 5 - broken and not match[5]
+        assert inv[order.argsort()][12:].unique().numel() == 6
+
+    # A topology update drops the reverse edge; changing the elements can disable reuse entirely.
+    ids, inv = pair_rows(src[1:], dst[1:], types, f[1:], df[1:])
+    assert torch.equal(f[1:][ids][inv], f[1:])
+    assert (inv == inv[0]).sum() == 1
+    assert (
+        pair_rows(src, dst, torch.arange(len(types), device=src.device), f, df) is None
+    )
+
+
 @pytest.mark.parametrize(
     "convert",
     [

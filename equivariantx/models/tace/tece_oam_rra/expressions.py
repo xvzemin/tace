@@ -22,6 +22,75 @@ def base_program(metadata, inputs):
     )
 
 
+def paired_features(program, source, target, angular, channels):
+    """Interleave source and target channels within each angular component."""
+    return program.gather(
+        program.concatenate((source, target)),
+        (
+            side * angular * channels + a * channels + c
+            for a in range(angular)
+            for side in range(2)
+            for c in range(channels)
+        ),
+    )
+
+
+def rotary_dot(program, query, key, phase, n, mmax, channels, heads):
+    """Contract query and phase-rotated key blocks for each attention head."""
+    orders, swap, sign = [], [], []
+    offset = 0
+    for m in range(mmax + 1):
+        size = n - m
+        for real in range(1 if m == 0 else 2):
+            for degree in range(size):
+                orders.append(m)
+                swap.append(offset + (1 - real) * size + degree if m else degree)
+                sign.append(-1 if real == 0 else 1)
+        offset += size * (1 if m == 0 else 2)
+    head_indices = tuple(
+        c // (channels // heads) for _ in orders for c in range(channels)
+    )
+    angle = program.gather(phase, head_indices)
+    order_values = program.concatenate([program.constant(channels, m) for m in orders])
+    angle = program.binary("mul", angle, order_values)
+    rotated = program.binary(
+        "add",
+        program.binary("mul", key, program.unary("cos", angle)),
+        program.binary(
+            "mul",
+            program.unary("sin", angle),
+            program.binary(
+                "mul",
+                program.gather(
+                    key, (a * channels + c for a in swap for c in range(channels))
+                ),
+                program.concatenate([program.constant(channels, s) for s in sign]),
+            ),
+        ),
+    )
+    return program.scatter(program.binary("mul", query, rotated), head_indices, heads)
+
+
+def packed_layout(n, mmax, width):
+    """Return the degree-to-local-order layout for packed Wigner matrices."""
+    return (
+        mmax,
+        False,
+        tuple((1 if m == 0 else 2, (n - m) * width) for m in range(mmax + 1)),
+        tuple(
+            (
+                l * l * width,
+                width,
+                l,
+                False,
+                tuple(range(min(l, mmax) + 1)),
+                tuple((l - m) * width for m in range(min(l, mmax) + 1)),
+            )
+            for l in range(n)
+        ),
+    )
+
+
 @lru_cache(maxsize=64)
 def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=False):
     """Build score and value expressions once for each static architecture."""
@@ -64,16 +133,7 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
     values = [program.input(i, kind, size) for i, (size, kind) in enumerate(specs)]
     source = values[0]
     target = program.input(0, "target", angular_in * channels)
-    paired = program.concatenate((source, target))
-    paired = program.gather(
-        paired,
-        (
-            side * angular_in * channels + a * channels + c
-            for a in range(angular_in)
-            for side in range(2)
-            for c in range(channels)
-        ),
-    )
+    paired = paired_features(program, source, target, angular_in, channels)
     rotation, inverse = values[5:7]
 
     def rotate_features(features, matrix, global_dim, width, inverse=False):
@@ -85,25 +145,9 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
                 angular if inverse else global_dim,
                 width,
             )
-        description = (
-            mmax,
-            False,
-            tuple((1 if m == 0 else 2, (n - m) * width) for m in range(mmax + 1)),
-            tuple(
-                (
-                    l * l * width,
-                    width,
-                    l,
-                    False,
-                    tuple(range(min(l, mmax) + 1)),
-                    tuple((l - m) * width for m in range(min(l, mmax) + 1)),
-                )
-                for l in range(n)
-            ),
-        )
         return rotate(
             program,
-            description,
+            packed_layout(n, mmax, width),
             features,
             matrix,
             angular,
@@ -152,38 +196,7 @@ def build(metadata, radial_width, basis_width, angular_in, angular_out, packed=F
     phase = program.scale(
         program.unary("tanh", program.slice(radial, heads, heads)), 3.141592653589793
     )
-    orders, swap, sign = [], [], []
-    offset = 0
-    for m in range(mmax + 1):
-        size = n - m
-        for real in range(1 if m == 0 else 2):
-            for degree in range(size):
-                orders.append(m)
-                swap.append(offset + (1 - real) * size + degree if m else degree)
-                sign.append(-1 if real == 0 else 1)
-        offset += size * (1 if m == 0 else 2)
-    head_indices = tuple(
-        c // (channels // heads) for _ in range(angular) for c in range(channels)
-    )
-    angle = program.gather(phase, head_indices)
-    order_values = program.concatenate([program.constant(channels, m) for m in orders])
-    angle = program.binary("mul", angle, order_values)
-    rotated = program.binary(
-        "add",
-        program.binary("mul", key, program.unary("cos", angle)),
-        program.binary(
-            "mul",
-            program.unary("sin", angle),
-            program.binary(
-                "mul",
-                program.gather(
-                    key, (a * channels + c for a in swap for c in range(channels))
-                ),
-                program.concatenate([program.constant(channels, s) for s in sign]),
-            ),
-        ),
-    )
-    score = program.scatter(program.binary("mul", query, rotated), head_indices, heads)
+    score = rotary_dot(program, query, key, phase, n, mmax, channels, heads)
     temperature = program.binary(
         "add",
         program.constant(heads, temperature_min),

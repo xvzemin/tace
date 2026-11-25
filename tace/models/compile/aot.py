@@ -316,6 +316,8 @@ def export_lammps_aotinductor(
     model: torch.nn.Module,
     output_path: Union[str, Path],
     sample_data: Union[Dict[str, torch.Tensor], None] = None,
+    *,
+    local_owners: bool = False,
 ) -> str:
     logging.info("[AOTI 1/5] Preparing model and example inputs...")
     model.eval()
@@ -325,11 +327,15 @@ def export_lammps_aotinductor(
 
     if sample_data is None:
         sample_data = synthetic_lammps_sample(compile_model)
+        if local_owners:
+            n = sample_data["batch"].numel()
+            sample_data["node_type"] = sample_data["node_type"][:n]
+            sample_data["edge_index"] = sample_data["edge_index"] % n
     else:
         sample_data = {key: value for key, value in sample_data.items()}
     ensure_sample_inputs(sample_data, input_keys, compile_model)
 
-    flat_model = FlatLammpsModel(compile_model, input_keys)
+    flat_model = FlatLammpsModel(compile_model, input_keys, local_owners=local_owners)
     flat_model.eval()
     custom_ops_libs = custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
@@ -340,7 +346,7 @@ def export_lammps_aotinductor(
         exported = torch.export.export(
             traced,
             inputs,
-            dynamic_shapes=lammps_dynamic_shapes(),
+            dynamic_shapes=lammps_dynamic_shapes(local_owners=local_owners),
             strict=False,
             prefer_deferred_runtime_asserts_over_guards=True,
         )
@@ -354,6 +360,8 @@ def export_lammps_aotinductor(
         aoti_format=LAMMPS_AOTI_FORMAT,
         target="lammps",
     )
+    if local_owners:
+        metadata["tace_lammps_local_owners"] = "1"
     inductor_configs = {**inductor_options(), "aot_inductor.metadata": metadata}
     ensure_cxx_compiler()
     logging.info(
@@ -373,9 +381,13 @@ def export_lammps_aotinductor(
 def load_lammps_aotinductor(
     model_path: Union[str, Path],
     device: Union[str, torch.device],
+    *,
+    single_threaded: bool = False,
 ) -> AOTICompiledLammpsModel:
     import_custom_ops_libs(str(model_path))
-    compiled_model = torch._inductor.aoti_load_package(str(model_path))
+    compiled_model = torch._inductor.aoti_load_package(
+        str(model_path), run_single_threaded=single_threaded
+    )
     metadata = dict(compiled_model.get_metadata())
     if metadata.get("tace_format") != LAMMPS_AOTI_FORMAT:
         raise ValueError(
@@ -575,13 +587,13 @@ def size_oblivious_export():
     return nullcontext()
 
 
-def lammps_dynamic_shapes() -> tuple[Dict[int, object], ...]:
+def lammps_dynamic_shapes(*, local_owners: bool = False) -> tuple[Dict[int, object], ...]:
     num_edges = torch.export.Dim("num_edges", min=2)
     num_total = torch.export.Dim("num_total", min=2)
     num_local = torch.export.Dim("num_local", min=1)
     return (
         {0: num_edges},
-        {0: num_total},
+        {0: num_local if local_owners else num_total},
         {1: num_edges},
         {0: num_local},
         {},
@@ -726,6 +738,22 @@ def custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
                 if isinstance(node.target, torch._ops.OpOverload):
                     if node.target.namespace == "eqx":
                         libs.add("equivariantx")
+                    elif node.target.namespace == "eqx_oam_l":
+                        libs.add("equivariantx.models.tace.tace_oam_l.radial")
+                    elif node.target.namespace == "eqx_oam_l_geometry":
+                        libs.add("equivariantx.models.tace.tace_oam_l.angular")
+                    elif node.target.namespace == "eqx_oam_l_product":
+                        libs.add("equivariantx.models.tace.tace_oam_l.product")
+                    elif node.target.namespace == "eqx_oam_l_conv":
+                        libs.add("equivariantx.models.tace.tace_oam_l.convolution")
+                    elif node.target.namespace == "eqx_oam_l_tangent":
+                        libs.add("equivariantx.models.tace.tace_oam_l.tangent")
+                    elif node.target.namespace == "eqx_tace_7m":
+                        libs.add("equivariantx.models.tace.tace_oam_7m.tangent")
+                    elif node.target.namespace == "eqx_tece_rra":
+                        libs.add("equivariantx.models.tace.tece_oam_rra.force")
+                    elif node.target.namespace == "eqx_oam_l_element":
+                        libs.add("equivariantx.models.tace.tace_oam_l.element_grouped")
     return libs
 
 

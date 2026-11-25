@@ -102,6 +102,67 @@ For AOTI deployment:
    export TACE_USE_OEQ=1
    tace-export-lammps -m model.pt --backend aoti --device cuda
 
+For the released TACE-OAM-L architecture on **one MPI rank and one CUDA GPU**:
+
+.. code-block:: bash
+
+   tace-export-lammps -m TACE-OAM-L --backend eqx-oam-l -o oam-l.pt
+
+For a single isolated atom with no neighbors, use the eager backend to retain
+the released checkpoint's isolated-atom energy convention.
+
+Use ``pair_style mliap/kk unified oam-l.pt 0``. This FP32 export includes the
+compiled force programs and a receiver-tiled EQX CUDA model. The loader uses a
+compiled program when it fits. Its streamed program evaluates the radial
+distance derivative without saving projected edge weights. For larger systems
+it evaluates the full neighbor list in tiles and saves or recomputes node messages during the force
+calculation according to available memory. If the whole-system node states
+still do not fit, the capacity backend partitions the atomic energies and
+accumulates their force contributions with the full message-passing halo.
+Domain tile widths adapt to neighbor counts and available GPU memory.
+This trades repeated computation for capacity without changing the cutoff.
+Only the selected model is loaded
+onto the GPU. Install ``mpi4py`` for the MPI implementation linked to LAMMPS.
+Use the regular ``aoti`` backend for multiple MPI ranks or other models.
+
+For the single-rank FP32 radial-tangent force program, select
+``--backend eqx-oam-l-throughput``. It compiles the radial distance derivative
+into the convolution and evaluates quadratic products in native layout.
+Deep interactions may reuse projected radial weights for the force calculation
+within one step. The combined cache budget is at most 16 GiB or one quarter of
+the export GPU's memory, whichever is smaller. Larger lists revert to streamed
+projections. Small inputs use CUDA Graph replay. This backend does not switch
+to receiver tiling. Use ``eqx-oam-l`` for the largest systems.
+
+For TACE-7M, TACE-L and TECE-RRA-1.0, the following backends select the
+single-rank FP32 implementation from the loaded architecture. Both OAM and
+OMat24 checkpoints are accepted, including local state-dict files.
+
+.. code-block:: bash
+
+   tace-export-lammps -m TACE-OMat24-7M --backend eqx-foundation-throughput -o 7m-speed.pt
+   tace-export-lammps -m TECE-OAM-RRA-1.0 --backend eqx-foundation -o rra-capacity.pt
+
+Use ``eqx-foundation-throughput`` for the compiled whole-graph force step.
+Use ``eqx-foundation`` for a loader with receiver tiling on larger systems.
+For TACE-7M, receiver tile widths depend on available device memory, the
+number of edges in each tile and the number of distinct source atoms it needs.
+For TECE-RRA, throughput mode uses indexed attention for short neighbor lists.
+For the released RRA layout, lists spanning at least four full edge tiles
+prefer the tiled force graph when it fits in available GPU memory.
+That graph reads projected angular blocks directly when computing rotary
+scores and their force derivatives. It retains scores for
+every edge, but caps the wider product-feature buffers and recomputes the
+uncached rows during force evaluation. Larger lists use streamed
+attention with recomputation, then receiver tiles if the streamed graph no
+longer fits. Only one force graph is loaded at a time.
+Memory-first mode uses streamed attention without the saved features and
+switches to receiver tiles earlier.
+Both fold the fixed expert and output matrices. Receiver tiles retain the
+complete attention neighborhood and cache coefficients for the elements present.
+Pass the resulting ``.pt`` loader (not its ``.pt2`` payload) to
+``pair_style mliap/kk unified``.
+
 
 LAMMPS input
 ------------
