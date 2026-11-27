@@ -70,3 +70,21 @@ Grid transforms
 
 .. autoclass:: equivariantx.o2.O2Grid
    :members: forward, to_grid, from_grid, activate, product
+
+Layouts
+-------
+
+.. autoclass:: equivariantx.o2.TransposeIrrepsLayout
+   :members: forward, inverse
+
+Convolutions
+------------
+
+.. autoclass:: equivariantx.o2.O2O3TensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.o2.UuO2TensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.o2.UvO2TensorProductConv
+   :members: forward

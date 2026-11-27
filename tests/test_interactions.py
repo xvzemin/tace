@@ -9,9 +9,9 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
-from tace.models.layout import LayoutTransform
+from equivariantx.o3 import TransposeIrrepsLayout
 from tace.models.spherical.base import NodeUpdate
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 from tace.models.spherical.fused import UuO2TensorProductConv
@@ -120,7 +120,7 @@ def test_cartesian_uv_reciprocal_weights(magnetic, double_precision):
         )
     )
     index = torch.tensor([[1, 0, 2, 1], [0, 1, 1, 2]])
-    pairs = eqx_conv.undirected_edge_pairs(index, num_nodes=3)
+    pairs = eqx.utils.undirected_edge_pairs(index, num_nodes=3)
     positions = torch.randn(3, 3)
     rotation, inverse = RotationMatrices()(positions[index[1]] - positions[index[0]])
     cutoff = torch.rand(4, 1)
@@ -342,7 +342,9 @@ def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
         types.SimpleNamespace(CueTensorProductConv=cue),
     )
     module = O3TensorProductConv("2x0e", "0e", "2x0e")
-    assert module.eqx_tp.backend == "cuda"
+    from equivariantx.ops.config import DEFAULT_BACKEND
+
+    assert module.eqx_tp.backend == DEFAULT_BACKEND
     assert module.use_eqx == (expected == "eqx")
     assert module.use_luna == (expected == "luna")
     assert module.use_oeq == (expected == "oeq")
@@ -445,8 +447,8 @@ def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
         3,
         False,
         True,
-        LayoutTransform(irreps),
-        LayoutTransform(irreps),
+        TransposeIrrepsLayout(irreps, source="mul_ir", target="ir_mul", flat_out=False),
+        TransposeIrrepsLayout(irreps, source="mul_ir", target="ir_mul", flat_out=False),
         torch.nn.SiLU(),
         torch.nn.Sigmoid(),
     ).cuda()
@@ -646,8 +648,12 @@ def test_tece_state_dict(device, mmax, ece, gate_m0, double_precision):
         num_radial_basis=5,
         gate_m0=gate_m0,
         use_asymmetric_contraction=ece,
-        reshape_in=LayoutTransform(irreps),
-        reshape_out=LayoutTransform(irreps),
+        reshape_in=TransposeIrrepsLayout(
+            irreps, source="mul_ir", target="ir_mul", flat_out=False
+        ),
+        reshape_out=TransposeIrrepsLayout(
+            irreps, source="mul_ir", target="ir_mul", flat_out=False
+        ),
         scalar_act=get_scaled_activation("silu"),
         tensor_act=get_scaled_activation("silu" if ece else "sigmoid"),
     )
@@ -786,8 +792,8 @@ def test_tece_streaming_derivatives(monkeypatch, device, edges, use_bias):
         3,
         False,
         True,
-        LayoutTransform(irreps),
-        LayoutTransform(irreps),
+        TransposeIrrepsLayout(irreps, source="mul_ir", target="ir_mul", flat_out=False),
+        TransposeIrrepsLayout(irreps, source="mul_ir", target="ir_mul", flat_out=False),
         torch.nn.SiLU(),
         torch.nn.Sigmoid(),
         use_bias=use_bias,
@@ -930,8 +936,8 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
         3,
         gate_m0,
         ece,
-        LayoutTransform(irreps),
-        LayoutTransform(irreps),
+        TransposeIrrepsLayout(irreps, source="mul_ir", target="ir_mul", flat_out=False),
+        TransposeIrrepsLayout(irreps, source="mul_ir", target="ir_mul", flat_out=False),
         get_scaled_activation("tanh"),
         get_scaled_activation("silu"),
     ).to(device="cuda", dtype=dtype)
@@ -1005,7 +1011,7 @@ def test_uu_o2_compile_and_empty_graph(double_precision):
     frame_in = o2.LocalFrame("3x0e+3x1e").cuda()
     frame_out = o2.LocalFrame("3x0o+3x1o").cuda()
     linear = o2.UuLinear(frame_in.irreps_out, frame_out.irreps_out, 3)
-    module = eqx_conv.UuO2TensorProductConv(frame_in, linear, frame_out).cuda()
+    module = eqx.o2.UuO2TensorProductConv(frame_in, linear, frame_out).cuda()
     frame = o2.WignerD(1, 1).cuda()
 
     def evaluate(x, vectors, radial, projection, cutoff, index):

@@ -226,7 +226,7 @@ def test_bilinear_live_second_order(
             else types
         )
         torch.testing.assert_close(routing, expected_types)
-        assert any(e.key == "eqx::bilinear_ace" for e in prof.key_averages())
+        assert any(e.key == "tace::bilinear_ace" for e in prof.key_averages())
         for expected, actual in zip((a, da, *ga), (b, db, *gb), strict=True):
             torch.testing.assert_close(expected, actual, atol=5e-11, rtol=5e-10)
         history.append(b)
@@ -325,8 +325,8 @@ def test_plan_identifies_host_mace_provider(
 ):
     from unittest.mock import patch
 
-    from equivariantx.ops.cuda.mbe.ace import symmetric_contraction as cuda_kernel
-    from equivariantx.ops.torch.mbe.ace import symmetric_contraction as torch_kernel
+    from equivariantx.ops.cuda.o3 import symmetric_contraction as cuda_kernel
+    from equivariantx.ops.torch.o3 import symmetric_contraction as torch_kernel
     from equivariantx_foundation.models.tace.planner import plan
     from equivariantx_foundation.tests.test_tace_plan import make_model
     from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
@@ -371,8 +371,8 @@ def test_plan_identifies_host_mace_provider(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_mace_plan_retarget_efs_and_live_sgd(monkeypatch, double_precision):
-    from equivariantx.ops.cuda.mbe.ace import symmetric_contraction as cuda_kernel
-    from equivariantx.ops.torch.mbe.ace import symmetric_contraction as torch_kernel
+    from equivariantx.ops.cuda.o3 import symmetric_contraction as cuda_kernel
+    from equivariantx.ops.torch.o3 import symmetric_contraction as torch_kernel
     from equivariantx_foundation import optimize
     from equivariantx_foundation.tests.test_tace_plan import (
         EFS,
@@ -440,13 +440,14 @@ def test_mace_plan_retarget_efs_and_live_sgd(monkeypatch, double_precision):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Graph training")
 @pytest.mark.parametrize("kind", ["mace", "nonlinear_cgtp", "bilinear"])
 def test_spherical_product_training_bucket(kind, monkeypatch):
-    from equivariantx.ops.cuda.mbe.ace import bilinear, symmetric_contraction
+    from equivariantx.ops.cuda.o3 import symmetric_contraction
     from equivariantx_foundation import optimize
     from equivariantx_foundation.models.tace import products, training
     from equivariantx_foundation.models.tace.replay_loss import _validate_model
     from equivariantx_foundation.tests.test_regional_aoti import _cases
     from equivariantx_foundation.tests.test_tace_plan import EFS, make_model
     from tace.models.spherical.tace import SphericalTACE
+    from tace.ops import cuda_bilinear as bilinear
     from tace.utils.env import ACCELERATION_ENV
 
     for flag in ACCELERATION_ENV.values():

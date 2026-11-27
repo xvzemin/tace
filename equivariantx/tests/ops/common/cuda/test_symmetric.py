@@ -13,7 +13,7 @@ from torch.fx.experimental.dynamic_spec import (
 )
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.mbe.ace import UuuSymmetricContraction
+from equivariantx.o3 import UuuSymmetricContraction
 from equivariantx.ops import config
 from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import check_forward_ad, package_script

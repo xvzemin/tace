@@ -80,6 +80,9 @@ paths do not in general retain unit variance.
 Both algorithms require STF inputs. Their derivatives agree along the STF
 subspace, not necessarily along perturbations that violate the input constraint.
 
+``co3.w3j`` is :func:`equivariantx.o3.w3j`. Pass a path matrix on each input
+or output index that uses Cartesian coordinates.
+
 Storage and composition
 -----------------------
 
@@ -88,8 +91,35 @@ without copying.
 
 ``co3.ictd.TensorProduct(project=False)`` defers projection until after graph
 reduction and channel mixing. Both tensor products can be passed to
-:class:`equivariantx.conv.CartesianTensorProductConv`; the CUDA backend projects
+:class:`equivariantx.co3.CartesianTensorProductConv`; the CUDA backend projects
 after aggregation.
 
 In recursive products, an intermediate consumed by another tensor product must
 be STF. Deferring the final projection is valid only across linear operations.
+
+Layouts
+-------
+
+.. autoclass:: equivariantx.co3.TransposeIrrepsLayout
+   :members: forward, inverse
+
+Convolutions
+------------
+
+.. autoclass:: equivariantx.co3.CartesianTensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.co3.conv.Linear
+   :members: forward
+
+Many-body contractions
+----------------------
+
+.. autoclass:: equivariantx.co3.SymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.co3.AsymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.co3.IctdUuuFullyConnectedSymmetricContraction
+   :members: forward

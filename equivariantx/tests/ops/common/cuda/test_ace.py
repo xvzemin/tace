@@ -19,7 +19,7 @@ def test_single_writer_covers_interleaved_outputs():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Native CUDA provider")
 def test_partial_channel_overlap():
-    from equivariantx.mbe.ace.symmetric_contraction import make_metadata
+    from equivariantx.o3.symmetric_contraction import make_metadata
     from equivariantx.ops.common.ace import ace_inputs, contract
 
     metadata = make_metadata(

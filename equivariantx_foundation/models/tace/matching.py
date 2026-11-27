@@ -32,7 +32,7 @@ def edge_rows(features):
 
 def mapped_radial_inputs(features, network, edge_index, prototype):
     """Bind explicit radial row maps for a directed edge program."""
-    from equivariantx.conv import indexed_radial
+    from equivariantx.nn import indexed_radial
 
     (edge, first_rows), *tables = features
     if (

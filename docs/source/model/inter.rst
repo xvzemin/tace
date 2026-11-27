@@ -304,7 +304,7 @@ CPU and unsupported activations use PyTorch. Both paths support force training
 and recursive higher derivatives.
 
 TACE uses one hidden layer. EQX accepts a sequence of Linear maps with a Gate
-between consecutive maps through :class:`equivariantx.conv.UvO2TensorProductConv`.
+between consecutive maps through :class:`equivariantx.o2.UvO2TensorProductConv`.
 
 .. autoclass:: tace.models.spherical.inter.UvO2Interaction
 
@@ -339,7 +339,7 @@ transformations, cutoff, and scatter retain their usual behavior.
 A 3BPA configuration is available as
 ``example/train/benchmark/3BPA/uu_o2.yaml``.
 
-Set ``TACE_USE_EQX=1`` to use ``equivariantx.conv.UuO2TensorProductConv``. It fuses
+Set ``TACE_USE_EQX=1`` to use ``equivariantx.o2.UuO2TensorProductConv``. It fuses
 gather, both frame rotations, UuLinear, cutoff and scatter. The last radial
 MLP projection uses reusable bounded workspaces instead of a full edge-weight
 tensor. The preceding MLP layers and node-level linear maps remain unchanged.

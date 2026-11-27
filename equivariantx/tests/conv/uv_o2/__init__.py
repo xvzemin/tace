@@ -1,1 +1,0 @@
-"""EQX numerical tests."""

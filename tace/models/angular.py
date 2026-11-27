@@ -4,89 +4,16 @@
 ################################################################################
 
 import math
-from itertools import combinations
 from typing import Any, Dict, List, Union
 
 import torch
 from e3nn.o3._irreps import Irreps
 from e3nn.o3._spherical_harmonics import _spherical_harmonics
 
-from .ictd import ICTD
+from equivariantx.co3 import path_matrix
+
 from .time_reversal import make_irrep
 from .utils import expand_dims_to
-
-
-def factorial(n: int) -> int:
-    result = 1
-    for i in range(2, n + 1):
-        result *= i
-    return result
-
-
-def double_factorial(n: int) -> int:
-    result = 1
-    for i in range(n, 0, -2):
-        result *= i
-    return result
-
-
-def _norm(n: int) -> float:
-    """(2n - 1)!! / n!"""
-    num = double_factorial(2 * n - 1)
-    den = factorial(n)
-    return num / den
-
-
-def delta_tensor(i: int, j: int, ndim: int, device=None, dtype=None) -> torch.Tensor:
-    delta = torch.eye(3, device=device, dtype=dtype)
-    for _ in range(ndim - 2):
-        delta = delta.unsqueeze(0)
-    perm = list(range(ndim))
-    perm[i], perm[-2] = perm[-2], perm[i]
-    perm[j], perm[-1] = perm[-1], perm[j]
-    delta = delta.permute(*perm)
-    return delta
-
-
-def symmetric_outer_product(v: torch.Tensor, n: int, norm: bool = True) -> torch.Tensor:
-    out = torch.ones_like(v[..., 0])
-    for _ in range(n):
-        out = out[..., None] * expand_dims_to(v, out.ndim + 1, dim=v.ndim - 1)
-    if norm:
-        out = out * _norm(n)
-    return out
-
-
-def subtract_traces(T: torch.Tensor, n: int) -> torch.Tensor:
-    result = T.clone()
-    base_combs = list(combinations(range(-n, 0), 2))
-    for k in range(1, n // 2 + 1):
-        denom = 1.0
-        for j in range(2, k + 2):
-            denom *= 3 + 2 * (n - j)
-        coeff = ((-1) ** k) / denom
-        corr = torch.zeros_like(T)
-        for pairs in combinations(base_combs, k):
-            idxs = [idx for pair in pairs for idx in pair]
-            if len(set(idxs)) < 2 * k:
-                continue
-            delta = torch.ones_like(T)
-            for i, j in pairs:
-                delta = delta * delta_tensor(
-                    i, j, n + 1, device=T.device, dtype=T.dtype
-                )
-            trace = torch.sum(T * delta, dim=tuple(idxs), keepdim=True)
-            corr += delta * trace
-        result = result + coeff * corr
-    return result
-
-
-# numerical
-def symmetric_traceless_outer_product(
-    v: torch.Tensor, n: int, norm: bool = True
-) -> torch.Tensor:
-    T = symmetric_outer_product(v, n, norm)
-    return subtract_traces(T, n)
 
 
 class CartesianHarmonics(torch.nn.Module):
@@ -108,17 +35,7 @@ class CartesianHarmonics(torch.nn.Module):
         self.return_dict = return_dict
         self.eps = eps
         for l in range(self.lmax + 1):
-            _, _, cart2sph, sph2cart = ICTD(l, l, decomposition=False)
-            self.register_buffer(
-                f"C{l}",
-                cart2sph[0],
-                persistent=False,
-            )
-            self.register_buffer(
-                f"CT{l}",
-                sph2cart[0],
-                persistent=False,
-            )
+            self.register_buffer(f"C{l}", path_matrix(l).clone(), persistent=False)
 
     def forward(self, v: torch.Tensor) -> Union[Dict[int, torch.Tensor], torch.Tensor]:
         if self.normalize:
@@ -133,7 +50,7 @@ class CartesianHarmonics(torch.nn.Module):
             T = T[..., None] * expand_dims_to(v, T.ndim + 1, dim=v.ndim - 1)
             field = T.reshape(batch, -1)
             if self.norm:
-                field = field * _norm(l)
+                field = field * (math.comb(2 * l, l) / 2**l)
             if self.traceless and batch != 0:
                 field = torch.matmul(torch.matmul(field, self.C(l)), self.CT(l))
             flat_attrs.append(field)
@@ -148,7 +65,7 @@ class CartesianHarmonics(torch.nn.Module):
         return getattr(self, f"C{l}")
 
     def CT(self, l: int) -> torch.Tensor:
-        return getattr(self, f"CT{l}")
+        return self.C(l).T
 
     def __repr__(self):
         return (

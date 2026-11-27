@@ -33,7 +33,7 @@ def direction_outputs(program, operands):
     return results
 
 
-def bilinear_outputs(metadata, program, node_type, operands):
+def indexed_plan_outputs(metadata, program, node_type, operands):
     terms = parse_metadata(program)
     outputs = [None] * (max(slot for _, _, _, slot in terms) + 1)
     for plan, mapping, role, slot in terms:

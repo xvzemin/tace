@@ -1,0 +1,462 @@
+"""Cartesian graph convolutions with edge-local ICTP or a deferred ICTD projection."""
+
+import math
+from collections import defaultdict
+
+import torch
+
+from equivariantx import co3
+
+from ...o3.cgtp.convolution import O3TensorProductConv
+from ...ops import resolve_backend
+from ...ops.common.torch.cartesian import coupling_coefficients
+from ...ops.precision import validate_module_precision
+from ...ops.torch.co3.conv import convolution as torch_kernel
+from ..basis import path_normalization
+from ..ictd.tensor_product import coupling_phase
+from .polynomials import (
+    ANGULAR_TILE_SIZE,
+    input_components,
+    output_components,
+    symmetric_components,
+    symmetric_indices,
+    symmetric_path_matrix,
+)
+
+
+class CartesianTensorProductConv(O3TensorProductConv):
+    """Gather, couple and sum Cartesian tensors.
+
+    Parameters
+    ----------
+    tensor_product : equivariantx.co3.ictd.TensorProduct or equivariantx.co3.ictp.TensorProduct
+        Defines the irreps, ``uvu`` paths and normalization. ICTD projects
+        the aggregated tensor. ICTP takes the analytic product on each edge.
+    backend : {None, "cuda", "torch"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        CUDA fuses delta/epsilon contractions and graph reduction. ``"torch"``
+        uses PyTorch Cartesian operations and automatic differentiation.
+    normalization : {"component", "integral", "norm"}, optional
+        Cartesian-harmonic normalization when vectors are supplied.
+    normalize : bool, optional
+        Normalize vector inputs before evaluating harmonics.
+    symmetric_inputs : bool, optional
+        Average input index permutations before coupling. Enables shared
+        symmetric storage across paths when vectors are supplied.
+    input_basis : {"cartesian", "spherical"}, optional
+        Convert spherical input coordinates before Cartesian coupling.
+        Requires ``symmetric_inputs=True`` for spherical inputs.
+    compact_output : bool, optional
+        Return partially symmetric raw tensors in ``ir_mul`` order. Requires
+        symmetric inputs and ``tensor_product.project=False``. The expansion
+        map is available as ``harmonic_output_index`` for node-level Linear.
+    radial_mode : {"last", "full"}, optional
+        Retain hidden MLP activations or recompute the complete radial network.
+        Defaults to ``"last"``; see :class:`O3TensorProductConv`.
+
+    Notes
+    -----
+    Cartesian inputs must be symmetric traceless and use flattened ``mul_ir``
+    storage. Every output path is retained. ``tensor_product.project`` selects
+    STF or raw outputs for ICTD. ICTP edge products are already STF. Both backends support
+    higher derivatives.
+
+    Examples
+    --------
+    >>> import torch
+    >>> import equivariantx as eqx
+    >>> tp = eqx.co3.TensorProduct(
+    ...     "2x0e", "1o", "2x1o", [(0, 0, 0, "uvu", True)],
+    ...     internal_weights=False, shared_weights=False,
+    ... )
+    >>> layer = eqx.co3.CartesianTensorProductConv(tp, backend="torch")
+    >>> features = tp.irreps_in1.randn(3, -1)
+    >>> edge_attrs = tp.irreps_in2.randn(4, -1)
+    >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
+    >>> radial = torch.randn(4, 8)
+    >>> projection = torch.randn(8, tp.weight_numel)
+    >>> layer(features, edge_attrs, radial, projection, edge_index).shape
+    torch.Size([3, 6])
+    """
+
+    def __init__(
+        self,
+        tensor_product,
+        *,
+        backend=None,
+        normalization="component",
+        normalize=True,
+        symmetric_inputs=False,
+        input_basis="cartesian",
+        compact_output=False,
+        radial_mode="last",
+    ):
+        backend = resolve_backend(backend)
+        torch.nn.Module.__init__(self)
+        if normalization not in ("component", "integral", "norm"):
+            raise ValueError("normalization must be integral, component or norm.")
+        if any(ins.connection_mode != "uvu" for ins in tensor_product.instructions):
+            raise NotImplementedError(
+                "CartesianTensorProductConv supports only 'uvu' instructions."
+            )
+        self.backend, self.normalization, self.normalize = (
+            backend,
+            normalization,
+            normalize,
+        )
+        if radial_mode not in ("last", "full"):
+            raise ValueError("radial_mode must be last or full.")
+        self.radial_mode = radial_mode
+        self.symmetric_inputs = symmetric_inputs
+        if input_basis not in ("cartesian", "spherical"):
+            raise ValueError("input_basis must be cartesian or spherical.")
+        if input_basis == "spherical" and not symmetric_inputs:
+            raise ValueError("Spherical input requires symmetric_inputs=True.")
+        if compact_output and (not symmetric_inputs or tensor_product.project):
+            raise ValueError(
+                "Compact output requires symmetric inputs and raw outputs."
+            )
+        self.input_basis = input_basis
+        self.angular_groups = ()
+        self.packed_angles = None
+        self.compact_output = compact_output
+        self.irreps_in1 = tensor_product.irreps_in1
+        self.irreps_in2 = tensor_product.irreps_in2
+        self.irreps_out = tensor_product.irreps_out
+        self.input_dim, self.edge_dim, self.output_dim = (
+            ir.dim for ir in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+        )
+        self.instructions = tuple(tensor_product.instructions)
+        self.weight_numel = tensor_product.weight_numel
+        self.tp = tensor_product
+        self.analytic = isinstance(tensor_product, co3.ictp.TensorProduct)
+        if input_basis == "spherical":
+            self.to_cartesian = co3.ChangeOfBasis(self.irreps_in1, backend=backend)
+        if input_basis == "spherical" and not self.analytic:
+            for _, ir in self.irreps_in1:
+                self.register_buffer(
+                    f"input_basis_{ir.l}",
+                    symmetric_path_matrix(ir.l).to(torch.get_default_dtype()).clone(),
+                    persistent=False,
+                )
+        self.projector = (
+            co3.Projector(
+                self.irreps_out,
+                instructions=tensor_product.projection_indices,
+                backend=backend,
+            )
+            if tensor_product.project and not self.analytic
+            else torch.nn.Identity()
+        )
+        from ..ictp.harmonics import Harmonics
+
+        self.harmonics = torch.nn.ModuleDict(
+            {
+                str(ir.l): Harmonics(ir.l, normalization, backend)
+                if self.analytic
+                else co3.CartesianHarmonics(
+                    ir.l, normalize=False, normalization=normalization, backend=backend
+                )
+                for _, ir in self.irreps_in2
+            }
+        )
+        slices = [
+            ir.slices() for ir in (self.irreps_in1, self.irreps_in2, self.irreps_out)
+        ]
+        for name, irreps in (
+            ("input", self.irreps_in1),
+            ("attrs", self.irreps_in2),
+            ("output", self.irreps_out),
+        ):
+            indices, offset = [], 0
+            for mul, ir in irreps:
+                indices.extend(
+                    (
+                        torch.arange(mul * ir.dim).reshape(mul, ir.dim).T.flatten()
+                        + offset
+                    ).tolist()
+                )
+                offset += mul * ir.dim
+            index = torch.tensor(indices, dtype=torch.long)
+            self.register_buffer(f"{name}_index", index, persistent=False)
+            self.register_buffer(f"{name}_inverse", index.argsort(), persistent=False)
+            setattr(self, f"{name}_identity", indices == list(range(offset)))
+        if symmetric_inputs:
+            indices, counts, offset = [], [], 0
+            for mul, ir in self.irreps_in1:
+                entries = symmetric_indices(ir.dim)
+                unique = {group: i for i, group in enumerate(dict.fromkeys(entries))}
+                indices.extend(
+                    offset + u * len(unique) + unique[group]
+                    for u in range(mul)
+                    for group in entries
+                )
+                counts.extend(len(group) for _ in range(mul) for group in unique)
+                offset += mul * len(unique)
+            self.symmetric_dim = offset
+            self.register_buffer(
+                "symmetric_index",
+                torch.tensor(indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "symmetric_count",
+                torch.tensor(counts, dtype=torch.long),
+                persistent=False,
+            )
+        if self.analytic:
+            from ..ictp.convolution import build
+
+            build(self)
+            return
+        paths, offset = [], 0
+        for ins in self.instructions:
+            mul1, ir1 = self.irreps_in1[ins.i_in1]
+            mul2, ir2 = self.irreps_in2[ins.i_in2]
+            _, ir_out = self.irreps_out[ins.i_out]
+            weight = offset if ins.has_weight else -1
+            if ins.has_weight:
+                offset += math.prod(ins.path_shape)
+            if not mul1 or not mul2 or not ins.path_weight:
+                continue
+            degrees = ir1.l, ir2.l, ir_out.l
+            k, odd = divmod(ir1.l + ir2.l - ir_out.l, 2)
+            factor = (
+                ins.path_weight
+                * coupling_phase(*degrees)
+                / path_normalization(*degrees)
+                / math.sqrt(3**k * (2 if odd else 1))
+            )
+            paths.append(
+                (
+                    slices[0][ins.i_in1].start,
+                    slices[1][ins.i_in2].start,
+                    slices[2][ins.i_out].start,
+                    mul1,
+                    mul2,
+                    ir1.dim,
+                    ir2.dim,
+                    ir_out.dim,
+                    weight,
+                    factor,
+                    coupling_coefficients(*degrees),
+                )
+            )
+        self.paths = tuple(paths)
+        unweighted = any(p[8] < 0 for p in paths)
+        self.kernel_metadata = repr((self.paths, self.weight_numel, unweighted))
+        offsets, offset = {}, 0
+        for (mul, _), section in zip(self.irreps_in2, slices[1]):
+            offsets[section.start] = offset
+            offset += mul
+        self.amplitude_dim = offset
+        if symmetric_inputs:
+            (
+                harmonic_paths,
+                sources,
+                targets,
+                self.harmonic_input_dim,
+                expansion,
+                self.harmonic_output_dim,
+            ) = symmetric_components(paths, self.irreps_in1, self.irreps_out)
+        else:
+            harmonic_paths, expansion, self.harmonic_output_dim = output_components(
+                paths, self.irreps_out, normalization
+            )
+            harmonic_paths, sources, targets, self.harmonic_input_dim = (
+                input_components(harmonic_paths, self.input_dim)
+            )
+        self.pack_inputs = sources != tuple(range(self.input_dim)) or targets != sources
+        sources = self.input_index[torch.tensor(sources, dtype=torch.long)]
+        targets = torch.tensor(targets, dtype=torch.long)
+        for name, columns, rows, width in (
+            ("harmonic_input", sources, targets, self.harmonic_input_dim),
+            ("harmonic_input_transpose", targets, sources, self.input_dim),
+        ):
+            self.register_buffer(
+                f"{name}_index", columns[rows.argsort(stable=True)], persistent=False
+            )
+            ptr = torch.cat(
+                (rows.new_zeros(1), rows.bincount(minlength=width).cumsum(0))
+            )
+            self.register_buffer(f"{name}_ptr", ptr, persistent=False)
+        self.register_buffer(
+            "harmonic_input_count",
+            (
+                self.harmonic_input_ptr.diff()
+                if symmetric_inputs
+                else targets.new_empty(0)
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "harmonic_output_index",
+            torch.tensor(expansion, dtype=torch.long)[self.output_inverse],
+            persistent=False,
+        )
+        representatives = [0] * self.harmonic_output_dim
+        for i, j in reversed(list(enumerate(self.harmonic_output_index.tolist()))):
+            representatives[j] = i
+        self.register_buffer(
+            "output_pack_index",
+            torch.tensor(representatives, dtype=torch.long),
+            persistent=False,
+        )
+        tiles = []
+        for path in harmonic_paths:
+            coefficients = defaultdict(list)
+            for a, b, c, value in path[-1]:
+                tile = tuple(index // ANGULAR_TILE_SIZE for index in (a, b, c))
+                coefficients[tile].append((a, b, c, value))
+            tiles.extend(
+                (path[0], offsets[path[1]], *path[2:-1], tuple(entries))
+                for entries in coefficients.values()
+            )
+        self.harmonic_metadata = repr(
+            (
+                tuple(tiles),
+                self.weight_numel,
+                unweighted,
+                (
+                    "cartesian_symmetric" if symmetric_inputs else "cartesian",
+                    normalization,
+                ),
+            )
+        )
+
+    def forward(
+        self,
+        features,
+        edge_attrs,
+        radial,
+        projection,
+        edge_index,
+        num_nodes=None,
+        *,
+        vectors=None,
+        amplitudes=None,
+        radial_network=None,
+        edge_pairs=None,
+    ):
+        """Convolve node tensors with edge attributes or Cartesian harmonics.
+
+        Parameters follow :meth:`equivariantx.o3.O3TensorProductConv.forward`, with all tensor
+        features in flattened ``mul_ir`` layout and Cartesian dimensions.
+        """
+        native_pairs = self.backend == "cuda" and features.is_cuda and not self.analytic
+        if edge_pairs is not None and not native_pairs:
+            from ...ops.common.edge_pairs import reciprocal_weights
+
+            radial, projection, radial_network = reciprocal_weights(
+                self,
+                edge_pairs,
+                radial,
+                projection,
+                radial_network,
+                edge_index,
+                dtype=features.dtype,
+            )
+        validate_module_precision(
+            self,
+            (
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
+            ),
+        )
+        if self.analytic:
+            from ..ictp.convolution import evaluate
+
+            if self.input_basis == "spherical":
+                features = self.to_cartesian(features)
+            return evaluate(
+                self,
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
+            )
+        if self.backend == "cuda" and features.is_cuda:
+            from ...ops.cuda.co3.conv import convolution as cuda_kernel
+
+            return cuda_kernel.evaluate(
+                self,
+                features,
+                edge_attrs,
+                radial,
+                projection,
+                edge_index,
+                num_nodes,
+                vectors,
+                amplitudes,
+                radial_network,
+                edge_pairs=edge_pairs,
+            )
+        return torch_kernel.evaluate(
+            self,
+            features,
+            edge_attrs,
+            radial,
+            projection,
+            edge_index,
+            num_nodes,
+            vectors,
+            amplitudes,
+            radial_network,
+        )
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        if self.input_basis == "spherical" and not self.analytic:
+            for _, ir in self.irreps_in1:
+                name = f"input_basis_{ir.l}"
+                self._buffers[name] = (
+                    symmetric_path_matrix(ir.l).to(self._buffers[name]).clone()
+                )
+        return self
+
+    def reference(
+        self, features, edge_attrs, radial, projection, edge_index, num_nodes
+    ):
+        """Evaluate the same instructions using PyTorch Cartesian operations."""
+        if self.analytic:
+            from ..ictp.convolution import edge_messages
+
+            x = (
+                features.index_select(-1, self.input_inverse)
+                if not self.input_identity
+                else features
+            )
+            y = (
+                edge_attrs.index_select(-1, self.attrs_inverse)
+                if not self.attrs_identity
+                else edge_attrs
+            )
+            if edge_index is not None:
+                x = x.index_select(0, edge_index[0])
+            w = radial @ projection if projection.numel() else radial
+            msg = edge_messages(self, x, y, w, ordinary=True)
+            out = (
+                msg
+                if edge_index is None
+                else msg.new_zeros(num_nodes, self.output_dim).index_add(
+                    0, edge_index[1], msg
+                )
+            )
+            return (
+                out if self.output_identity else out.index_select(-1, self.output_index)
+            )
+        return torch_kernel.reference(
+            self, features, edge_attrs, radial, projection, edge_index, num_nodes
+        )

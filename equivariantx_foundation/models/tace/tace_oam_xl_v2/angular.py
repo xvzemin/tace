@@ -2,8 +2,8 @@
 
 import torch
 
-from equivariantx.conv.o2_o3 import O2O3TensorProductConv
 from equivariantx.o2 import O3TensorProduct
+from equivariantx.o2.aligned import O2O3TensorProductConv
 
 
 def aligned_convolution(tensor_product):
@@ -17,7 +17,7 @@ def aligned_convolution(tensor_product):
 
     Returns
     -------
-    equivariantx.conv.O2O3TensorProductConv
+    equivariantx.o2.O2O3TensorProductConv
         Exact O(2) restriction. Call with a shared packed Wigner tensor so its
         geometry and derivatives can be reused across the entire node stack.
     """

@@ -4,7 +4,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import UuuFullyConnectedSymmetricContraction
+from equivariantx.o3 import UuuFullyConnectedSymmetricContraction
 from equivariantx.tests.ops.testing import assert_functional_derivatives
 
 
@@ -25,7 +25,9 @@ def test_functional_derivatives(compiler, double_precision):
         for _ in range(3)
     ]
     module, reference = [
-        UuuFullyConnectedSymmetricContraction([product, product], linears, backend).cuda()
+        UuuFullyConnectedSymmetricContraction(
+            [product, product], linears, backend
+        ).cuda()
         for backend in ("cuda", "torch")
     ]
     values = (

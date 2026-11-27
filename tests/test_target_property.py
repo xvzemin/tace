@@ -25,6 +25,7 @@ from tace.dataset.quantity import (
 )
 from tace.dataset.read import ASEDatabaseSource, ASEFileSource
 from tace.lightning import create_model, export_tace, load_tace
+from tace.models.spherical.basis_change import DirectVirials
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 from tace.models.spherical.les import TACELES, required_les_irreps
 from tace.models.spherical.readout import DirectHessianReadout, _sparse_symmetric_blocks
@@ -849,6 +850,24 @@ def direct_hessian_output(
         data["direct_hessian_pair_index"],
         data["direct_hessian_edge_pairs"],
     )
+
+
+def test_rank_two_cartesian_readouts(device):
+    basis = torch.cat(
+        [
+            o3.wigner_3j(1, 1, l, dtype=torch.float64, device=device)
+            * (2 * l + 1) ** 0.5
+            for l in range(3)
+        ],
+        dim=-1,
+    )
+    head = DirectHessianReadout("0e + 1e + 2e", "0e + 1e + 2e", 1, 1).to(device)
+    torch.testing.assert_close(head.basis, basis, rtol=1e-15, atol=1e-15)
+    features = torch.randn(4, 9, dtype=basis.dtype, device=device)
+    expected = torch.einsum("bk,ijk->bij", features, basis)
+    torch.testing.assert_close(head.to_cartesian(features, None), expected)
+    symmetric = DirectVirials().to(device)(features[:, 0], features[:, 4:])
+    torch.testing.assert_close(symmetric, (expected + expected.mT) / 2)
 
 
 def check_direct_hessian_readout_symmetries(device, interaction_type):

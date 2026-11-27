@@ -9,12 +9,12 @@ from typing import Optional
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
+from equivariantx.o3 import TransposeIrrepsLayout
 from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
-from ..layout import LayoutTransform
 from ..utils import repr_without
 
 
@@ -55,7 +55,7 @@ def uv_convolution(
 def uv_kernel(module):
     """Describe the native paths; unsupported activations keep their Torch path."""
     try:
-        return eqx_conv.UvO2TensorProductConv(
+        return eqx.o2.UvO2TensorProductConv(
             module.local_frame_in,
             [module.linear_up, module.linear_down],
             [module.nonlinearity],
@@ -119,15 +119,17 @@ class UvO2TensorProductConv(torch.nn.Module):
             mmax=self.mmax,
             reverse=True,
         )
-        self.reshape_in = LayoutTransform(
+        self.reshape_in = TransposeIrrepsLayout(
             self.irreps_in,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_out = LayoutTransform(
+        self.reshape_out = TransposeIrrepsLayout(
             self.irreps_out,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_irreps_in = 2 * self.node_irreps

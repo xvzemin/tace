@@ -105,7 +105,7 @@ def execution_plan(
         and geometry[0][0] in ("cartesian", "cartesian_symmetric")
     )
     if cartesian:
-        from equivariantx.conv.co3.polynomials import (
+        from equivariantx.co3.conv.polynomials import (
             ANGULAR_TILE_SIZE,
             FUSED_TILE_LIMIT,
         )

@@ -10,16 +10,16 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.nn import graph_softmax
 from equivariantx.o2.clebsch_gordan import clebsch_gordan_product
+from equivariantx.o3 import TransposeIrrepsLayout
 from equivariantx.ops import config as eqx_config
 from equivariantx.ops.common.channel_product import local_product
 from equivariantx.ops.common.rotation import rotate
+from tace.ops.bilinear import BilinearContraction
 from tace.utils.env import acceleration_enabled, eqx_backend
 
 from ..lammps import Graph
-from ..layout import LayoutTransform
 from ..linear import (
     IndexedFeatures,
     e3nnElementLinear,
@@ -685,9 +685,19 @@ class UvSO2Interaction(O3CgtpInteraction):
             gate_m0=False,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_bias=self.use_bias,
-            reshape_in=LayoutTransform(self.irreps_in),
-            reshape_out=LayoutTransform(
-                o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])
+            reshape_in=TransposeIrrepsLayout(
+                self.irreps_in,
+                source="mul_ir",
+                target="ir_mul",
+                flat_out=False,
+                backend=eqx_backend("conv"),
+            ),
+            reshape_out=TransposeIrrepsLayout(
+                o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out]),
+                source="mul_ir",
+                target="ir_mul",
+                flat_out=False,
+                backend=eqx_backend("conv"),
             ),
             scalar_act=get_scaled_activation(scalar_act),
             tensor_act=get_scaled_activation(tensor_act),

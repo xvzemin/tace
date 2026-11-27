@@ -5,8 +5,8 @@ from functools import partial
 import torch
 
 from equivariantx import co2, co3
-from equivariantx.conv.co3 import CartesianTensorProductConv
-from equivariantx.mbe.ace import IctdUuuFullyConnectedSymmetricContraction
+from equivariantx.co3 import IctdUuuFullyConnectedSymmetricContraction
+from equivariantx.co3.conv import CartesianTensorProductConv
 from equivariantx.ops.common.cuda.graph import CAPTURE_CONSTANTS
 from equivariantx.utils.autograd import forward_ad_active
 from tace.models.adapter import TensorModel

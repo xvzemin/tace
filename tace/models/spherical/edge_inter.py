@@ -10,9 +10,9 @@ from torch.fx.experimental.proxy_tensor import get_proxy_mode
 from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 import equivariantx as eqx
-from tace.utils.env import acceleration_enabled
+from equivariantx.o3 import TransposeIrrepsLayout
+from tace.utils.env import acceleration_enabled, eqx_backend
 
-from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import BATCH_MLP, MLP
 from ..time_reversal import contains_time_odd_irreps
@@ -104,12 +104,18 @@ class _RowwisePairProduct(UvuTensorProduct):
 
     def _setup_rowwise(self):
         """Install row-wise contractions on the existing weighted CG instructions."""
-        self.contraction = eqx.conv.O3TensorProductConv(self.tp, batch_paths=True)
-        self.to_channels_last = LayoutTransform(
-            self.irreps_in1, layout_out="flatten_ir_mul"
+        self.contraction = eqx.o3.O3TensorProductConv(self.tp, batch_paths=True)
+        self.to_channels_last = TransposeIrrepsLayout(
+            self.irreps_in1,
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.to_mul_ir = LayoutTransform(
-            self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+        self.to_mul_ir = TransposeIrrepsLayout(
+            self.irreps_out,
+            source="ir_mul",
+            target="mul_ir",
+            backend=eqx_backend("conv"),
         )
 
     def forward(self, x, y, weights):

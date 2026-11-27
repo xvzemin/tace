@@ -3,7 +3,7 @@
 import torch
 
 from ....utils.metadata import decode_plans, parse_metadata
-from ....utils.outputs import ace_outputs, bilinear_outputs
+from ....utils.outputs import ace_outputs, indexed_plan_outputs
 from ... import config
 from ..polynomial import program_terms
 from .grouped import element_grouping, element_path
@@ -15,9 +15,9 @@ def ace_contract(metadata, program, node_type, operands):
     return contract("ace", metadata, program, node_type, operands)
 
 
-def bilinear_contract(metadata, program, node_type, operands):
-    """Evaluate gated product plans with element and shared coefficients."""
-    return contract("bilinear", metadata, program, node_type, operands)
+def indexed_plan_contract(metadata, program, node_type, operands):
+    """Evaluate indexed product plans with external coefficients."""
+    return contract("indexed_plan", metadata, program, node_type, operands)
 
 
 def ace_reference(metadata, program, node_type, operands):
@@ -25,9 +25,11 @@ def ace_reference(metadata, program, node_type, operands):
     return contract("ace", metadata, program, node_type, operands, optimized=False)
 
 
-def bilinear_reference(metadata, program, node_type, operands):
-    """Evaluate independent gated entries with ordinary Torch operations."""
-    return contract("bilinear", metadata, program, node_type, operands, optimized=False)
+def indexed_plan_reference(metadata, program, node_type, operands):
+    """Evaluate indexed product plans with ordinary Torch operations."""
+    return contract(
+        "indexed_plan", metadata, program, node_type, operands, optimized=False
+    )
 
 
 def channel_slice(value, start, width, stride):
@@ -82,7 +84,7 @@ def indexed_outer(left, right, matrix, node_type, groupings):
     return outer.new_zeros((elements, ci, co)).index_add(0, owners, outer)
 
 
-def accumulated_product(kind, plans, terms, node_type, operands, outputs):
+def accumulated_product(plans, terms, node_type, operands, outputs):
     """Share indexed coefficient products across all transposed roles."""
     groupings, projected = {}, {}
     for plan, mapping, role, slot, _ in terms:
@@ -113,7 +115,7 @@ def accumulated_product(kind, plans, terms, node_type, operands, outputs):
                     result = projected[key]
                 else:
                     result = values[0].new_ones((node_type.shape[0], ci))
-                for factor in (0, 1, 4) if kind == "bilinear" else (0, 1):
+                for factor in (0, 1, 4) if len(mapping) == 5 else (0, 1):
                     if factor != role:
                         start = record[9] if factor == 4 else record[factor]
                         stride = 1 if factor == 4 else record[factor + 6]
@@ -155,9 +157,11 @@ def accumulated_product(kind, plans, terms, node_type, operands, outputs):
 def contract(kind, metadata, program, node_type, operands, *, optimized=None):
     """Evaluate any primal or transposed role using ordinary Torch operations."""
     plans = (
-        decode_plans(metadata) if kind == "bilinear" else (parse_metadata(metadata),)
+        decode_plans(metadata)
+        if kind == "indexed_plan"
+        else (parse_metadata(metadata),)
     )
-    allocate = bilinear_outputs if kind == "bilinear" else ace_outputs
+    allocate = indexed_plan_outputs if kind == "indexed_plan" else ace_outputs
     zero = sum(value[..., :0].sum() for value in operands)
     outputs = [
         torch.zeros_like(value) + zero
@@ -166,7 +170,7 @@ def contract(kind, metadata, program, node_type, operands, *, optimized=None):
     terms = program_terms(kind, program)
     optimized = not config.TORCH_REFERENCE if optimized is None else optimized
     if optimized and all(plans[plan][1] for plan, _, _, _, _ in terms):
-        return accumulated_product(kind, plans, terms, node_type, operands, outputs)
+        return accumulated_product(plans, terms, node_type, operands, outputs)
     for plan, mapping, role, slot, _ in terms:
         _, weighted, schedules = plans[plan]
         values = [operands[i] for i in mapping]
@@ -192,7 +196,7 @@ def contract(kind, metadata, program, node_type, operands, *, optimized=None):
                         )
                     else:
                         result = values[0].new_ones((node_type.shape[0], ci))
-                    for factor in (0, 1, 4) if kind == "bilinear" else (0, 1):
+                    for factor in (0, 1, 4) if len(mapping) == 5 else (0, 1):
                         if factor != role:
                             start = record[9] if factor == 4 else record[factor]
                             stride = 1 if factor == 4 else record[factor + 6]

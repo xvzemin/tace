@@ -2,10 +2,11 @@
 
 from .basis import ChangeOfBasis, Projector, path_matrix, projector_matrix
 from .cartesian_harmonics import CartesianHarmonics
-from .contraction import SymmetricContraction
+from .contraction import AsymmetricContraction, SymmetricContraction
 from .convolution import UuTensorProductConv, UvTensorProductConv
 from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
+from .layout import TransposeIrrepsLayout
 from .linear import ElementLinear, Linear, UuLinear
 from .local_frame import LocalFrame
 from .o3_tensor_product import O3TensorProduct
@@ -25,6 +26,7 @@ from .tensor_product import (
 )
 
 __all__ = [
+    "TransposeIrrepsLayout",
     "Irrep",
     "Irreps",
     "ChangeOfBasis",
@@ -33,6 +35,7 @@ __all__ = [
     "projector_matrix",
     "CartesianHarmonics",
     "SymmetricContraction",
+    "AsymmetricContraction",
     "Linear",
     "ElementLinear",
     "UuLinear",

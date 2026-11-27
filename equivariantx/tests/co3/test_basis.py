@@ -41,7 +41,7 @@ def test_projector_reference_bypasses_children(
 
     from equivariantx.ops import config
     from equivariantx.ops.torch.co3 import basis as kernel
-    from equivariantx.tests.conv.testing import assert_native_autograd
+    from equivariantx.tests.utils.convolution import assert_native_autograd
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")

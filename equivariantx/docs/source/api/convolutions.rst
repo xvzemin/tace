@@ -28,9 +28,9 @@ different output widths:
 
 .. code-block:: python
 
-   rows = eqx.conv.indexed_rows(types[edge_index], table.size(0),
+   rows = eqx.nn.indexed_rows(types[edge_index], table.size(0),
                                 dtype=table.dtype, reduce="mean", backend=conv.backend)
-   radial, projection, network = eqx.conv.indexed_weights(
+   radial, projection, network = eqx.nn.indexed_weights(
        edge_features, weight, [(table, rows)], radial_network=hidden)
    output = conv(nodes, harmonics, radial, projection, edge_index,
                  radial_network=network)
@@ -43,16 +43,16 @@ Small maps can enter the final projection as additional columns. Larger
 maps use integer lookups. For wide projections in training, a bounded row
 map can also reduce repeated table gradients by matrix multiplication.
 
-.. autofunction:: equivariantx.conv.indexed_weights
+.. autofunction:: equivariantx.nn.indexed_weights
 
-.. autofunction:: equivariantx.conv.indexed_rows
+.. autofunction:: equivariantx.nn.indexed_rows
 
-.. autofunction:: equivariantx.conv.indexed_radial
+.. autofunction:: equivariantx.nn.indexed_radial
 
-.. autoclass:: equivariantx.conv.MultiCutoffRadial
+.. autoclass:: equivariantx.nn.MultiCutoffRadial
    :members: convolution_weights
 
-.. autofunction:: equivariantx.conv.undirected_edge_pairs
+.. autofunction:: equivariantx.utils.undirected_edge_pairs
 
 For reciprocal weights, pass pair-sized radial inputs and ``edge_pairs=pairs``
 to the convolution. If only the radial term is reciprocal, pass the map to
@@ -93,44 +93,5 @@ an expression index. For example:
        def to_edge_program(self, inputs, program, x):
            return program.binary("add", x, program.binary("mul", x, x))
 
-O(3) convolutions
------------------
-
-.. autoclass:: equivariantx.conv.O3TensorProductConv
-   :members: forward
-
-.. autoclass:: equivariantx.conv.GauntTensorProductConv
-   :members: forward
-
-.. autoclass:: equivariantx.conv.MatrixTensorProductConv
-   :members: forward
-
-.. autoclass:: equivariantx.conv.Wigner6jTensorProductConv
-   :members: forward, forward_reference
-
-.. autoclass:: equivariantx.conv.CartesianTensorProductConv
-   :members: forward
-
-O(2) convolutions
------------------
-
-.. autoclass:: equivariantx.conv.O2O3TensorProductConv
-   :members: forward
-
-.. autoclass:: equivariantx.conv.UuO2TensorProductConv
-   :members: forward
-
-.. autoclass:: equivariantx.conv.UvO2TensorProductConv
-   :members: forward
-
-Cartesian output maps
----------------------
-
-.. autoclass:: equivariantx.conv.co3.Linear
-   :members: forward
-
-Graph attention
----------------
-
-.. autoclass:: equivariantx.conv.StreamingGraphAttention
-   :members: forward
+See the convolution classes under :ref:`equivariantx-api-o3`,
+:ref:`equivariantx-api-co3`, :ref:`equivariantx-api-o2`, and :ref:`equivariantx-api-co2`.

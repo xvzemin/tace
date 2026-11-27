@@ -272,8 +272,8 @@ def test_aligned_cgtp_host_and_explicit_providers(
     from unittest.mock import patch
 
     from equivariantx.ops.cuda.co2 import spherical as cuda_coupling
-    from equivariantx.ops.cuda.conv.o2_o3 import convolution as cuda_kernel
-    from equivariantx.ops.torch.conv.o2_o3 import convolution as torch_kernel
+    from equivariantx.ops.cuda.o2.aligned import convolution as cuda_kernel
+    from equivariantx.ops.torch.o2.aligned import convolution as torch_kernel
     from equivariantx_foundation.models.tace.planner import optimize_model, plan
     from equivariantx_foundation.tests.test_tace_plan import (
         EFS,
@@ -655,7 +655,7 @@ def test_nosoc_scalar_spin_frames_and_independent_rotations(
 ):
     from unittest.mock import patch
 
-    from equivariantx.ops.cuda.conv.uv_o2 import convolution as uv_cuda
+    from equivariantx.ops.cuda.o2.uv import convolution as uv_cuda
     from equivariantx_foundation.models.tace.magnetic import (
         _MagneticUvFrames,
         _scalar_spin_contract,

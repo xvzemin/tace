@@ -7,7 +7,7 @@ import abc
 
 import torch
 
-from equivariantx.conv import EdgePairs
+from equivariantx.utils import EdgePairs
 from tace.utils.torch_scatter import scatter_sum
 
 from ..linear import IndexedFeatures

@@ -1,10 +1,113 @@
 """Tests for the corresponding EQX source module."""
 
+import math
+
 import pytest
 import torch
 from e3nn import o3
 
-from equivariantx.o3.s2grid import S2Grid
+from equivariantx.o3 import S2Grid, s2_points
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_s2_points(device, dtype):
+    for method, count in (
+        ("fibonacci", 257),
+        ("healpix", 108),
+        ("icosphere", 162),
+        ("random", 257),
+    ):
+        p = s2_points(count, method, device=device, dtype=dtype)
+        assert p.shape == (count, 3) and p.dtype == dtype and p.device.type == device
+        assert p.unique(dim=0).shape == p.shape
+        torch.testing.assert_close(p.norm(dim=1), p.new_ones(count))
+    p = s2_points(3, device=device, dtype=dtype)
+    phi = math.pi * (3 - math.sqrt(5))
+    reference = p.new_tensor([(0, 0, 1), (math.cos(phi), math.sin(phi), 0), (0, 0, -1)])
+    torch.testing.assert_close(p, reference)
+    torch.testing.assert_close(
+        s2_points(1, dtype=dtype, device=device), p.new_tensor([[1, 0, 0]])
+    )
+
+
+def test_healpix_ring_order(device):
+    rings = [
+        (4, 11 / 12, 0.5),
+        (8, 2 / 3, 0.5),
+        (8, 1 / 3, 0),
+        (8, 0, 0.5),
+        (8, -1 / 3, 0),
+        (8, -2 / 3, 0.5),
+        (4, -11 / 12, 0.5),
+    ]
+    expected = []
+    for width, z, shift in rings:
+        r = math.sqrt(1 - z * z)
+        for i in range(width):
+            phi = math.tau * (i + shift) / width
+            expected.append((r * math.cos(phi), r * math.sin(phi), z))
+    directions = s2_points(48, "healpix", dtype=torch.float64, device=device)
+    torch.testing.assert_close(
+        directions, directions.new_tensor(expected), atol=2e-15, rtol=0
+    )
+
+
+def test_icosphere_subdivision(device):
+    def vertices(n):
+        return s2_points(n, "icosphere", dtype=torch.float64, device=device)
+
+    base = vertices(12)
+    edges = torch.triu(
+        torch.isclose(base @ base.T, base.new_tensor(1 / math.sqrt(5))), diagonal=1
+    ).nonzero()
+    assert edges.shape == (30, 2)
+    expected = torch.nn.functional.normalize(
+        base[edges[:, 0]] + base[edges[:, 1]], dim=1
+    )
+    refined = vertices(42)
+    torch.testing.assert_close(refined[:12], base, atol=0, rtol=0)
+    distance = (refined[12:, None] - expected).norm(dim=-1)
+    assert (distance < 1e-14).sum(0).eq(1).all()
+    finer = vertices(642)
+    torch.testing.assert_close(finer[:42], refined, atol=0, rtol=0)
+    assert finer.unique(dim=0).shape == (642, 3)
+
+
+def test_s2_random_generator(device):
+    rng = torch.Generator(device=device).manual_seed(42)
+
+    def sample():
+        return s2_points(
+            8192, "random", dtype=torch.float64, device=device, generator=rng
+        )
+
+    points = sample()
+    assert not torch.equal(points, sample())
+    rng.manual_seed(42)
+    torch.testing.assert_close(points, sample(), atol=0, rtol=0)
+    torch.testing.assert_close(points.mean(0), points.new_zeros(3), atol=0.03, rtol=0)
+    torch.testing.assert_close(
+        points.T @ points / len(points),
+        torch.eye(3, dtype=points.dtype, device=device) / 3,
+        atol=0.025,
+        rtol=0,
+    )
+
+
+def test_invalid_s2_points():
+    for n, method in [
+        (0, "random"),
+        (True, "fibonacci"),
+        (13, "healpix"),
+        (41, "icosphere"),
+        (12, "lebedev"),
+    ]:
+        with pytest.raises(ValueError):
+            s2_points(n, method)
+    with pytest.raises(ValueError, match="generator"):
+        s2_points(12, generator=torch.Generator())
+    with pytest.raises(TypeError, match="float32 or float64"):
+        s2_points(12, dtype=torch.int64)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

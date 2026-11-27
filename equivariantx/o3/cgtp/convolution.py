@@ -55,7 +55,7 @@ class O3TensorProductConv(torch.nn.Module):
     ...     "2x0e", "1x1o", "2x1o", [(0, 0, 0, "uvu", True)],
     ...     internal_weights=False, shared_weights=False,
     ... )
-    >>> conv = eqx.conv.O3TensorProductConv(tp, backend="torch")
+    >>> conv = eqx.o3.O3TensorProductConv(tp, backend="torch")
     >>> x = torch.randn(3, 2)
     >>> edge_attrs = torch.randn(4, 3)
     >>> edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])
@@ -276,7 +276,7 @@ class O3TensorProductConv(torch.nn.Module):
             and fuse only the final projection. ``radial_mode`` controls hidden
             layer evaluation on either backend. Append an affine bias as the last projection row
             and a constant input channel when no network is supplied.
-        edge_pairs : equivariantx.conv.EdgePairs, optional
+        edge_pairs : equivariantx.utils.EdgePairs, optional
             Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
         projection_workspace_bytes : int, optional
             Override the instance's final-projection tile budget for this call.

@@ -55,9 +55,9 @@ CG table. `o2` and `co2` support time-reversal labels directly. Time-odd
 | `equivariantx.o2` | [Spherical O(2)](https://tace.readthedocs.io/en/latest/equivariantx/api/o2.html) |
 | Rotations, basis conversions, decomposition and module utilities | [Tools](https://tace.readthedocs.io/en/latest/equivariantx/api/tools.html) |
 
-Built-in modules: [neural network modules](https://tace.readthedocs.io/en/latest/equivariantx/api/nn.html),
-[convolutions](https://tace.readthedocs.io/en/latest/equivariantx/api/convolutions.html),
-and [many-body expansions](https://tace.readthedocs.io/en/latest/equivariantx/api/mbe.html).
+Each space provides convolutions, symmetric and asymmetric contractions, and
+`TransposeIrrepsLayout`. See [convolution weights](https://tace.readthedocs.io/en/latest/equivariantx/api/convolutions.html)
+and [shared neural network modules](https://tace.readthedocs.io/en/latest/equivariantx/api/nn.html).
 Model adapters and specialized execution are in the bundled
 [EquivariantX Foundation](../equivariantx_foundation/README.md) package.
 

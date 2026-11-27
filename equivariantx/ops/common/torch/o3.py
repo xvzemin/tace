@@ -16,8 +16,8 @@ from .einsum import einsum
 def harmonic_coefficients(dimension, normalization):
     """Return the exact polynomial used by the native geometric contraction."""
     if isinstance(normalization, tuple):
+        from ....co3.conv.polynomials import component_powers, harmonic_polynomial
         from ....co3.symmetric import symmetric_powers
-        from ....conv.co3.polynomials import component_powers, harmonic_polynomial
 
         kind, normalization = normalization
         if kind == "cartesian_symmetric":

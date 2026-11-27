@@ -44,7 +44,7 @@ def edge_coefficients(product, budget):
 
 
 def build(module):
-    from ...conv.co3.polynomials import ANGULAR_TILE_SIZE, output_components
+    from ..conv.polynomials import ANGULAR_TILE_SIZE, output_components
 
     tp = module.tp
     if tp.backend != module.backend:

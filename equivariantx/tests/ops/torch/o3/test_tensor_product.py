@@ -4,9 +4,10 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx import conv, o3
+import equivariantx as eqx
+from equivariantx import o3
 from equivariantx.ops import config
-from equivariantx.tests.conv.testing import assert_native_autograd
+from equivariantx.tests.utils.convolution import assert_native_autograd
 
 
 def tensor_product(kind, backend="torch", device="cpu", degree=2):
@@ -33,7 +34,7 @@ def test_edge_matrix_convolution(cls, edges_count, shared, device, double_precis
     irreps = "8x1o+16x2e+16x0e+8x1o"
     tp = cls(irreps, "0e+1o", irreps, shared_weights=shared, backend="torch").to(device)
     assert len(tp.edge_matrices) == len(tp.routes)
-    layer = getattr(conv, cls.__name__ + "Conv")(tp, backend="torch")
+    layer = getattr(o3, cls.__name__ + "Conv")(tp, backend="torch")
     edges = torch.randint(3, (2, edges_count), device=device)
     x = torch.randn(3, tp.input_dim1, device=device, requires_grad=True)
     y = torch.randn(edges_count, tp.input_dim2, device=device, requires_grad=True)
@@ -102,7 +103,9 @@ def test_independent_reference_and_high_orders(kind, monkeypatch):
 def test_radial_modes_and_mixed_gradients(kind, mode, width, monkeypatch):
     module = tensor_product(kind)
     cls = (
-        conv.GauntTensorProductConv if kind == "gaunt" else conv.MatrixTensorProductConv
+        eqx.o3.GauntTensorProductConv
+        if kind == "gaunt"
+        else eqx.o3.MatrixTensorProductConv
     )
     layer = cls(module, radial_mode=mode)
     network = torch.nn.Sequential(
@@ -133,7 +136,7 @@ def test_convolution_broadcast_factors_and_partitioned_radial(
     mode, edges_count, monkeypatch
 ):
     module = tensor_product("gaunt")
-    layer = conv.GauntTensorProductConv(module, radial_mode=mode)
+    layer = eqx.o3.GauntTensorProductConv(module, radial_mode=mode)
     x = torch.randn(4, module.input_dim1, dtype=torch.float64, requires_grad=True)
     y = torch.randn(
         edges_count, module.input_dim2, dtype=torch.float64, requires_grad=True
@@ -197,7 +200,7 @@ def convolution_training_problem(
                 shared_weights=False,
                 backend=backend,
             )
-            self.layer = conv.GauntTensorProductConv(product, radial_mode=mode)
+            self.layer = eqx.o3.GauntTensorProductConv(product, radial_mode=mode)
             self.radial = torch.nn.Sequential(
                 torch.nn.Linear(3, width),
                 torch.nn.SiLU(),

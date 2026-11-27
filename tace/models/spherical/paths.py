@@ -5,7 +5,7 @@
 
 from e3nn import o3
 
-from equivariantx.mbe.ace.paths import (
+from equivariantx.o3.paths import (
     SymmetricProductPaths,
     asymmetric_contraction_paths,
     generate_paths,

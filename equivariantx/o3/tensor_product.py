@@ -384,7 +384,7 @@ class TensorProductConv(torch.nn.Module):
             Network producing edge factors from radial inputs. Requires an
             externally weighted tensor product with shared_weights=False.
             Cannot be combined with weight.
-        edge_pairs : equivariantx.conv.EdgePairs, optional
+        edge_pairs : equivariantx.utils.EdgePairs, optional
             Supply external weights or radial inputs per undirected pair.
 
         Returns

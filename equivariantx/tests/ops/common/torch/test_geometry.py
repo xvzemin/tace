@@ -3,7 +3,8 @@
 import pytest
 import torch
 
-from equivariantx import conv, o2
+import equivariantx as eqx
+from equivariantx import o2
 from equivariantx.ops import get_kernel
 from equivariantx.ops.common.geometry import direction_contraction
 
@@ -23,7 +24,7 @@ def direction_case(rank, mode, projected, shared, *, edges=4, device="cpu"):
         internal_weights=False,
         shared_weights=False,
     ).to(device)
-    layer = conv.O2O3TensorProductConv(tensor_product).to(device)
+    layer = eqx.o2.O2O3TensorProductConv(tensor_product).to(device)
     rows = 1 if shared else edges
     vectors = torch.randn(rows, 3, device=device) + 0.5
     frame = o2.WignerD(2, 2, method="recursive").to(device)

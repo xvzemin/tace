@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 
 
 @pytest.mark.parametrize("edges", [0, 7])
@@ -13,7 +13,7 @@ def test_wigner6j_convolution(edges, backend, shared, double_precision):
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    module = eqx_conv.Wigner6jTensorProductConv(
+    module = eqx.o3.Wigner6jTensorProductConv(
         "2x1o",
         "1o",
         "1e",
@@ -57,7 +57,7 @@ def test_wigner6j_convolution(edges, backend, shared, double_precision):
 
 @pytest.mark.parametrize("second", ["pair", "directed", "shared"])
 def test_pair_weights(second, device, double_precision):
-    layer = eqx_conv.Wigner6jTensorProductConv(
+    layer = eqx.o3.Wigner6jTensorProductConv(
         "2x1o",
         "1o",
         "1e",
@@ -71,7 +71,7 @@ def test_pair_weights(second, device, double_precision):
         backend="cuda" if device == "cuda" else "torch",
     ).to(device)
     edge_index = torch.tensor([[0, 1, 0, 2], [1, 0, 2, 0]], device=device)
-    pairs = eqx_conv.undirected_edge_pairs(edge_index, num_nodes=3)
+    pairs = eqx.utils.undirected_edge_pairs(edge_index, num_nodes=3)
     second_rows = {"pair": 2, "directed": 4, "shared": 1}[second]
     inputs = tuple(
         torch.randn(*shape, device=device, requires_grad=True)

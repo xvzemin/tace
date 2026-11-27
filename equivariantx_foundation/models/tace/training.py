@@ -186,7 +186,7 @@ def _regional_bucket_stages(host, rep):
         return messages and all(spherical_bucket_product(m) for m in rep.products)
     elif type(host) is CartesianTACE:
         from equivariantx import co3
-        from equivariantx.conv.co3 import CartesianTensorProductConv
+        from equivariantx.co3.conv import CartesianTensorProductConv
         from tace.models.spherical.inter import O3CgtpInteraction
 
         from .cartesian import (

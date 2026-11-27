@@ -134,3 +134,18 @@ Harmonic O(3) coupling
 
 .. autoclass:: equivariantx.co2.SphericalCoupling
    :members: forward
+
+Layouts
+-------
+
+.. autoclass:: equivariantx.co2.TransposeIrrepsLayout
+   :members: forward, inverse
+
+Many-body contractions
+----------------------
+
+.. autoclass:: equivariantx.co2.SymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.co2.AsymmetricContraction
+   :members: forward

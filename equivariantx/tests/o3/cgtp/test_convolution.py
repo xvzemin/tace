@@ -4,13 +4,13 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
 from equivariantx.ops import config
-from equivariantx.tests.conv.o2_o3.test_convolution import (
+from equivariantx.tests.o2.aligned.test_convolution import (
     test_streaming_projected_tiles as check_streaming_projected_tiles,
 )
-from equivariantx.tests.conv.testing import (
+from equivariantx.tests.utils.convolution import (
     assert_native_autograd,
     layout,
     reference,
@@ -25,7 +25,7 @@ def test_bipartite_direct_weights_and_attributes(backend, num_nodes, double_prec
         pytest.skip("CUDA unavailable")
     device = "cuda" if backend == "cuda" else "cpu"
     tp = tensor_product().to(device)
-    conv = eqx_conv.O3TensorProductConv(tp, backend=backend).to(device)
+    conv = eqx.o3.O3TensorProductConv(tp, backend=backend).to(device)
     # Two different periodic images share a halo source and receiver; owner 3
     # has no neighbors. Halo source 6 must still receive both adjoints.
     edges = torch.tensor([[6, 4, 6, 1, 6, 0], [2, 0, 2, 0, 1, 2]], device=device)
@@ -56,8 +56,8 @@ def test_bipartite_direct_weights_and_attributes(backend, num_nodes, double_prec
 def test_projection_workspace_validation(invalid):
     tp = tensor_product()
     with pytest.raises(ValueError, match="projection_workspace_bytes"):
-        eqx_conv.O3TensorProductConv(tp, projection_workspace_bytes=invalid)
-    conv = eqx_conv.O3TensorProductConv(tp)
+        eqx.o3.O3TensorProductConv(tp, projection_workspace_bytes=invalid)
+    conv = eqx.o3.O3TensorProductConv(tp)
     with pytest.raises(ValueError, match="projection_workspace_bytes"):
         conv(None, None, None, None, None, projection_workspace_bytes=invalid)
 
@@ -70,10 +70,10 @@ def test_projection_workspace_per_call(monkeypatch, double_precision):
     # calls must instead tile both that projection and its mixed adjoints.
     monkeypatch.setattr(config, "RADIAL_PROJECT_MIN_WIDTH", 1)
     tp = tensor_product().cuda()
-    layer = eqx_conv.O3TensorProductConv(
+    layer = eqx.o3.O3TensorProductConv(
         tp, backend="cuda", projection_workspace_bytes=256
     ).cuda()
-    default = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    default = eqx.o3.O3TensorProductConv(tp, backend="cuda").cuda()
     index = torch.randint(5, (2, 27), device="cuda")
     values = tuple(
         torch.randn(shape, device="cuda", requires_grad=True)
@@ -134,7 +134,7 @@ def test_shared_angular_matrices_preserve_paths(mode, double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="torch", radial_mode=mode).cuda()
+    conv = eqx.o3.O3TensorProductConv(tp, backend="torch", radial_mode=mode).cuda()
     assert len(conv.angular_groups) == 4
     index = torch.tensor([[0, 2, 1, 0], [1, 1, 0, 2]], device="cuda")
     arguments = tuple(
@@ -175,7 +175,7 @@ def test_packed_path_weights(device, double_precision, monkeypatch):
         shared_weights=False,
         internal_weights=False,
     ).to(device)
-    op = eqx_conv.O3TensorProductConv(tp, backend="torch").to(device)
+    op = eqx.o3.O3TensorProductConv(tp, backend="torch").to(device)
     assert op.packed_angles is not None
     assert not any(name.startswith("packed_") for name in op.state_dict())
     idx = torch.tensor([[0, 1, 2, 1], [2, 2, 1, 0]], device=device)
@@ -222,7 +222,7 @@ def test_high_degree_angular_matrix(double_precision, monkeypatch):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    layer = eqx_conv.O3TensorProductConv(tp, backend="torch").cuda()
+    layer = eqx.o3.O3TensorProductConv(tp, backend="torch").cuda()
     assert len(layer.angular_groups) == 1
     edges = torch.tensor([[0, 2, 1], [1, 1, 0]], device="cuda")
     args = tuple(
@@ -265,7 +265,7 @@ def test_o3_rowwise_tensor_product(rows, shared, copies, device, double_precisio
         internal_weights=False,
         shared_weights=False,
     ).to(device)
-    conv = eqx_conv.O3TensorProductConv(tp, batch_paths=True, backend="cuda").to(device)
+    conv = eqx.o3.O3TensorProductConv(tp, batch_paths=True, backend="cuda").to(device)
     inputs = [
         torch.randn(*shape, device=device, requires_grad=True)
         for shape in (
@@ -347,17 +347,17 @@ def test_torch_scalar_direction_gradient(
     if algorithm.startswith("uu"):
         frame = o2.LocalFrame("2x0e")
         linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 2)
-        module = eqx_conv.UuO2TensorProductConv(frame, linear, frame, backend="torch")
+        module = eqx.o2.UuO2TensorProductConv(frame, linear, frame, backend="torch")
     elif algorithm == "o3":
-        module = eqx_conv.O3TensorProductConv(
+        module = eqx.o3.O3TensorProductConv(
             o3.TensorProduct(*args, **options), backend="torch"
         )
     elif algorithm == "cartesian":
-        module = eqx_conv.CartesianTensorProductConv(
+        module = eqx.co3.CartesianTensorProductConv(
             co3.TensorProduct(*args, **options), backend="torch"
         )
     else:
-        module = eqx_conv.O2O3TensorProductConv(
+        module = eqx.o2.O2O3TensorProductConv(
             o2.O3TensorProduct(*args, **options), backend="torch", method=algorithm
         )
     module = module.cuda()
@@ -405,10 +405,10 @@ def test_o3_cartesian_derivatives(
         internal_weights=False,
         shared_weights=False,
     ).to(device)
-    conv = eqx_conv.O3TensorProductConv(
+    conv = eqx.o3.O3TensorProductConv(
         tp, normalization=normalization, backend="cuda"
     ).to(device)
-    reference = eqx_conv.O3TensorProductConv(
+    reference = eqx.o3.O3TensorProductConv(
         tp, normalization=normalization, backend="torch"
     ).to(device)
     edges = torch.randint(4, (2, 9), device=device)
@@ -463,11 +463,11 @@ def test_reverse_edge_convolution(implementation, channels, double_precision):
     )
     options = dict(internal_weights=False, shared_weights=False)
     tp = o3.TensorProduct(*args, **options).cuda()
-    reference = eqx_conv.O3TensorProductConv(tp, backend="torch").cuda()
+    reference = eqx.o3.O3TensorProductConv(tp, backend="torch").cuda()
     module = (
-        eqx_conv.O3TensorProductConv(tp, backend="cuda")
+        eqx.o3.O3TensorProductConv(tp, backend="cuda")
         if implementation == "o3"
-        else eqx_conv.O2O3TensorProductConv(
+        else eqx.o2.O2O3TensorProductConv(
             o2.O3TensorProduct(*args, **options), backend="cuda"
         )
     ).cuda()
@@ -537,9 +537,7 @@ def test_o3_cartesian_compile_and_empty_graph(
     cartesian = implementation != "o3"
     tp_cls = co3.TensorProduct if cartesian else o3.TensorProduct
     conv_cls = (
-        eqx_conv.CartesianTensorProductConv
-        if cartesian
-        else eqx_conv.O3TensorProductConv
+        eqx.co3.CartesianTensorProductConv if cartesian else eqx.o3.O3TensorProductConv
     )
     tp = tp_cls(
         "2x2e" if cartesian else "2x1o",
@@ -556,7 +554,7 @@ def test_o3_cartesian_compile_and_empty_graph(
     conv = conv_cls(tp, normalize=False, **kwargs).cuda()
     reference = conv_cls(tp, normalize=False, backend="torch", **kwargs).cuda()
     if implementation == "compact":
-        from equivariantx.conv.co3.linear import Linear
+        from equivariantx.co3.conv.linear import Linear
 
         linear = Linear(tp.irreps_out, tp.irreps_out, conv.harmonic_output_index).cuda()
     else:
@@ -643,7 +641,7 @@ def test_values_and_recursive_derivatives(
         pytest.skip("CUDA is unavailable")
     monkeypatch.setattr(config, "TORCH_REFERENCE", ordinary)
     tp = tensor_product(merge=merge, unweighted=unweighted).to(device)
-    conv = eqx_conv.O3TensorProductConv(tp, backend=backend).to(device)
+    conv = eqx.o3.O3TensorProductConv(tp, backend=backend).to(device)
     edges = torch.randint(5, (2, 19), device=device)
     x = torch.randn(5, tp.irreps_in1.dim, device=device, requires_grad=True)
     attrs = torch.randn(
@@ -693,7 +691,7 @@ def test_cuda_degrees_and_channels(channels, dtype, double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda").cuda()
     edges = torch.randint(7, (2, 33), device="cuda")
     # Noncontiguous operands are accepted without changing their derivatives.
     x = torch.randn(tp.irreps_in1.dim, 7, device="cuda").T.requires_grad_()
@@ -732,7 +730,7 @@ def test_cuda_unequal_channels(edge_count, double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    module = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    module = eqx.o3.O3TensorProductConv(tp, backend="cuda").cuda()
     edges = torch.randint(7, (2, edge_count), device="cuda")
     inputs = tuple(
         torch.randn(shape, device="cuda", requires_grad=True)
@@ -767,7 +765,7 @@ def test_cuda_requested_gradients(monkeypatch, double_precision):
     from equivariantx.ops.common.cuda.runtime import runtime
 
     tp = tensor_product().cuda()
-    module = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    module = eqx.o3.O3TensorProductConv(tp, backend="cuda").cuda()
     edges = torch.randint(4, (2, 13), device="cuda")
     inputs = tuple(
         torch.randn(shape, device="cuda", requires_grad=True)
@@ -803,7 +801,7 @@ def test_cuda_requested_gradients(monkeypatch, double_precision):
 
 def test_empty_and_unsupported(double_precision):
     tp = tensor_product()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda")
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda")
     for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
         inputs = [
             torch.randn(shape, device=device, requires_grad=True)
@@ -821,9 +819,9 @@ def test_empty_and_unsupported(double_precision):
         for value in torch.autograd.grad(result.sum(), inputs):
             assert not value.count_nonzero()
     with pytest.raises(ValueError, match="backend"):
-        eqx_conv.O3TensorProductConv(tp, backend="triton")
+        eqx.o3.O3TensorProductConv(tp, backend="triton")
     with pytest.raises(NotImplementedError, match="uvu"):
-        eqx_conv.O3TensorProductConv(
+        eqx.o3.O3TensorProductConv(
             o3.FullyConnectedTensorProduct("0e", "0e", "0e"), backend="cuda"
         )
 
@@ -839,7 +837,7 @@ def test_full_radial_replay_reads_new_graph_and_weights(monkeypatch, double_prec
     monkeypatch.setattr(graph, "_GRAPHS", OrderedDict())
     monkeypatch.setattr(graph, "_CANDIDATES", OrderedDict())
     tp = tensor_product().cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda", radial_mode="full").cuda()
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda", radial_mode="full").cuda()
     network = torch.nn.Sequential(torch.nn.Linear(3, 8), torch.nn.SiLU()).cuda()
     x, attrs, basis, weight = (
         torch.randn(shape, device="cuda", requires_grad=True)
@@ -882,7 +880,7 @@ def test_compile_and_cuda_graph(double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = tensor_product().cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda").cuda()
     compiled = torch.compile(conv, backend="aot_eager", fullgraph=True, dynamic=True)
     for count in (17, 23, 0):
         args = [
@@ -962,7 +960,7 @@ def test_o3_chunked_shared_gradients(
     # gradients without mistaking the tail for a shared operand.
     monkeypatch.setattr(cuda, "CHUNK_SIZE", 1025)
     tp = tensor_product(channels, merge=True, unweighted=True).cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda").cuda()
     edges = torch.randint(257, (2, 2051), device="cuda")
     inputs = [
         torch.randn(shape, device="cuda", requires_grad=True)
@@ -995,7 +993,7 @@ def test_o3_weight_adjoint_reuses_angular_contractions(double_precision):
     from equivariantx.ops.common.cuda.o3.codegen import angular_source
 
     tp = tensor_product()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda")
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda")
     for path in conv.paths:
         values = angular_source(
             path,
@@ -1029,7 +1027,7 @@ def test_o3_mixed_node_adjoint_destination(double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = eqx_conv.O3TensorProductConv(tp, backend="cuda")
+    conv = eqx.o3.O3TensorProductConv(tp, backend="cuda")
     target = torch.arange(257, device="cuda").repeat_interleave(8)
     source = torch.randint(257, target.shape, device="cuda")
     edges = torch.stack((source, target))

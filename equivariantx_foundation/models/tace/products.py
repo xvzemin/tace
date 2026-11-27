@@ -10,17 +10,17 @@ from types import SimpleNamespace
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import (
-    BilinearContraction,
+from equivariantx.o3 import (
+    ElementLinear,
+    MoEElementLinear,
+    TransposeIrrepsLayout,
     UuuFullyConnectedSymmetricContraction,
 )
-from equivariantx.mbe.ace.generalized import CouplingBlock, GeneralizedContraction
-from equivariantx.o3 import ElementLinear, MoEElementLinear
 from equivariantx.o3.cgtp import TensorProduct as EqxTensorProduct
+from equivariantx.o3.generalized import CouplingBlock, GeneralizedContraction
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.ops.common.torch.spherical_product import SphericalProduct
 from equivariantx.ops.precision import cpu_matmul_allowed
-from tace.models.layout import LayoutTransform
 from tace.models.linear import (
     e3nnElementLinear,
     e3nnLinear,
@@ -32,6 +32,7 @@ from tace.models.mlp import ScaledSiLU
 from tace.models.spherical.fused import UuuSymmetricContraction, UuuTensorProduct
 from tace.models.spherical.prod import CgtpACE, MaceACE, NonlinearCgtpACE, TaceACE
 from tace.models.spherical.tece_oam_rra import BilinearMoEACE
+from tace.ops.bilinear import BilinearContraction
 from tace.utils.env import acceleration_enabled
 
 from .matching import custom_forward
@@ -279,7 +280,7 @@ def spherical_bucket_product(module):
             and not hasattr(op, "fused_tp")
             and op.has_terms
             and op.layout == "mul_ir"
-            and type(module.reshape) is LayoutTransform
+            and type(module.reshape) is TransposeIrrepsLayout
             and (
                 type(module.linear_up) is torch.nn.Identity
                 or local_linear(module.linear_up)

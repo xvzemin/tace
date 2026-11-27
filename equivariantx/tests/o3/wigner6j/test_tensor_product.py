@@ -10,7 +10,7 @@ from equivariantx import o3 as eqx_o3
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("convolution", [False, True])
 def test_repeated_irreps(backend, convolution, double_precision):
-    from equivariantx.conv import Wigner6jTensorProductConv
+    from equivariantx.o3 import Wigner6jTensorProductConv
 
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")

@@ -9,12 +9,11 @@ import torch
 from e3nn import o3
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.mbe.ace import (
-    BilinearContraction,
+from equivariantx.o3 import (
+    MoEElementLinear,
     UuuFullyConnectedSymmetricContraction,
     UuuSymmetricContraction,
 )
-from equivariantx.o3 import MoEElementLinear
 from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
 
@@ -71,7 +70,7 @@ def test_joint_channel_capture_preserves_inline_scope(monkeypatch, inline):
 
 
 def test_inline_budget(monkeypatch):
-    from equivariantx.mbe.ace.symmetric_contraction import make_metadata
+    from equivariantx.o3.symmetric_contraction import make_metadata
     from equivariantx.ops import config
     from equivariantx.ops.common.compilation import should_inline, wide_ace
 
@@ -191,12 +190,17 @@ assert 'equivariantx' in sys.modules
         ("symmetric", False),
         ("linear", False),
         ("linear", True),
-        ("bilinear", False),
         ("ace", False),
     ],
 )
 def test_default_force_gradient_aoti_updates(
     kind, native, inline_limit, tmp_path, double_precision, monkeypatch
+):
+    check_force_gradient_updates(kind, native, inline_limit, tmp_path, monkeypatch)
+
+
+def check_force_gradient_updates(
+    kind, native, inline_limit, tmp_path, monkeypatch, gated=None
 ):
     from equivariantx.ops import config
 
@@ -237,7 +241,7 @@ def test_default_force_gradient_aoti_updates(
         )
         linear = o3.Linear("2x0e", "3x0e", internal_weights=False, shared_weights=False)
         if kind == "bilinear":
-            module = BilinearContraction(product, linear, backend="cuda").cuda()
+            module = gated(product, linear, backend="cuda").cuda()
             shapes = (
                 (3, 2),
                 (3, 2),
@@ -271,10 +275,11 @@ def test_default_force_gradient_aoti_updates(
     graph = make_fx(joint)(*values)
     graph.graph.eliminate_dead_code()
     graph.recompile()
+    namespace = gated.__module__.partition(".")[0] if gated is not None else "eqx"
     operators = {
         str(node.target)
         for node in graph.graph.nodes
-        if str(node.target).startswith("eqx.")
+        if str(node.target).startswith(("eqx.", f"{namespace}."))
     }
     operator = {
         "symmetric": "symmetric_contract",
@@ -283,7 +288,7 @@ def test_default_force_gradient_aoti_updates(
         "ace": "ace_contract",
     }[kind]
     assert operators == (
-        {f"eqx.{operator}.default"} if native or not inline_limit else set()
+        {f"{namespace}.{operator}.default"} if native or not inline_limit else set()
     )
     exported = torch.export.export(graph, tuple(value.detach() for value in values))
     package = tmp_path / "polynomial_force.pt2"
@@ -307,7 +312,9 @@ def test_default_force_gradient_aoti_updates(
             sys.executable,
             "-I",
             "-c",
-            package_script("""
+            package_script(
+                (f"import {gated.__module__}\n" if gated is not None else "")
+                + """
 import sys
 import torch
 run=torch._inductor.aoti_load_package(sys.argv[1])
@@ -315,7 +322,8 @@ for row in torch.load(sys.argv[2],weights_only=True):
     actual=run(*(value.cuda() for value in row['inputs']))
     torch.testing.assert_close(tuple(value.cpu() for value in actual),row['expected'],atol=2e-9,rtol=2e-9)
 assert 'equivariantx' in sys.modules
-"""),
+"""
+            ),
             str(package),
             str(data),
         ],

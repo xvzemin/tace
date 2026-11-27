@@ -1080,7 +1080,7 @@ def test_multihead_bucket_switches_fidelity_without_recapture(monkeypatch, basis
         # the registered model classes or their Python forwards.
         assert hits["eqx_foundation::tece_interaction"] == 3
         assert hits["eqx_foundation::tece_contraction"] >= 3
-        assert hits["eqx::edge_program"] >= 3 and hits["eqx::bilinear_ace"] >= 6
+        assert hits["eqx::edge_program"] >= 3 and hits["tace::bilinear_ace"] >= 6
     capture = bucket.step.graph
     for i, (default, ids) in enumerate(
         [(0, None), (0, [1, 0]), (1, None), (1, [0, 1])]

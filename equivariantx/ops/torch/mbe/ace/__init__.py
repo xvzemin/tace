@@ -1,1 +1,0 @@
-"""Torch atom-centred expansions."""

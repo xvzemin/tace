@@ -13,12 +13,12 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
+from equivariantx.o3 import TransposeIrrepsLayout
 from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
 from ..angular import SolidHarmonics
 from ..blocks import format_list
-from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import ACTIVATION, MLP
 from ..time_reversal import make_irrep, spherical_harmonics_irreps
@@ -351,20 +351,23 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
             self.magnetic_edge_irreps,
             mmax=self.mmax,
         )
-        self.reshape_in = LayoutTransform(
+        self.reshape_in = TransposeIrrepsLayout(
             self.irreps_in,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_out = LayoutTransform(
+        self.reshape_out = TransposeIrrepsLayout(
             self.irreps_out,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_magnetic = LayoutTransform(
+        self.reshape_magnetic = TransposeIrrepsLayout(
             self.magnetic_edge_irreps,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
         self.node_irreps = self.local_frame_in.irreps_out
         self.local_magnetic_irreps = self.magnetic_frame.irreps_out

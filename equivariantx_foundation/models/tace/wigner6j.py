@@ -5,8 +5,8 @@ from functools import partial
 import torch
 from e3nn import o3
 
-from equivariantx.conv import O3TensorProductConv
-from equivariantx.conv import Wigner6jTensorProductConv as EQXWigner6j
+from equivariantx.o3 import O3TensorProductConv
+from equivariantx.o3 import Wigner6jTensorProductConv as EQXWigner6j
 from equivariantx.ops.common.sparse_coefficients import AngularMap, SparseMap
 from equivariantx.ops.torch.o3.wigner6j.tensor_product import Schedule
 from tace.models.spherical.fused import Wigner6jTensorProductConv

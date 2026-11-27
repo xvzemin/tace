@@ -5,8 +5,8 @@ from functools import lru_cache
 
 import torch
 
-from equivariantx.mbe.ace.bilinear import BilinearContraction
 from equivariantx.ops.common.cuda.pointwise import launch
+from tace.ops.bilinear import BilinearContraction
 
 
 def angular_plan(tp):

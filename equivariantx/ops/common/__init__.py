@@ -64,15 +64,6 @@ register_kernel(
     reference="equivariantx.ops.common.torch.wigner:alignment_reference",
 )
 register_kernel(
-    "bilinear_ace", "cuda", "equivariantx.ops.common.cuda.bilinear:contract"
-)
-register_kernel(
-    "bilinear_ace",
-    "torch",
-    "equivariantx.ops.common.torch.ace:bilinear_contract",
-    reference="equivariantx.ops.common.torch.ace:bilinear_reference",
-)
-register_kernel(
     "contraction", "cuda", "equivariantx.ops.common.cuda.o2_o3.convolution:contraction"
 )
 register_kernel(

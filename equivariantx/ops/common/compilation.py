@@ -76,9 +76,9 @@ def polynomial_work(kind, metadata, program):
     from .polynomial import program_terms
 
     terms = program_terms(kind, program)
-    description = parse_metadata(metadata) if kind != "bilinear" else None
-    if kind in ("ace", "bilinear"):
-        plans = decode_plans(metadata) if kind == "bilinear" else (description,)
+    description = parse_metadata(metadata) if kind != "indexed_plan" else None
+    if kind in ("ace", "indexed_plan"):
+        plans = decode_plans(metadata) if kind == "indexed_plan" else (description,)
         return sum(
             sum(len(entries) for _, entries in plans[plan][2][role])
             * (len(mapping) - 1)

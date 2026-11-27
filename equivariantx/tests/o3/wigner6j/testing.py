@@ -7,7 +7,7 @@ import sys
 import torch
 
 from equivariantx import o3
-from equivariantx.conv import Wigner6jTensorProductConv
+from equivariantx.o3 import Wigner6jTensorProductConv
 from equivariantx.ops.compiler import compile_and_package
 
 

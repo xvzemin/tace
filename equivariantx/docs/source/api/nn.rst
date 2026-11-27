@@ -29,3 +29,9 @@ Neural network modules
 .. autofunction:: equivariantx.nn.fourier_radial
 
 .. autofunction:: equivariantx.nn.uniform_cubic_spline
+
+Graph attention
+---------------
+
+.. autoclass:: equivariantx.nn.StreamingGraphAttention
+   :members: forward

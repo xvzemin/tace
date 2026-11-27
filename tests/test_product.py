@@ -549,7 +549,9 @@ def test_element_linear_indexed(moe, matrix_weight, num_nodes):
         **({"num_experts": 2} if moe else {}),
     )
     assert module.torch_linear.backend == "torch"
-    assert module.eqx_linear.backend == "cuda"
+    from equivariantx.ops.config import DEFAULT_BACKEND
+
+    assert module.eqx_linear.backend == DEFAULT_BACKEND
     with torch.no_grad():
         module.bias.normal_()
     x = torch.randn(num_nodes, 16, requires_grad=True)

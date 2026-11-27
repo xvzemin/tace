@@ -11,7 +11,7 @@ import torch
 from e3nn import o3
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.conv import O3TensorProductConv
+from equivariantx.o3 import O3TensorProductConv
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx_foundation.models.tace.tace_oam_xl_v2 import TACEOAMXLV2
 from equivariantx_foundation.models.tace.tace_oam_xl_v2.angular import (

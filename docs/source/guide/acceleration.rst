@@ -208,21 +208,21 @@ EQX in TACE
    * - TACE operation
      - EQX implementation
    * - ``cgtp``
-     - ``equivariantx.conv.O3TensorProductConv``
+     - ``equivariantx.o3.O3TensorProductConv``
    * - ``o2_cgtp``
-     - ``equivariantx.conv.O2O3TensorProductConv``
+     - ``equivariantx.o2.O2O3TensorProductConv``
    * - ``co3``
-     - ``equivariantx.conv.CartesianTensorProductConv``
+     - ``equivariantx.co3.CartesianTensorProductConv``
    * - ``uu_o2``
-     - ``equivariantx.conv.UuO2TensorProductConv``
+     - ``equivariantx.o2.UuO2TensorProductConv``
    * - ``w6j_mag``
-     - ``equivariantx.conv.Wigner6jTensorProductConv``
+     - ``equivariantx.o3.Wigner6jTensorProductConv``
    * - ``uv_o2`` / ``uv_o2_mag``
-     - ``equivariantx.conv.UvO2TensorProductConv``
+     - ``equivariantx.o2.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
      - ``equivariantx_foundation.models.tace.tece_oam_rra``
    * - Standard / gated bilinear ACE
-     - ``equivariantx.mbe.ace.UuuFullyConnectedSymmetricContraction`` / ``equivariantx.mbe.ace.BilinearContraction``
+     - ``equivariantx.o3.UuuFullyConnectedSymmetricContraction`` / ``tace.ops.bilinear.BilinearContraction``
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx_foundation.models.tace.nonlinear_ace``
 

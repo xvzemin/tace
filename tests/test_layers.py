@@ -13,7 +13,6 @@ from equivariantx import o2
 from equivariantx.nn import MergeLayerNorm, MergeRmsNorm
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models.layer_norm import residual_update_count, residual_update_scale
-from tace.models.layout import LayoutTransform
 from tace.models.linear import (
     ElementEmbedding,
     e3nnElementLinear,
@@ -1541,63 +1540,6 @@ def test_node_update_returns_source_and_target_info(magnetic_type):
     torch.testing.assert_close(output[1], target_info)
 
 
-@pytest.mark.parametrize(
-    "layout_in",
-    ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
-)
-@pytest.mark.parametrize(
-    "layout_out",
-    ("ir_mul", "mul_ir", "flatten_ir_mul", "flatten_mul_ir"),
-)
-def test_layout_transform_supports_every_layout_pair(layout_in, layout_out) -> None:
-    irreps = o3.Irreps("3x0e+3x1o+3x1o+3x2e")
-    flatten_mul_ir = torch.randn(
-        5, irreps.dim, dtype=DTYPE, device=DEVICE, requires_grad=True
-    )
-    blocks = []
-    offset = 0
-    for mul, ir in irreps:
-        width = mul * ir.dim
-        blocks.append(
-            flatten_mul_ir[..., offset : offset + width].reshape(5, mul, ir.dim)
-        )
-        offset += width
-    mul_ir = torch.cat(blocks, dim=-1)
-    ir_mul = mul_ir.transpose(-1, -2)
-    layouts = {
-        "ir_mul": ir_mul,
-        "mul_ir": mul_ir,
-        "flatten_ir_mul": ir_mul.flatten(-2),
-        "flatten_mul_ir": flatten_mul_ir,
-    }
-    transform = LayoutTransform(
-        irreps,
-        layout_in=layout_in,
-        layout_out=layout_out,
-    ).to(DEVICE)
-    observed = transform(layouts[layout_in])
-    torch.testing.assert_close(observed, layouts[layout_out])
-    torch.testing.assert_close(transform.inverse(observed), layouts[layout_in])
-    seed = torch.randn_like(observed)
-    gradients = [
-        torch.autograd.grad((output * seed).sum(), flatten_mul_ir, retain_graph=True)[0]
-        for output in (observed, layouts[layout_out])
-    ]
-    torch.testing.assert_close(*gradients)
-    assert not transform.state_dict()
-
-
-def test_layout_transform_flattened_layouts_allow_different_multiplicities() -> None:
-    irreps = o3.Irreps("2x0e+3x1o")
-    features = torch.randn(4, irreps.dim, dtype=DTYPE, device=DEVICE)
-    transform = LayoutTransform(
-        irreps,
-        layout_in="flatten_mul_ir",
-        layout_out="flatten_ir_mul",
-    ).to(DEVICE)
-    torch.testing.assert_close(transform.inverse(transform(features)), features)
-
-
 @pytest.mark.parametrize("cls", [MergeRmsNorm, MergeLayerNorm])
 def test_merge_norm_loads_legacy_state(cls):
     from tace.models.layer_norm import get_normalization_layer
@@ -1706,7 +1648,9 @@ def test_tace_indexed_linear(
     module = module.to(device)
     assert module.torch_linear.backend == "torch"
     assert not module.torch_linear.expand_weights
-    assert module.eqx_linear.backend == "cuda"
+    from equivariantx.ops.config import DEFAULT_BACKEND
+
+    assert module.eqx_linear.backend == DEFAULT_BACKEND
     if lora:
         enable_lora(module, r=2, freeze_base=False)
         with torch.no_grad():

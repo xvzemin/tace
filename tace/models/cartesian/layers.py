@@ -8,18 +8,19 @@ from e3nn import o3
 from e3nn.nn import Gate
 
 from equivariantx import co3
-from equivariantx.co3 import ElementLinear, MoEElementLinear
-from equivariantx.conv.co3 import CartesianTensorProductConv, Linear
-from equivariantx.mbe.ace import (
-    IctdBilinearContraction,
+from equivariantx.co3 import (
+    ElementLinear,
     IctdUuuFullyConnectedSymmetricContraction,
+    MoEElementLinear,
 )
+from equivariantx.co3.conv import CartesianTensorProductConv, Linear
 from equivariantx.nn import EquivariantLayerNorm
+from equivariantx.o3 import TransposeIrrepsLayout
+from tace.ops.ictd_bilinear import IctdBilinearContraction
 from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
 from ..angular import SphericalHarmonics
-from ..layout import LayoutTransform
 from ..linear import (
     ElementEmbedding,
     e3nnElementLinear,
@@ -344,13 +345,15 @@ def cartesian_modules(module):
             module.normalization,
             backend=eqx_backend("conv"),
         )
-    if isinstance(module, LayoutTransform):
-        module.irreps = co3.Irreps(module.irreps)
-        module.dims = [ir.dim for _, ir in module.irreps]
-        module.num_components = sum(module.dims)
-        module.dim = module.irreps.dim
-        module._setup_indices()
-        return module
+    if isinstance(module, TransposeIrrepsLayout):
+        return co3.TransposeIrrepsLayout(
+            module.irreps,
+            source=module.source,
+            target=module.target,
+            flat_in=module.flat_in,
+            flat_out=module.flat_out,
+            backend=module.backend,
+        )
     if isinstance(module, CgtpACE) and hasattr(module, "eqx_ace"):
         del module.eqx_ace
     if isinstance(module, BilinearMoEACE):

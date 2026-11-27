@@ -9,6 +9,10 @@ import torch
 
 from equivariantx.ops import config, get_kernel
 from equivariantx.ops.common.polynomial import polynomial_adjoint
+from equivariantx.ops.common.torch.ace import (
+    indexed_plan_contract,
+    indexed_plan_reference,
+)
 from equivariantx.ops.compiler import compile_and_package
 from equivariantx.utils.metadata import encode_plans
 
@@ -23,7 +27,7 @@ def coefficient_case(kind, nodes, channels, elements, device):
             (nodes, 2 * channels),
         )
     ]
-    if kind == "bilinear":
+    if kind == "indexed_plan":
         values.append(torch.randn(nodes, 2 * channels, device=device).requires_grad_())
     records = tuple(
         (
@@ -46,7 +50,7 @@ def coefficient_case(kind, nodes, channels, elements, device):
     schedules = tuple((((1, channels, 2), records),) for _ in values)
     metadata = repr((tuple(value.shape[1] for value in values), True, schedules))
     mapping = tuple(range(len(values)))
-    if kind == "bilinear":
+    if kind == "indexed_plan":
         metadata = encode_plans([metadata])
         program = repr(((0, mapping, 3, 0),))
     else:
@@ -55,7 +59,7 @@ def coefficient_case(kind, nodes, channels, elements, device):
     return metadata, program, values, types
 
 
-@pytest.mark.parametrize("kind", ["ace", "bilinear"])
+@pytest.mark.parametrize("kind", ["ace", "indexed_plan"])
 @pytest.mark.parametrize(
     "device,nodes,channels,elements",
     [
@@ -74,11 +78,14 @@ def test_accumulated_coefficients(
     metadata, program, values, types = coefficient_case(
         kind, nodes, channels, elements, device
     )
-    name = "ace_contract" if kind == "ace" else "bilinear_ace"
     monkeypatch.setattr(config, "TORCH_REFERENCE", False)
-    actual = get_kernel(name, "torch")(metadata, program, types, values)[0]
+    actual = (
+        get_kernel("ace_contract", "torch") if kind == "ace" else indexed_plan_contract
+    )(metadata, program, types, values)[0]
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
-    expected = get_kernel(name, "torch")(metadata, program, types, values)[0]
+    expected = (
+        get_kernel("ace_contract", "torch") if kind == "ace" else indexed_plan_reference
+    )(metadata, program, types, values)[0]
     active = (*values[:3], *values[4:])
     directions = tuple(torch.randn_like(value) for value in active)
     for _ in range(4):
@@ -97,7 +104,7 @@ def test_accumulated_coefficients(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA grouping")
-@pytest.mark.parametrize("kind", ["ace", "bilinear"])
+@pytest.mark.parametrize("kind", ["ace", "indexed_plan"])
 @pytest.mark.parametrize("elements", [1, 89])
 def test_grouped_transposed_roles(kind, elements, double_precision):
     from equivariantx.ops.common.torch.ace import contract
@@ -106,7 +113,9 @@ def test_grouped_transposed_roles(kind, elements, double_precision):
     mapping = tuple(range(len(values)))
     for role in range(len(values)):
         program = repr(
-            ((0, mapping, role, 0),) if kind == "bilinear" else ((mapping, role, 0),)
+            ((0, mapping, role, 0),)
+            if kind == "indexed_plan"
+            else ((mapping, role, 0),)
         )
         actual = contract(kind, metadata, program, types, values, optimized=True)[0]
         expected = contract(kind, metadata, program, types, values, optimized=False)[0]
@@ -127,16 +136,21 @@ def test_grouped_transposed_roles(kind, elements, double_precision):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA grouping")
 @pytest.mark.parametrize("compiler", [None, "inductor"])
 def test_grouped_functional_transforms(compiler, double_precision):
-    from equivariantx.ops.common.torch.ace import bilinear_contract, bilinear_reference
+    from equivariantx.ops.common.torch.ace import (
+        indexed_plan_contract,
+        indexed_plan_reference,
+    )
     from equivariantx.tests.ops.testing import assert_functional_derivatives
 
-    metadata, program, values, types = coefficient_case("bilinear", 2048, 64, 2, "cuda")
+    metadata, program, values, types = coefficient_case(
+        "indexed_plan", 2048, 64, 2, "cuda"
+    )
 
     def function(*inputs):
-        return bilinear_contract(metadata, program, inputs[-1], inputs[:-1])[0]
+        return indexed_plan_contract(metadata, program, inputs[-1], inputs[:-1])[0]
 
     def reference(*inputs):
-        return bilinear_reference(metadata, program, inputs[-1], inputs[:-1])[0]
+        return indexed_plan_reference(metadata, program, inputs[-1], inputs[:-1])[0]
 
     assert_functional_derivatives(function, reference, (*values, types), compiler)
 
@@ -145,9 +159,14 @@ def test_grouped_functional_transforms(compiler, double_precision):
 def test_grouped_force_aoti(tmp_path, double_precision):
     from torch.fx.experimental.proxy_tensor import make_fx
 
-    from equivariantx.ops.common.torch.ace import bilinear_contract, bilinear_reference
+    from equivariantx.ops.common.torch.ace import (
+        indexed_plan_contract,
+        indexed_plan_reference,
+    )
 
-    metadata, program, values, types = coefficient_case("bilinear", 2048, 64, 2, "cuda")
+    metadata, program, values, types = coefficient_case(
+        "indexed_plan", 2048, 64, 2, "cuda"
+    )
 
     def joint(function, *inputs):
         values, types = inputs[:-1], inputs[-1]
@@ -161,7 +180,9 @@ def test_grouped_force_aoti(tmp_path, double_precision):
             *torch.autograd.grad(loss, (values[1], values[2], values[4])),
         )
 
-    graph = make_fx(lambda *inputs: joint(bilinear_contract, *inputs))(*values, types)
+    graph = make_fx(lambda *inputs: joint(indexed_plan_contract, *inputs))(
+        *values, types
+    )
     inputs = (*[value.detach() for value in values], types)
     exported = torch.export.export(graph, inputs)
     package = tmp_path / "grouped.pt2"
@@ -174,7 +195,7 @@ def test_grouped_force_aoti(tmp_path, double_precision):
                 "inputs": (*[value.detach().cpu() for value in changed], indices.cpu()),
                 "expected": tuple(
                     value.detach().cpu()
-                    for value in joint(bilinear_reference, *changed, indices)
+                    for value in joint(indexed_plan_reference, *changed, indices)
                 ),
             }
         )
@@ -242,8 +263,8 @@ def test_products_and_transposes(kind, nodes, shared, double_precision):
     if kind == "gated":
         metadata = encode_plans([metadata])
         program = repr(((0, mapping, role, 0),))
-        backend_kind, name = "bilinear", "bilinear_ace"
-    evaluate = get_kernel(name, "torch")
+        backend_kind, name = "indexed_plan", "bilinear_ace"
+    evaluate = indexed_plan_contract if kind == "gated" else get_kernel(name, "torch")
     actual = evaluate(metadata, program, types, operands)[0]
     torch.testing.assert_close(actual, expected)
     seed = torch.randn_like(expected)
