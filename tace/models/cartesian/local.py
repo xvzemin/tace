@@ -10,9 +10,9 @@ from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from equivariantx import co2, co3, o2
 from equivariantx.o2.rotation_matrix import rotation_matrix_to_y_axis
+from equivariantx.o3 import TransposeIrrepsLayout
 from equivariantx.ops.common.gate import gate_program
 from equivariantx.ops.common.radial import materialize
-from tace.models.layout import LayoutTransform
 from tace.models.spherical.tece_oam_rra import Convolution
 from tace.utils.env import acceleration_enabled, eqx_backend, memory_first
 from tace.utils.torch_scatter import scatter_sum
@@ -413,6 +413,13 @@ class RadialRotaryConvolution(Convolution):
             self.mmax,
             backend=eqx_backend("conv"),
         )
+        self.alignment_layout = co3.TransposeIrrepsLayout(
+            self.local_frame_in.irreps_in,
+            source="ir_mul",
+            target="mul_ir",
+            flat_in=False,
+            backend=eqx_backend("conv"),
+        )
         self.to_circular = co2.ChangeOfBasis(
             self.local_frame_in.irreps_out,
             inverse=True,
@@ -434,8 +441,20 @@ class RadialRotaryConvolution(Convolution):
             self.reshape_out.irreps,
             backend=eqx_backend("conv"),
         )
-        self.stream_reshape_in = LayoutTransform(self.reshape_in.irreps.spherical())
-        self.stream_reshape_out = LayoutTransform(self.reshape_out.irreps.spherical())
+        self.stream_reshape_in = TransposeIrrepsLayout(
+            self.reshape_in.irreps.spherical(),
+            source="mul_ir",
+            target="ir_mul",
+            flat_out=False,
+            backend=eqx_backend("conv"),
+        )
+        self.stream_reshape_out = TransposeIrrepsLayout(
+            self.reshape_out.irreps.spherical(),
+            source="mul_ir",
+            target="ir_mul",
+            flat_out=False,
+            backend=eqx_backend("conv"),
+        )
         self.wigner = o2.WignerD(
             self.lmax,
             self.lmax,
@@ -455,23 +474,11 @@ class RadialRotaryConvolution(Convolution):
         return self.from_spherical(self.stream_reshape_out.inverse(features))
 
     def align(self, features, rotation, fused):
-        blocks = features.split(self.reshape_in.dims, dim=-2)
-        features = torch.cat(
-            [block.transpose(-1, -2).flatten(-2) for block in blocks], -1
-        )
+        features = self.alignment_layout(features)
         local = self.to_circular(self.local_frame_in(features, rotation))
         return local.reshape(local.shape[0], -1, 2 * self.num_channel)
 
     def unalign(self, features, rotation, fused):
         local = self.from_circular(features.flatten(1))
         value = self.local_frame_out.to_global(local, rotation) * self.inverse_scale
-        return torch.cat(
-            [
-                value[:, section].reshape(-1, mul, ir.dim).transpose(-1, -2)
-                for (mul, ir), section in zip(
-                    self.local_frame_out.irreps_in,
-                    self.local_frame_out.irreps_in.slices(),
-                )
-            ],
-            -2,
-        )
+        return self.reshape_out(value)

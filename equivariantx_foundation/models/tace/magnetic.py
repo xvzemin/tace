@@ -3,10 +3,7 @@
 import torch
 
 from equivariantx import o2
-from equivariantx.conv.uv_o2.convolution import (
-    UvO2TensorProductConv,
-    linear_description,
-)
+from equivariantx.o2.uv.convolution import UvO2TensorProductConv, linear_description
 from equivariantx.ops.common.gate import gate_program
 from equivariantx.ops.common.wigner import wigner_D
 from equivariantx.utils.autograd import forward_ad_active

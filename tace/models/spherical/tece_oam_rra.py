@@ -10,22 +10,20 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.nn import graph_softmax
 from equivariantx.o2.clebsch_gordan import clebsch_gordan_product
+from equivariantx.o3 import TransposeIrrepsLayout
 from equivariantx.ops import config as eqx_config
 from equivariantx.ops.common.channel_product import local_product
 from equivariantx.ops.common.rotation import rotate
 from tace.utils.env import acceleration_enabled, eqx_backend
 
 from ..lammps import Graph
-from ..layout import LayoutTransform
 from ..linear import (
     IndexedFeatures,
     e3nnElementLinear,
     e3nnLinear,
     e3nnMoEElementLinear,
-    has_lora,
 )
 from ..mlp import ACTIVATION, convolution_radial, get_scaled_activation
 from .base import Product
@@ -685,9 +683,19 @@ class UvSO2Interaction(O3CgtpInteraction):
             gate_m0=False,
             use_asymmetric_contraction=self.use_asymmetric_contraction,
             use_bias=self.use_bias,
-            reshape_in=LayoutTransform(self.irreps_in),
-            reshape_out=LayoutTransform(
-                o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])
+            reshape_in=TransposeIrrepsLayout(
+                self.irreps_in,
+                source="mul_ir",
+                target="ir_mul",
+                flat_out=False,
+                backend=eqx_backend("conv"),
+            ),
+            reshape_out=TransposeIrrepsLayout(
+                o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out]),
+                source="mul_ir",
+                target="ir_mul",
+                flat_out=False,
+                backend=eqx_backend("conv"),
             ),
             scalar_act=get_scaled_activation(scalar_act),
             tensor_act=get_scaled_activation(tensor_act),
@@ -778,9 +786,6 @@ class BilinearMoEACE(Product):
     def _setup(self):
 
         self.scale = 1.0 / math.sqrt(2.0)
-        self.use_eqx = bool(
-            self.use_bilinear_gate and acceleration_enabled("eqx", kernel="product")
-        )
 
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
@@ -867,17 +872,6 @@ class BilinearMoEACE(Product):
                 )
             product_in1 = this_ace.irreps_out
 
-        if self.use_eqx:
-            coef = self.coefs[1]
-            self.eqx_ace = BilinearContraction(
-                self.aces[0].tp,
-                coef.linear,
-                getattr(coef, "num_experts", 1),
-                shared_linear=self.shared_coefs[1].linear
-                if hasattr(self, "shared_coefs")
-                else None,
-            )
-
         if self.use_bilinear_gate:
             self._ace_gate_slices = []
             gate_offset = 0
@@ -930,55 +924,6 @@ class BilinearMoEACE(Product):
         shared: torch.Tensor,
     ) -> torch.Tensor:
         return (grouped + shared) * self.scale
-
-    def _bilinear_coefficients(self, kernel, coef, features, base, gates, node_type):
-        elements = getattr(coef, "num_elements", 1)
-        experts = getattr(coef, "num_experts", 1)
-        weight = (
-            torch.cat([w.reshape(elements, experts, -1) for w in coef.weight], dim=-1)
-            if coef.use_matrix_weight
-            else coef.weight.reshape(elements, experts, -1)
-        )
-        types = (
-            node_type
-            if hasattr(coef, "num_elements")
-            else torch.zeros(
-                features.shape[0], device=features.device, dtype=torch.long
-            )
-        )
-        shared = self.shared_coefs[1] if hasattr(self, "shared_coefs") else None
-        shared_weight = None
-        if shared is not None:
-            shared_weight = (
-                torch.cat([w.flatten() for w in shared.weight])
-                if shared.use_matrix_weight
-                else shared.weight
-            )
-        output = kernel(features, base, gates, weight, types, shared_weight)
-        if shared is not None and shared.bias is not None:
-            output = (
-                output
-                + shared.bias.index_select(-1, shared._bias_index) * shared._bias_mask
-            )
-        if coef.bias is None:
-            return output
-        if hasattr(coef, "num_experts"):
-            outputs = [
-                output[:, sl].reshape(features.shape[0], experts, mul, dim)
-                for sl, mul, dim in zip(
-                    coef._output_slices, coef._output_expert_muls, coef._output_dims
-                )
-            ]
-            bias = coef.bias[types]
-            for i, start, end in coef._bias_out_indices:
-                outputs[i] = outputs[i] + bias[:, :, start:end].unsqueeze(-1)
-            return torch.cat([value.flatten(1) for value in outputs], dim=-1)
-        bias = (
-            coef.bias.reshape(elements, -1)[node_type]
-            if hasattr(coef, "num_elements")
-            else coef.bias
-        )
-        return output + bias.index_select(-1, coef._bias_index) * coef._bias_mask
 
     def _linear_up_features(
         self,
@@ -1044,24 +989,6 @@ class BilinearMoEACE(Product):
         )
 
         for nu in range(2, self.correlation + 1):
-            if (
-                hasattr(self, "eqx_ace")
-                and node_feats.is_cuda
-                and not has_lora(self.coefs[nu - 1])
-                and not (
-                    shared_outs is not None and has_lora(self.shared_coefs[nu - 1])
-                )
-            ):
-                gates = ace_weights[:, self._ace_gate_slices[nu - 2]]
-                outs = outs + self._bilinear_coefficients(
-                    self.eqx_ace,
-                    self.coefs[nu - 1],
-                    node_feats,
-                    base_feats,
-                    gates,
-                    node_type,
-                )
-                continue
             if self.use_bilinear_gate:
                 corr_feats[nu] = self.aces[nu - 2](
                     corr_feats[nu - 1],

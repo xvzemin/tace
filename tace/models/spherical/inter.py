@@ -8,7 +8,7 @@ from typing import Dict, Union
 import torch
 from e3nn import o3
 
-from equivariantx.conv import indexed_weights
+from equivariantx.nn import indexed_weights
 from tace.utils.env import acceleration_enabled, eqx_backend, memory_first
 
 from ..lammps import Graph
@@ -440,7 +440,7 @@ class O3IctdInteraction(O3CgtpInteraction):
         )
 
     def _setup_additional_modules(self) -> None:
-        from equivariantx.conv.co3.linear import Linear
+        from equivariantx.co3.conv.linear import Linear
 
         self.linear_down.linear = Linear(
             self.linear_down.irreps_in,

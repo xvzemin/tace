@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.mbe.ace import UuuSymmetricContraction
+from equivariantx.o3 import UuuSymmetricContraction
 from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.decompositions import symmetric_forward
 

@@ -63,6 +63,10 @@ d, di = rotation(torch.randn(3, 3))
 x = torch.randn(3, frame.input_dim)
 frame.to_global(frame.to_local(x, d), di)
 assert set(eqx.__all__).issubset(dir(eqx))
+assert set(("conv", "mbe")).isdisjoint(eqx.__all__)
+for space in (eqx.o3, eqx.co3, eqx.o2, eqx.co2):
+    assert set(("TransposeIrrepsLayout", "SymmetricContraction", "AsymmetricContraction")).issubset(space.__all__)
+assert not hasattr(torch.ops.eqx_tace_product, "bilinear_ace")
 assert not torch.cuda.is_initialized()
 assert "tace" not in sys.modules
 from equivariantx.ops.common.cuda.runtime import runtime
@@ -89,7 +93,7 @@ import sys
 import torch
 
 sys.modules.update({name: None for name in ("ninja", "torch.utils.cpp_extension", "torch_geometric", "torch_scatter")})
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
 
 torch.set_default_dtype(torch.float64)
@@ -127,7 +131,7 @@ assert "equivariantx.ops.common.cuda.o2_o3.convolution" not in sys.modules
 from equivariantx.ops.common.cuda import runtime as cuda
 assert not cuda.runtime.cache_info().currsize
 assert "tace" not in sys.modules
-accelerated = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
+accelerated = eqx.o2.O2O3TensorProductConv(tp, backend="cuda").to(device)
 arguments = (
     x, weights, x.new_empty(0, tp.weight_numel), packed,
     x.new_ones(1, tp.num_harmonics), edges, 3,

@@ -8,9 +8,8 @@ from e3nn import o3
 from e3nn.nn import Gate as HostGate
 
 from equivariantx.co2 import SphericalCoupling
-from equivariantx.conv import O2O3TensorProductConv
-from equivariantx.conv import UuO2TensorProductConv as EqxUuConv
-from equivariantx.o2 import O3TensorProduct, WignerD
+from equivariantx.o2 import O2O3TensorProductConv, O3TensorProduct, WignerD
+from equivariantx.o2 import UuO2TensorProductConv as EqxUuConv
 from equivariantx.o3 import Gate as EqxGate
 from tace.models.mlp import MLPV1, MLPV2
 from tace.models.spherical.fused import O2TensorProductConv, UuO2TensorProductConv
@@ -529,7 +528,7 @@ def mixed_geometry(rep):
     streaming layer zero can compact radial rows for every later consumer.
     Admit the whole mixed stack or neither stream, independent of layer order.
     """
-    from equivariantx import conv as eqx_conv
+    import equivariantx as eqx
     from tace.models.spherical.node import (
         Element2SphericalTensorNodeEmbedding,
         LinearNodeEmbedding,
@@ -568,9 +567,9 @@ def mixed_geometry(rep):
             or "stream" in vars(m.edge_info)
             or type(m.rejector.eqx_tp)
             is not (
-                eqx_conv.UuO2TensorProductConv
+                eqx.o2.UuO2TensorProductConv
                 if isinstance(m, UuO2Interaction)
-                else eqx_conv.UvO2TensorProductConv
+                else eqx.o2.UvO2TensorProductConv
             )
             for m in local
         )
@@ -735,7 +734,7 @@ def configure_local_geometry(rep, *, explicit_cuda_training=False):
     if getattr(rep, "_can_skip_wigner", False):
         _configure_shared_uu(rep)
     if any(isinstance(layer, (_StreamUu, _StreamUv)) for layer in rep.interactions):
-        from equivariantx import conv as eqx_conv
+        import equivariantx as eqx
 
         from .interactions import StreamedInteraction, _SharedHarmonicInteraction
 
@@ -767,9 +766,9 @@ def configure_local_geometry(rep, *, explicit_cuda_training=False):
                 and m.num_channel == 32
                 and type(m.rejector.eqx_tp)
                 is (
-                    eqx_conv.UuO2TensorProductConv
+                    eqx.o2.UuO2TensorProductConv
                     if type(m) is _StreamUu
-                    else eqx_conv.UvO2TensorProductConv
+                    else eqx.o2.UvO2TensorProductConv
                 )
                 and not {"forward_wigner", "forward_transverse"}.intersection(
                     vars(m.rejector.eqx_tp)

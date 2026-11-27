@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import equivariantx as eqx  # noqa: F401 - Load constants before importing legacy e3nn modules.
+from equivariantx.tests.utils import aoti_threads as aoti_threads
 from tace.utils.env import ACCELERATION_ENV
 
 

@@ -23,7 +23,7 @@ class GauntTensorProductConv(TensorProductConv):
     >>> import torch
     >>> import equivariantx as eqx
     >>> tp = eqx.o3.GauntTensorProduct("2x0e+2x1o", "0e+1o", "2x0e+2x1o")
-    >>> layer = eqx.conv.GauntTensorProductConv(tp)
+    >>> layer = eqx.o3.GauntTensorProductConv(tp)
     >>> nodes = torch.randn(3, 8)
     >>> attrs = torch.randn(4, 4)
     >>> edges = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]])

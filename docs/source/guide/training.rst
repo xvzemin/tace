@@ -29,23 +29,33 @@ model-specific training plan:
 
 ``tace-train`` does not install a Foundation training plan. Its generic EQX
 operators and joint AOTInductor training do not require Foundation.
-``tace-fast-train`` uses the bundled Foundation extension and requires CUDA. The default fast schedule
-requires a matching model or regional plan, or an explicit joint training
-package. It does not silently fall back to generic EQX training.
+``tace-fast-train`` uses the bundled Foundation extension and requires CUDA.
+Its default, ``fast_schedule: auto``, selects the captured OAM-v2 schedule
+for the 10-layer, 128-channel XL-v2 CGTP/j0 recipe trained from scratch
+with HybridMuon, its E/F/S loss, true FP32/TF32 and SimpleDDPStrategy.
+The same recipe can resume from a canonical OAM Lightning checkpoint with
+matching model and loss configurations, matrix-weight layout and HybridMuon state.
+Automatic selection inspects checkpoint metadata without loading tensor storage.
+Other recipes, unrecognized checkpoints and explicit Foundation callbacks use the
+Foundation whole-model or regional planner. The fast entry does not silently
+fall back to generic EQX training.
 For E/F or E/F/S training, see :ref:`foundation-lightning-training` for optional
 CUDA Graph replay. Alongside 7M, OAM-L and TECE-OAM-RRA, supported spherical
 CGTP and local UU/UV plans, and Cartesian ICTD and local UU/UV plans, can replay
 these objectives on a single GPU or with NCCL DDP.
-To run the dedicated OAM-v2 schedule (formerly ``tace-train-oam-v2``):
+To require a particular schedule:
 
 .. code-block:: bash
 
     tace-fast-train -cn omat.yaml +fast_schedule=oam_v2
+    tace-fast-train -cn omat.yaml +fast_schedule=foundation
 
-Alternatively, set ``fast_schedule: oam_v2`` in the fast training YAML.
 The OAM-v2 schedule uses one worker per visible CUDA device, FP32 model
-weights and TF32 matrix multiplication. Report steady-state step time after
-CUDA Graph replay starts, separately from first-batch compilation and capture.
+weights and TF32 matrix multiplication. With ``fast_schedule: auto``, each
+worker records the first batch shape immediately. It executes other shapes
+with the compiled joint program on first use and records them when they recur.
+Explicit ``fast_schedule: oam_v2`` records each new shape immediately.
+Report first-batch compilation separately from later training steps.
 During validation, XL-v2 releases its captured graphs, static batches and
 gradient workspace. On returning to training it captures fresh graphs and
 can reuse a validated joint program from the same fit. No graphs or programs

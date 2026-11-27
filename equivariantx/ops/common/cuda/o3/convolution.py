@@ -62,7 +62,7 @@ def execution_plan(
         and geometry[0][0] in ("cartesian", "cartesian_symmetric")
     )
     if cartesian:
-        from .....conv.co3.polynomials import ANGULAR_TILE_SIZE, FUSED_TILE_LIMIT
+        from .....co3.conv.polynomials import ANGULAR_TILE_SIZE, FUSED_TILE_LIMIT
 
         # Cartesian angular tiles may share a weight column. Keep their live
         # accumulators separate; compatible tiles are fused into one grid below.

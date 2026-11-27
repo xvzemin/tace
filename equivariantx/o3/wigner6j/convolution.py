@@ -43,7 +43,7 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
     --------
     >>> import torch
     >>> import equivariantx as eqx
-    >>> layer = eqx.conv.Wigner6jTensorProductConv(
+    >>> layer = eqx.o3.Wigner6jTensorProductConv(
     ...     "2x1o", "1o", "1e", "2x1e", "2x0e+2x1e+2x2e",
     ...     [(0, 0, 0, "uvu", True)],
     ...     [(0, 0, i, "uvu", True) for i in range(3)], backend="torch",

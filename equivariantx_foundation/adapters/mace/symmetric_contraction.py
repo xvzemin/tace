@@ -2,7 +2,7 @@
 
 import torch
 
-from equivariantx.mbe.ace import UuuSymmetricContraction as PolynomialContraction
+from equivariantx.o3 import UuuSymmetricContraction as PolynomialContraction
 from equivariantx.ops import resolve_backend
 
 

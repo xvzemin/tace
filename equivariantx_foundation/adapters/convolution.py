@@ -6,8 +6,9 @@ from typing import NamedTuple
 
 import torch
 
-from equivariantx.conv import O2O3TensorProductConv, O3TensorProductConv
+from equivariantx.o2 import O2O3TensorProductConv
 from equivariantx.o2.o3_tensor_product import O3TensorProduct
+from equivariantx.o3 import O3TensorProductConv
 from equivariantx.ops import resolve_backend
 from equivariantx.utils.layout import permute
 from equivariantx.utils.module import convert_modules

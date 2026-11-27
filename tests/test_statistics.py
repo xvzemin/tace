@@ -180,6 +180,7 @@ def test_missing_model_statistics_only_checks_requested_inputs():
 def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     import tace.dataset.datamodule as datamodule_module
     import tace.scripts.train as train_module
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 
     monkeypatch.chdir(tmp_path)
     records = [([1, 1], 2.0, 0), ([8], 3.0, 0), ([1, 8], 4.0, 0), ([8], 5.0, 1)]
@@ -209,7 +210,8 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     monkeypatch.setattr(datamodule_module, "tace_read_all_files", no_source_read)
     monkeypatch.setattr(datamodule_module, "from_records", no_source_read)
     monkeypatch.setattr(train_module, "initialize", lambda cfg: cfg)
-    monkeypatch.setattr(train_module, "create_model", lambda *args: None)
+    if "energy" not in targets:
+        monkeypatch.setattr(train_module, "create_model", lambda *args: None)
     monkeypatch.setattr(train_module, "configure_model_precision", lambda *args: None)
     cfg = OmegaConf.create(
         {
@@ -218,7 +220,14 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
             "loss": {"loss_property": targets},
             "model": {
                 "config": {
+                    **DEFAULT_MODEL_CONFIG,
                     "cutoff": 3.0,
+                    "num_layers": 1,
+                    "num_channel": 4,
+                    "Lmax": 1,
+                    "lmax": 1,
+                    "mmax": 1,
+                    "radial_basis": {"num_radial_basis": 4, "hidden": [4]},
                     "fidelity": [
                         {"name": "fitted"},
                         {"name": "fixed", "atomic_energy": {1: 4.0, 8: 5.0}},
@@ -250,7 +259,9 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
         )
         stored.close()
     contents = {p: p.read_bytes() for p in cache.rglob("*") if p.is_file()}
-    _, statistics, _, _, _, datamodule = train_module.build(cfg)
+    initial_rng = torch.get_rng_state()
+    _, statistics, _, _, cold_model, datamodule = train_module.build(cfg)
+    cold_rng = torch.get_rng_state()
     assert datamodule.threeAtomsList is None
     assert statistics[0]["atomic_numbers"] == [1, 8]
     assert statistics[0]["data_schema"] == GRAPH_SCHEMA
@@ -279,7 +290,12 @@ def test_training_statistics_reuse_graph_cache(tmp_path, monkeypatch, targets):
     monkeypatch.setattr(train_module, "load_cached_datamodule", no_source_read)
     monkeypatch.setattr(train_module, "prepare_atomic_energies", no_source_read)
     monkeypatch.setattr(train_module, "compute_statistics", no_source_read)
-    _, reused, _, _, _, datamodule = train_module.build(cfg)
+    torch.set_rng_state(initial_rng)
+    _, reused, _, _, warm_model, datamodule = train_module.build(cfg)
+    assert torch.equal(torch.get_rng_state(), cold_rng)
+    if cold_model is not None:
+        for p, q in zip(cold_model.parameters(), warm_model.parameters(), strict=True):
+            torch.testing.assert_close(p, q, rtol=0, atol=0)
     assert reused == statistics
     datamodule.prepare_data()
     assert datamodule.threeAtomsList is None

@@ -2,11 +2,67 @@
 
 import torch
 from e3nn import o3
+from e3nn.util import explicit_default_types
 
 from ..ops import resolve_backend
-from ..ops.common.ictd import dense_basis, initialize, restore
+from ..ops.common.ictd import dense_basis, initialize, path_basis, restore
 from ..ops.precision import validate_module_precision
 from ..ops.torch.o3 import ictd as torch_kernel
+
+
+def w3j(
+    l1: int, l2: int, l3: int, dtype=None, device=None, *, paths=(None, None, None)
+) -> torch.Tensor:
+    """Return e3nn's real Wigner 3j tensor in the selected bases.
+
+    Parameters
+    ----------
+    l1, l2, l3 : int
+        Angular degrees of the two inputs and the output.
+    paths : tuple of three torch.Tensor or None, optional
+        An orthonormal-column path matrix of shape ``(d, 2*l+1)`` maps
+        that index to ``d`` Cartesian entries. ``None`` keeps it spherical.
+        :func:`equivariantx.co3.path_matrix` selects the STF path;
+        :func:`path_matrices` also provides paths of other tensor ranks.
+    dtype : torch.dtype, optional
+        Output dtype. Defaults to the PyTorch default floating-point dtype.
+    device : torch.device or str, optional
+        Output device. Defaults to the PyTorch default device.
+
+    Returns
+    -------
+    torch.Tensor
+        Coefficients of shape ``(d1, d2, d3)`` with unit Frobenius norm.
+        For a single component-normalized tensor-product path, multiply
+        by ``sqrt(2*l3+1)`` in either basis.
+
+    Examples
+    --------
+    >>> from equivariantx import co3, o3
+    >>> q = co3.path_matrix(2)
+    >>> c = o3.w3j(2, 2, 2, paths=(None, q, q), dtype=q.dtype)
+    >>> x, y = torch.randn(2, 5, dtype=q.dtype)
+    >>> torch.einsum("i,j,ijk->k", x, q @ y, c).reshape(3, 3).shape
+    torch.Size([3, 3])
+    """
+    if len(paths) != 3:
+        raise ValueError("paths must contain one entry for each of l1, l2 and l3.")
+    if all(matrix is None for matrix in paths):
+        return o3.wigner_3j(l1, l2, l3, dtype=dtype, device=device)
+
+    symbol = o3.wigner_3j(l1, l2, l3, dtype=torch.float64, device="cpu")
+    for axis, (degree, matrix) in enumerate(zip((l1, l2, l3), paths)):
+        if matrix is None:
+            continue
+        if not isinstance(matrix, torch.Tensor) or not matrix.is_floating_point():
+            raise TypeError(
+                f"paths[{axis}] must be a real floating-point tensor or None."
+            )
+        if matrix.ndim != 2 or matrix.shape[1] != 2 * degree + 1:
+            raise ValueError(f"paths[{axis}] must have shape (d, {2 * degree + 1}).")
+        symbol = (symbol.movedim(axis, -1) @ matrix.to(symbol).T).movedim(-1, axis)
+    dtype, device = explicit_default_types(dtype, device)
+    return symbol.to(dtype=dtype, device=device).contiguous()
 
 
 def path_matrices(rank):
@@ -25,6 +81,12 @@ def path_matrices(rank):
     matrix : torch.Tensor
         CPU float64 matrix of shape (3**rank, path[-1].dim) with
         orthonormal columns. Rows follow flattened Cartesian index order.
+
+    Examples
+    --------
+    >>> from equivariantx import o3
+    >>> [path[-1].l for path, matrix in o3.path_matrices(2)]
+    [2, 1, 0]
     """
     if not isinstance(rank, int) or rank < 0:
         raise ValueError("rank must be a non-negative integer.")
@@ -42,9 +104,7 @@ def path_matrices(rank):
         for ir_out in reversed(irrep_list):
             key = (ir, ir_out)
             if key not in coefficients:
-                coefficients[key] = o3.wigner_3j(
-                    1, ir.l, ir_out.l, dtype=torch.float64, device="cpu"
-                )
+                coefficients[key] = coupling_matrix(ir, ir_out)
             output = torch.einsum("ac,bco->bao", matrix, coefficients[key])
             output = output.flatten(0, 1)
             output = output / output.norm(dim=0)
@@ -60,7 +120,7 @@ def execution(module, features):
 
 
 def coupling_matrix(ir, out):
-    return o3.wigner_3j(1, ir.l, out.l, dtype=torch.float64, device="cpu")
+    return w3j(1, ir.l, out.l, dtype=torch.float64, device="cpu")
 
 
 class ICTD(torch.nn.Module):
@@ -74,7 +134,7 @@ class ICTD(torch.nn.Module):
         ``None`` selects CUDA when available, otherwise optimized PyTorch.
         Execution backend. CPU tensors use Torch.
     dtype : torch.dtype, optional
-        Buffer dtype.get_default_dtype().
+        Buffer dtype. Defaults to the PyTorch default floating-point dtype.
     device : torch.device or str, optional
         Buffer device. Defaults to CPU.
 
@@ -148,7 +208,9 @@ class ICTD(torch.nn.Module):
         return execution(self, features).inverse(self, features)
 
     def path_matrix(self, index):
-        """Return the rectangular matrix for a path index as a buffer view."""
+        """Return the orthonormal matrix for one path without building the full basis."""
+        if self._buffers["change_of_basis"] is None:
+            return path_basis(self, index)
         return self.change_of_basis[:, self.slices[index]]
 
     def project(self, features, index):

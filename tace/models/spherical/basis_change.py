@@ -5,7 +5,7 @@
 
 import torch
 
-from ..ictd import ICTD
+from equivariantx.o3 import path_matrices
 
 
 class _SymmetricRankTwoBasisChange(torch.nn.Module):
@@ -15,18 +15,9 @@ class _SymmetricRankTwoBasisChange(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        PS, DS, CS, SS = ICTD(2)
-        self.register_buffer(
-            "zero",
-            SS[2].view(3, 3),
-            persistent=False,
-        )
-        self.register_buffer(
-            "two",
-            SS[0].view(5, 3, 3),
-            persistent=False,
-        )
-        del PS, DS, CS, SS
+        basis = {path[-1].l: q for path, q in path_matrices(2)}
+        self.register_buffer("zero", basis[0].reshape(3, 3), persistent=False)
+        self.register_buffer("two", basis[2].T.reshape(5, 3, 3), persistent=False)
 
     def forward(self, t0: torch.Tensor, t2: torch.Tensor) -> torch.Tensor:
         t0 = torch.einsum("b, ij -> bij", t0, self.zero)

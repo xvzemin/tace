@@ -98,7 +98,9 @@ def test_unsupported_products_are_left_native(monkeypatch):
         assert product_rule(module, backend="torch", task="inference")[0] is None
 
 
-def make_bilinear(experts, shared, agnostic, *, matrix=False, elements=4):
+def make_bilinear(
+    experts, shared, agnostic, *, matrix=False, elements=4, cartesian=False
+):
     from tace.models.linear import switch_e3nn_weight_layout
     from tace.models.spherical.tece_oam_rra import BilinearMoEACE
 
@@ -106,13 +108,13 @@ def make_bilinear(experts, shared, agnostic, *, matrix=False, elements=4):
         layer=0,
         num_layers=2,
         num_elements=elements,
-        Lmax=1,
-        lmax=1,
+        Lmax=2 if cartesian else 1,
+        lmax=2 if cartesian else 1,
         num_channel=4,
         num_expert=experts,
         num_channel_per_expert=4 // experts,
-        target_irreps=o3.Irreps("0e+1o"),
-        irreps_in=o3.Irreps("4x0e+4x1o"),
+        target_irreps=o3.Irreps("0e+1o+2e" if cartesian else "0e+1o"),
+        irreps_in=o3.Irreps("4x0e+4x1o+4x2e" if cartesian else "4x0e+4x1o"),
         correlation=[2, 2],
         l1l2=None,
         bias=True,
@@ -121,7 +123,12 @@ def make_bilinear(experts, shared, agnostic, *, matrix=False, elements=4):
         agnostic=agnostic,
         use_shared_expert=shared,
     )
-    return switch_e3nn_weight_layout(layer, "matrix" if matrix else "flat")
+    switch_e3nn_weight_layout(layer, "matrix" if matrix else "flat")
+    if cartesian:
+        from tace.models.cartesian.layers import cartesian_modules
+
+        return cartesian_modules(layer)
+    return layer
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -130,17 +137,18 @@ def test_bilinear_host_selection(monkeypatch, existing):
 
     monkeypatch.setenv("TACE_USE_EQX", str(int(existing)))
     p = make_bilinear(2, True, False)
-    assert hasattr(p, "eqx_ace") == existing
-    assert host_product_provider(p) is None  # The host never calls eqx_ace on CPU.
+    assert not hasattr(p, "eqx_ace")
+    assert host_product_provider(p) is None
     assert product_rule(p, backend="cuda", task="training")[0] is None
     if torch.cuda.is_available():
         p.cuda()
-        assert host_product_provider(p) == ("eqx_cuda" if existing else None)
+        assert host_product_provider(p) is None
         assert product_rule(p, backend="torch", task="training")[0] is None
         assert (
-            product_rule(p, backend="cuda", task="training", automatic=True)[0] is None
-        )
-        assert (product_rule(p, backend="cuda", task="training")[0] is None) == existing
+            product_rule(p, backend="cuda", task="training", automatic=True)[0]
+            is not None
+        ) == existing
+        assert product_rule(p, backend="cuda", task="training")[0] is not None
         if not existing:
             with monkeypatch.context() as m:
                 m.setattr(p, "_merge_shared_expert", lambda a, b: a - b)
@@ -160,21 +168,30 @@ def test_bilinear_host_selection(monkeypatch, existing):
     not torch.cuda.is_available(), reason="native CUDA bilinear contraction"
 )
 @pytest.mark.parametrize(
-    "experts,shared,agnostic,matrix,elements",
+    "experts,shared,agnostic,matrix,elements,cartesian",
     [
-        (1, False, True, False, 4),
-        (1, False, False, True, 4),
-        (2, False, False, False, 4),
-        (2, True, False, True, 4),
-        (2, True, False, True, 32),
+        (1, False, True, False, 4, False),
+        (1, False, False, True, 4, False),
+        (2, False, False, False, 4, False),
+        (2, True, False, True, 4, False),
+        (2, True, False, True, 32, False),
+        (1, False, True, False, 4, True),
+        (2, True, False, True, 32, True),
     ],
 )
 def test_bilinear_live_second_order(
-    monkeypatch, double_precision, experts, shared, agnostic, matrix, elements
+    monkeypatch,
+    double_precision,
+    experts,
+    shared,
+    agnostic,
+    matrix,
+    elements,
+    cartesian,
 ):
     monkeypatch.setenv("TACE_USE_EQX", "0")
     p = make_bilinear(
-        experts, shared, agnostic, matrix=matrix, elements=elements
+        experts, shared, agnostic, matrix=matrix, elements=elements, cartesian=cartesian
     ).cuda()
     with torch.no_grad():
         for n, v in p.named_parameters():
@@ -189,8 +206,21 @@ def test_bilinear_live_second_order(
     assert not tuple(q.scheduled_contraction.parameters())
     assert not q.scheduled_contraction.state_dict()
     assert not hasattr(p, "scheduled_contraction")
-    x = torch.randn(6, p.irreps_in.dim, device="cuda", requires_grad=True)
-    sc = torch.randn(6, p.irreps_out.dim, device="cuda", requires_grad=True)
+
+    def coordinates(irreps):
+        if cartesian:
+            from equivariantx import co3
+
+            basis = co3.ChangeOfBasis(irreps, backend="torch").cuda()
+            return basis.irreps_in.randn(
+                6, -1, device="cuda", requires_grad=True
+            ), basis
+        return irreps.randn(
+            6, -1, device="cuda", requires_grad=True
+        ), torch.nn.Identity()
+
+    x, input_basis = coordinates(p.irreps_in)
+    sc, residual_basis = coordinates(p.irreps_out)
     direction = torch.randn_like(x)
     types = torch.tensor([3, 1, 0, 1, 2, 3], device="cuda")
     calls = []
@@ -198,8 +228,11 @@ def test_bilinear_live_second_order(
         lambda m, a, out: calls.append((a[3].shape[0], a[4].clone()))
     )
 
+    def forward(layer):
+        return layer(input_basis(x), types, residual_basis(sc), torch.zeros_like(types))
+
     def run(layer):
-        y = layer(x, types, sc, torch.zeros_like(types))
+        y = forward(layer)
         energy = y.square().mean()
         (force,) = torch.autograd.grad(energy, x, create_graph=True)
         grads = torch.autograd.grad(
@@ -226,7 +259,9 @@ def test_bilinear_live_second_order(
             else types
         )
         torch.testing.assert_close(routing, expected_types)
-        assert any(e.key == "eqx::bilinear_ace" for e in prof.key_averages())
+        assert any(
+            e.key == "eqx_tace_product::bilinear_ace" for e in prof.key_averages()
+        )
         for expected, actual in zip((a, da, *ga), (b, db, *gb), strict=True):
             torch.testing.assert_close(expected, actual, atol=5e-11, rtol=5e-10)
         history.append(b)
@@ -239,8 +274,7 @@ def test_bilinear_live_second_order(
     if compact:
         q.eval()
         with torch.no_grad():
-            result = q(x, types, sc, torch.zeros_like(types))
-            torch.testing.assert_close(result, p(x, types, sc, torch.zeros_like(types)))
+            torch.testing.assert_close(forward(q), forward(p))
         rows, routing = calls[-1]
         assert rows == elements  # Inference already needs no species-table adjoints.
         torch.testing.assert_close(routing, types)
@@ -325,8 +359,8 @@ def test_plan_identifies_host_mace_provider(
 ):
     from unittest.mock import patch
 
-    from equivariantx.ops.cuda.mbe.ace import symmetric_contraction as cuda_kernel
-    from equivariantx.ops.torch.mbe.ace import symmetric_contraction as torch_kernel
+    from equivariantx.ops.cuda.o3 import symmetric_contraction as cuda_kernel
+    from equivariantx.ops.torch.o3 import symmetric_contraction as torch_kernel
     from equivariantx_foundation.models.tace.planner import plan
     from equivariantx_foundation.tests.test_tace_plan import make_model
     from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
@@ -371,8 +405,8 @@ def test_plan_identifies_host_mace_provider(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_mace_plan_retarget_efs_and_live_sgd(monkeypatch, double_precision):
-    from equivariantx.ops.cuda.mbe.ace import symmetric_contraction as cuda_kernel
-    from equivariantx.ops.torch.mbe.ace import symmetric_contraction as torch_kernel
+    from equivariantx.ops.cuda.o3 import symmetric_contraction as cuda_kernel
+    from equivariantx.ops.torch.o3 import symmetric_contraction as torch_kernel
     from equivariantx_foundation import optimize
     from equivariantx_foundation.tests.test_tace_plan import (
         EFS,
@@ -440,10 +474,11 @@ def test_mace_plan_retarget_efs_and_live_sgd(monkeypatch, double_precision):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Graph training")
 @pytest.mark.parametrize("kind", ["mace", "nonlinear_cgtp", "bilinear"])
 def test_spherical_product_training_bucket(kind, monkeypatch):
-    from equivariantx.ops.cuda.mbe.ace import bilinear, symmetric_contraction
+    from equivariantx.ops.cuda.o3 import symmetric_contraction
     from equivariantx_foundation import optimize
     from equivariantx_foundation.models.tace import products, training
     from equivariantx_foundation.models.tace.replay_loss import _validate_model
+    from equivariantx_foundation.ops.cuda import bilinear
     from equivariantx_foundation.tests.test_regional_aoti import _cases
     from equivariantx_foundation.tests.test_tace_plan import EFS, make_model
     from tace.models.spherical.tace import SphericalTACE

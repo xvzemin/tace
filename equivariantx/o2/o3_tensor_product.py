@@ -264,7 +264,7 @@ class O3TensorProduct(torch.nn.Module):
 
         torch_kernel.initialize(self, input_components, output_components)
 
-        from ..conv.o2_o3.convolution import O2O3TensorProductConv
+        from .aligned.convolution import O2O3TensorProductConv
 
         self.convolution = O2O3TensorProductConv(self, backend=backend)
 
@@ -423,7 +423,7 @@ class O3TensorProduct(torch.nn.Module):
 
         Notes
         -----
-        Uses :class:`equivariantx.conv.O2O3TensorProductConv` with the selected
+        Uses :class:`equivariantx.o2.O2O3TensorProductConv` with the selected
         backend and supports higher derivatives used in force training.
         """
         if features.ndim != 2 or features.size(1) != self.input_dim:

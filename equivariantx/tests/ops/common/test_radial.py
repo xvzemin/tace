@@ -4,7 +4,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
 from equivariantx import o3 as eqx_o3
 from equivariantx.ops import config
@@ -23,7 +23,7 @@ from equivariantx.ops.common.radial import (
 def test_bipartite_grouped_radial(backend, cartesian, vectors, double_precision):
     from equivariantx import co3
     from equivariantx.nn import GroupedRadialMLP
-    from equivariantx.tests.conv.testing import layout
+    from equivariantx.tests.utils.convolution import layout
 
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -41,9 +41,7 @@ def test_bipartite_grouped_radial(backend, cartesian, vectors, double_precision)
         else o3.TensorProduct(*args, **options)
     ).to(device)
     cls = (
-        eqx_conv.CartesianTensorProductConv
-        if cartesian
-        else eqx_conv.O3TensorProductConv
+        eqx.co3.CartesianTensorProductConv if cartesian else eqx.o3.O3TensorProductConv
     )
     conv = cls(tp, backend=backend, radial_mode="full").to(device)
     net = GroupedRadialMLP(
@@ -143,7 +141,7 @@ def test_indexed_radial_mixed_gradients(backend, double_precision):
         internal_weights=False,
         shared_weights=False,
     )
-    conv = eqx_conv.O3TensorProductConv(tp, backend=backend, radial_mode="full").to(
+    conv = eqx.o3.O3TensorProductConv(tp, backend=backend, radial_mode="full").to(
         device
     )
     hidden = torch.nn.Sequential(torch.nn.Linear(6, 5), torch.nn.SiLU()).to(device)
@@ -158,7 +156,7 @@ def test_indexed_radial_mixed_gradients(backend, double_precision):
         rand(*s) for s in [(3, 2), (7, 1), (7, 2), (4, 2), (2, 2), (5, tp.weight_numel)]
     )
     inputs = (nodes, sh, edge, a, b, weight, *hidden.parameters())
-    bound = eqx_conv.indexed_radial(edge, hidden, ((a, rows), (b, other)))
+    bound = eqx.nn.indexed_radial(edge, hidden, ((a, rows), (b, other)))
     dense = torch.cat((edge, a[rows], b[other]), -1)
     torch.testing.assert_close(bound.forward(edge), hidden(dense))
     torch.testing.assert_close(
@@ -173,7 +171,7 @@ def test_indexed_radial_mixed_gradients(backend, double_precision):
     expected = conv(nodes, sh, hidden(dense), weight, edge_index)
     torch.testing.assert_close(probe(actual), probe(expected))
     with pytest.raises(ValueError, match="one int64 row"):
-        eqx_conv.indexed_radial(edge, hidden, ((a, rows[:-1]),))
+        eqx.nn.indexed_radial(edge, hidden, ((a, rows[:-1]),))
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -549,7 +547,7 @@ def test_materialize_partitions(edges):
 
 
 def test_local_gate_cutoff_factorization(double_precision):
-    from equivariantx.conv.radial import MultiCutoffRadial
+    from equivariantx.nn.radial import MultiCutoffRadial
 
     r = torch.tensor([0.5, 2.0, 2.9, 3.0, 3.1, 5.99, 6.0, 6.1], requires_grad=True)
     inner = (1 - r / 3).clamp_min(0).pow(3)
@@ -589,7 +587,7 @@ def test_multi_cutoff_convolution(backend, edges, paired, double_precision):
             torch.nn.Linear(5, 7), torch.nn.SiLU(), torch.nn.Linear(7, tp.weight_numel)
         ),
     ]
-    model = eqx_conv.MultiCutoffRadial(networks).to(device)
+    model = eqx.nn.MultiCutoffRadial(networks).to(device)
     assert not tuple(model.parameters(recurse=False))
 
     def rand(rows, width):
@@ -598,7 +596,7 @@ def test_multi_cutoff_convolution(backend, edges, paired, double_precision):
     index = torch.tensor([[0, 1, 0, 2, 3, 1, 2], [2, 0, 1, 0, 1, 3, 3]], device=device)[
         :, :edges
     ]
-    pairs = eqx_conv.undirected_edge_pairs(index, num_nodes=4) if paired else None
+    pairs = eqx.utils.undirected_edge_pairs(index, num_nodes=4) if paired else None
     rows = edges if pairs is None else pairs.representatives.numel()
     x, attrs, source = rand(4, 4), rand(edges, 4), rand(4, 2)
     features, envelopes = rand(rows, 3), rand(edges, 2)
@@ -622,7 +620,7 @@ def test_multi_cutoff_convolution(backend, edges, paired, double_precision):
     )
     active = (x, attrs, source, features, shared, envelopes, *model.parameters())
     for mode in ("last", "full"):
-        conv = eqx_conv.O3TensorProductConv(tp, radial_mode=mode, backend=backend).to(
+        conv = eqx.o3.O3TensorProductConv(tp, radial_mode=mode, backend=backend).to(
             device
         )
         radial, projection, network = model.convolution_weights(
@@ -665,7 +663,7 @@ def test_cuda_affine_projection_gradients(kind, width):
     tp_cls = o3.TensorProduct if kind == "o3" else o2.O3TensorProduct
     tp = tp_cls(*args, internal_weights=False, shared_weights=False).float().cuda()
     conv_cls = (
-        eqx_conv.O3TensorProductConv if kind == "o3" else eqx_conv.O2O3TensorProductConv
+        eqx.o3.O3TensorProductConv if kind == "o3" else eqx.o2.O2O3TensorProductConv
     )
     module = conv_cls(tp, backend="cuda").cuda()
     x = torch.randn(3, 8, device="cuda", dtype=torch.float32, requires_grad=True)
@@ -725,7 +723,7 @@ def test_radial_network(kind, width, shared, backend, double_precision):
     if kind == "uu":
         frame = o2.LocalFrame(args[0])
         linear = o2.UuLinear(frame.irreps_out, frame.irreps_out, 2)
-        module = eqx_conv.UuO2TensorProductConv(
+        module = eqx.o2.UuO2TensorProductConv(
             frame, linear, frame, backend=backend, radial_mode="full"
         ).cuda()
     else:
@@ -739,11 +737,11 @@ def test_radial_network(kind, width, shared, backend, double_precision):
             else o2.O3TensorProduct
         )(*args, internal_weights=False, shared_weights=False)
         module = (
-            eqx_conv.CartesianTensorProductConv
+            eqx.co3.CartesianTensorProductConv
             if kind == "cartesian"
-            else eqx_conv.O3TensorProductConv
+            else eqx.o3.O3TensorProductConv
             if kind == "o3"
-            else eqx_conv.O2O3TensorProductConv
+            else eqx.o2.O2O3TensorProductConv
         )(tp, backend=backend, radial_mode="full").cuda()
     network = torch.nn.Sequential(
         torch.nn.Linear(3, width),
@@ -851,7 +849,7 @@ def test_radial_network_compiled(kind, edges, monkeypatch, double_precision):
         shared_weights=False,
     )
     module = (
-        eqx_conv.O3TensorProductConv if kind == "o3" else eqx_conv.O2O3TensorProductConv
+        eqx.o3.O3TensorProductConv if kind == "o3" else eqx.o2.O2O3TensorProductConv
     )(tp, backend="cuda", radial_mode="full").cuda()
     network = torch.nn.Sequential(torch.nn.Linear(6, 8), torch.nn.SiLU()).cuda()
     inputs = [
@@ -995,7 +993,7 @@ def test_convolution_radial_network(cls, num_edges, device, double_precision):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
     tp = cls("2x0e+2x1o", "0e+1o", "2x0e+2x1o+2x2e", shared_weights=False)
-    convolution = getattr(eqx_conv, cls.__name__ + "Conv")(tp).to(device)
+    convolution = getattr(eqx_o3, cls.__name__ + "Conv")(tp).to(device)
     network = torch.nn.Sequential(
         torch.nn.Linear(3, 8), torch.nn.SiLU(), torch.nn.Linear(8, tp.weight_numel)
     ).to(device)

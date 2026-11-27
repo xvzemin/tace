@@ -20,7 +20,7 @@ from ..convolution import (
 class TensorProductScatter(Convolution):
     """Apply an EQX convolution with NequIP's source and destination arguments."""
 
-    _nequip_custom_ops_libs = ("equivariantx.conv",)
+    _nequip_custom_ops_libs = ("equivariantx",)
 
     def forward(self, x, edge_attr, edge_weight, edge_dst, edge_src):
         return super().forward(x, edge_attr, edge_weight, (edge_src, edge_dst))

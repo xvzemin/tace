@@ -8,7 +8,8 @@ import pytest
 import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx import conv, o2
+import equivariantx as eqx
+from equivariantx import o2
 from equivariantx.ops import get_kernel
 from equivariantx.ops.common.o2_o3 import contraction
 from equivariantx.ops.compiler import compile_and_package
@@ -71,7 +72,7 @@ def convolution_case(edges=7, shared=False, projected=True, device="cuda"):
         internal_weights=False,
         shared_weights=False,
     )
-    module = conv.O2O3TensorProductConv(tp, method="wigner").to(device)
+    module = eqx.o2.O2O3TensorProductConv(tp, method="wigner").to(device)
     rows = 1 if shared else edges
     matrix_width = sum((2 * degree + 1) ** 2 for degree in range(tp.lmax + 1))
     shapes = (

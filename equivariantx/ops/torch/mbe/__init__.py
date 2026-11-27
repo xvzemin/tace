@@ -1,1 +1,0 @@
-"""Torch many-body expansions."""

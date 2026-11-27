@@ -5,8 +5,8 @@ from functools import lru_cache
 import torch
 
 from equivariantx.co3 import Projector
-from equivariantx.mbe.ace.generalized import spherical_rows
-from equivariantx.mbe.ace.ictd_symmetric_contraction import coupling_entries
+from equivariantx.co3.ictd_symmetric_contraction import coupling_entries
+from equivariantx.o3.generalized import spherical_rows
 from equivariantx.ops.common.edge import evaluate
 from equivariantx.utils.metadata import numeric_rows
 from equivariantx.utils.program import Program, activate

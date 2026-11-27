@@ -10,7 +10,8 @@ import torch
 from e3nn import o3
 
 from equivariantx import co3, o2
-from equivariantx.conv import EdgePairs, indexed_rows
+from equivariantx.nn import indexed_rows
+from equivariantx.utils import EdgePairs
 
 from ...dataset.quantity import PROPERTIES
 from ...utils.env import acceleration_enabled, eqx_backend, get_tace_use_dens

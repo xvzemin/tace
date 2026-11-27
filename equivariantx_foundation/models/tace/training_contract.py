@@ -308,13 +308,18 @@ def validate_training_model(step, model, objective, data):
 
     adapter = as_joint_export_model(model, data)
     try:
-        trace = trace_joint_training(
-            adapter,
-            objective,
-            data,
-            fixed_shapes=not saved["dynamic"],
-            max_edges=saved["max_edges"],
-        )
+        if getattr(step, "replay_bucket", None) is not None:
+            from ...targets.aoti import _bucket_trace
+
+            trace = _bucket_trace(adapter, objective, data)
+        else:
+            trace = trace_joint_training(
+                adapter,
+                objective,
+                data,
+                fixed_shapes=not saved["dynamic"],
+                max_edges=saved["max_edges"],
+            )
         actual = _training_host_contract(model, objective, trace)
     except Exception as exc:
         raise ValueError(f"Cannot verify joint training model: {exc}") from exc

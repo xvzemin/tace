@@ -68,16 +68,22 @@ def runtime():
     with _RUNTIME_LOCK, ExitStack() as stack:
         if sys.platform == "win32":
             stack.enter_context(os.add_dll_directory(str(cuda_home / "bin")))
-        build_dir = Path(_get_build_directory("eqx_cuda_runtime", False)) / "build"
+        source = (Path(__file__).parent / "csrc" / "runtime.cpp").read_bytes()
+        cache_name = "eqx_cuda_runtime_" + hashlib.sha256(source).hexdigest()[:24]
+        build_dir = Path(_get_build_directory(cache_name, False)) / "build"
         build_dir.mkdir(parents=True, exist_ok=True)
         # Only OS-locked loaders use this directory. The OS releases this lock
         # on exit, so a torch FileBaton left by an interrupted build is stale.
         stack.enter_context(FileLock(str(build_dir) + ".lock", timeout=600))
         (build_dir / "lock").unlink(missing_ok=True)
+        # Ninja includes the absolute source path in its compile command.
+        cached_source = build_dir / "runtime.cpp"
+        if not cached_source.exists() or cached_source.read_bytes() != source:
+            cached_source.write_bytes(source)
         logging.getLogger(__name__).info("Loading EQX CUDA runtime: %s", build_dir)
         return load(
             name="eqx_cuda_runtime",
-            sources=[str(Path(__file__).parent / "csrc" / "runtime.cpp")],
+            sources=[str(cached_source)],
             extra_include_paths=[str(cuda_home / "include")],
             extra_cflags=cflags,
             extra_ldflags=ldflags,

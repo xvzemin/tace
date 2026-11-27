@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Tuple, Union
 import torch
 from e3nn import o3
 
-from equivariantx.conv import undirected_edge_pairs
+from equivariantx.utils import undirected_edge_pairs
 from tace.dataset.neighbour_list import get_neighborhood
 from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, hessian_pair_indices
 from tace.utils.torch_scatter import scatter_sum

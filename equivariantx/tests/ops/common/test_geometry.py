@@ -4,7 +4,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
 
 
@@ -21,8 +21,8 @@ def test_sparse_direction_rotations(source_degree, double_precision):
         internal_weights=False,
         shared_weights=False,
     ).cuda()
-    conv = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").cuda()
-    reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+    conv = eqx.o2.O2O3TensorProductConv(tp, backend="cuda").cuda()
+    reference = eqx.o2.O2O3TensorProductConv(tp, backend="torch").cuda()
     frame = o2.WignerD(5, 5).cuda()
     axes = torch.eye(3, device="cuda")
     vectors = torch.cat(
@@ -77,7 +77,7 @@ def test_direction_coefficients_at_pole(degree, normalization):
             [(0, 0, 0, "uvu", True)],
             normalization=normalization,
         )
-        conv = eqx_conv.O2O3TensorProductConv(tp, backend="cuda")
+        conv = eqx.o2.O2O3TensorProductConv(tp, backend="cuda")
         pole = torch.tensor([0.0, 1.0, 0.0])
 
         def harmonics(vectors):
@@ -153,8 +153,8 @@ def test_direction_derivatives(
             internal_weights=False,
             shared_weights=False,
         ).to(device)
-        plan = eqx_conv.O2O3TensorProductConv(tp, backend=backend).to(device)
-        reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").to(device)
+        plan = eqx.o2.O2O3TensorProductConv(tp, backend=backend).to(device)
+        reference = eqx.o2.O2O3TensorProductConv(tp, backend="torch").to(device)
         frame = o2.WignerD(2, 2).to(device)
         edges = torch.tensor([[0, 1, 2, 0], [2, 2, 1, 1]], device=device)
 
@@ -206,11 +206,10 @@ def test_direction_derivatives(
 def test_direction_zero_order_and_empty_edges(device, projected, method, dtype):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    tp = (
-        o2.O3TensorProduct("2x2e", "0e", "2x2e", [(0, 0, 0, "uvu", True)])
-        .to(device=device, dtype=dtype)
+    tp = o2.O3TensorProduct("2x2e", "0e", "2x2e", [(0, 0, 0, "uvu", True)]).to(
+        device=device, dtype=dtype
     )
-    plan = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device)
+    plan = eqx.o2.O2O3TensorProductConv(tp, backend="cuda").to(device)
     frame = o2.WignerD(2, 2).to(device).double()
     for size in (0, 4):
         x = torch.randn(3, 10, device=device, dtype=dtype, requires_grad=True)
@@ -278,8 +277,8 @@ def test_direction_node_reductions(monkeypatch, channels):
             shared_weights=False,
         ).cuda()
         module, reference = (
-            eqx_conv.O2O3TensorProductConv(tp, backend="cuda"),
-            eqx_conv.O2O3TensorProductConv(tp, backend="torch"),
+            eqx.o2.O2O3TensorProductConv(tp, backend="cuda"),
+            eqx.o2.O2O3TensorProductConv(tp, backend="torch"),
         )
         frame = o2.WignerD(2, 2).cuda()
         edges = torch.randint(37, (2, 1031), device="cuda")
@@ -340,8 +339,8 @@ def test_direction_compile_and_capture(edge_count):
         tp = o2.O3TensorProduct(
             "2x1o", "1o", "2x0e+2x1e", [(0, 0, i, "uvu", True) for i in range(2)]
         ).cuda()
-        plan = eqx_conv.O2O3TensorProductConv(tp, backend="cuda").cuda()
-        reference = eqx_conv.O2O3TensorProductConv(tp, backend="torch").cuda()
+        plan = eqx.o2.O2O3TensorProductConv(tp, backend="cuda").cuda()
+        reference = eqx.o2.O2O3TensorProductConv(tp, backend="torch").cuda()
         frame = o2.WignerD(1, 1).cuda()
         x = torch.randn(3, 6, device="cuda", requires_grad=True)
         vectors = torch.randn(edge_count, 3, device="cuda", requires_grad=True)
@@ -440,7 +439,7 @@ def test_direction_derivatives_on_axes(device):
             shared_weights=False,
         ).to(device)
         plan, frame = (
-            eqx_conv.O2O3TensorProductConv(tp, backend="cuda").to(device),
+            eqx.o2.O2O3TensorProductConv(tp, backend="cuda").to(device),
             o2.WignerD(2, 2).to(device),
         )
         vectors = torch.tensor(

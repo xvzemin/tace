@@ -339,7 +339,7 @@ def test_reference_bypasses_children(device, spherical, monkeypatch, double_prec
 
     from equivariantx.ops import config
     from equivariantx.ops.torch.co2 import o3_tensor_product as kernel
-    from equivariantx.tests.conv.testing import assert_native_autograd
+    from equivariantx.tests.utils.convolution import assert_native_autograd
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")

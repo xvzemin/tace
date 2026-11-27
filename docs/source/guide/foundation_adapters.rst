@@ -111,6 +111,60 @@ can run correctly through native fallback without qualifying as accelerated.
 Joint training with Lightning
 -----------------------------
 
+With the default ``replay_bucket: auto``, a supported 7M, OAM-L or TECE-OAM-RRA
+plan can record up to two recurring batch sizes per GPU for FP32 E/F or E/F/S
+training. Use one GPU or standard NCCL DDP on the default process group with
+``find_unused_parameters=False``, no custom communication hooks and equal
+numbers of training steps on all ranks. Ranks may use different batch shapes
+and independently replay or run an ordinary step. For E/F/S the valid stress
+structure count is reduced once per training batch, independent of the number
+of stress loss terms. E/F adds no forward loss collective.
+
+Automatic recording also supports two-layer spherical CGTP plans with
+64 channels, hidden degree 2 and IEEE FP32 matrix multiplication:
+
+* E/F on one GPU: edge degree 3 and correlation 3.
+* E/F/S on one GPU or two standard NCCL ranks: edge degree 2 and correlation 2, with parity enabled, no
+  ``l1l2`` filters and a single fidelity. Use identity edge embeddings
+  and updates, eight radial basis functions, radial hidden widths
+  ``[64, 64]`` and ``apply_cutoff: false``.
+
+Both use Adam or AdamW and one microbatch per update.
+For E/F/S batches of eight structures, the initial edge limit is 4,096.
+If a batch with 4,097–6,144 edges and at most 256 atoms arrives before the
+first recording, the planner can record larger capacities after a third
+memory probe. Otherwise only the second capacity receives extra edge slots.
+With 16 structures per rank, the E/F/S loader instead records full batches
+with at most 256 atoms and 8,192 edges per rank after three memory probes.
+On two GPUs, either rank can replay while the other takes an ordinary step.
+Partial batches and larger graphs execute without replay. No batch is truncated.
+
+Before recording
+a recurring shape, the planner measures the memory retained by two ordinary
+forwards and budgets for the padded batch against available device memory
+and the process allocator limit
+when available. Large 7M batches require at least 128 remaining updates
+before validation or the end of training to start a new recording. Existing
+recordings can replay through the last update. An unmatched batch uses the
+ordinary Foundation forward and backward and can release recordings under
+memory pressure.
+
+For the regional CGTP E/F/S plan, training recordings can survive a
+validation pass with the standard graph loader. A complete earlier pass
+must have measured the same loader, and each validation batch must fit its
+observed atom, edge and structure bounds. The plan checks free memory
+before validation, before each validation batch and on return to training.
+It reuses a recording only with the original parameter storage, optimizer
+and loss. The standard device-local EMA callback may follow the planner:
+the planner budgets for its temporary backup and resumes only after EMA
+restores the online parameters. Custom validation hooks, other EMA
+configurations, the final validation and other replay modes release the
+training pools. Only recorded capacities persist.
+Samples used to qualify a new capacity belong to the current training interval.
+Set ``replay_bucket: null`` on the callback for a
+comparison without automatic recording. Explicit capacities and training
+packages keep their own execution policies.
+
 For energy and force training, with or without stress, the 7M, OAM-L and
 TECE-OAM-RRA plans can replay a microbatch with a fixed capacity. Replay
 also supports single-fidelity regional plans with standard scalar energy
@@ -230,8 +284,15 @@ and the usual Lightning checkpoint. A training package is not a checkpoint.
 Keep the module structure, trainable parameter set and precision fixed.
 Dynamic packages accept different local atom and edge counts but keep the
 number of structures fixed. Choose batches within the exported shape range.
+For single-GPU FP32 Cartesian UV training on energy, forces and stress,
+use ``export_training(model, objective, batch, "train.pt2",
+replay_bucket=(max_atoms, max_edges, max_graphs))`` instead. Supply unpadded
+batches and their normal sample weights. The same callback packs each batch,
+returns only real predictions, and rejects batches exceeding the exported capacity.
+Fixed-capacity training packages do not support a distributed process group.
+
 Re-export after changing the model computation or the installed build of its
-custom operators. In ordinary DDP, pass local batches to Lightning as usual;
+custom operators. For packages supporting DDP, pass local batches to Lightning as usual;
 do not apply the standalone gradient reduction in addition to DDP.
 
 For standalone data-parallel joint packages, call ``distributed_training_inputs``

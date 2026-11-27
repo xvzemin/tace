@@ -27,10 +27,33 @@ def capture_lifetime():
 
 
 class CapturedTraining:
-    """Capture one explicit joint program per observed input signature."""
+    """Capture and replay explicit joint training programs.
+
+    Parameters
+    ----------
+    adapter : torch.nn.Module
+        Graph and property adapter.
+    loss_fn : torch.nn.Module
+        Tensor loss.
+    workspace : GradientWorkspace
+        Parameter gradient storage.
+    maximum : int
+        Maximum number of captured graphs and pending signatures, each.
+    shared_graph_plan : bool
+        Reuse graph plans within each joint invocation.
+    defer_new_shapes : bool
+        Capture the first signature immediately and new signatures on a repeat.
+    """
 
     def __init__(
-        self, adapter, loss_fn, workspace, maximum=256, shared_graph_plan=True
+        self,
+        adapter,
+        loss_fn,
+        workspace,
+        maximum=256,
+        shared_graph_plan=True,
+        *,
+        defer_new_shapes: bool = False,
     ):
         self.plan_scope = nullcontext
         if shared_graph_plan:
@@ -48,6 +71,8 @@ class CapturedTraining:
         self.stream = torch.cuda.Stream()
         self.entries = OrderedDict()
         self.maximum = maximum
+        self.pending = OrderedDict() if defer_new_shapes else None
+        self.direct_steps = 0
         self.warmups = 0
         self.pool_resets = 0
         self.captures = 0
@@ -125,6 +150,8 @@ class CapturedTraining:
                 # temporary tensors. Parameters and optimizer state stay live.
                 torch.cuda.synchronize(device)
                 self.entries.clear()
+                if self.pending is not None:
+                    self.pending.clear()
                 self.constants.clear()
                 gc.collect()
                 self.memory_pool = torch.cuda.MemPool()
@@ -141,6 +168,16 @@ class CapturedTraining:
             }
             loss_buffer = loss.detach().clone()
             del predictions, loss
+            if (
+                self.pending is not None
+                and self.entries
+                and signature not in self.pending
+            ):
+                self.pending[signature] = None
+                if len(self.pending) > self.maximum:
+                    self.pending.popitem(last=False)
+                self.direct_steps += 1
+                return outputs, loss_buffer
             graph = torch.cuda.CUDAGraph()
             # DataLoader pin-memory threads allocate independently of this graph.
             with (
@@ -166,6 +203,8 @@ class CapturedTraining:
                 loss_buffer.copy_(loss.detach())
             del predictions, loss
             self.entries[signature] = (static, graph, (outputs, loss_buffer), mask)
+            if self.pending is not None:
+                self.pending.pop(signature, None)
             self.captures += 1
             while len(self.entries) > self.maximum:
                 self.entries.popitem(last=False)

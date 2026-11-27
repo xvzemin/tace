@@ -3,9 +3,11 @@
 import logging
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock, Mock
 
@@ -110,6 +112,43 @@ with FileLock(sys.argv[1] + ".lock"):
             assert loaded.is_set()
     finally:
         namespace["_POOL"].shutdown()
+
+
+def test_runtime_cache_across_checkouts(monkeypatch, tmp_path):
+    import torch.utils.cpp_extension as extension
+
+    monkeypatch.setattr(extension, "CUDA_HOME", str(tmp_path))
+    monkeypatch.setattr(os, "add_dll_directory", MagicMock(), raising=False)
+    monkeypatch.setattr(
+        extension,
+        "_get_build_directory",
+        lambda name, verbose: str(tmp_path / "cache" / name),
+    )
+    monkeypatch.setattr(extension, "load", lambda **kw: Path(kw["sources"][0]))
+
+    def load(checkout, source):
+        (checkout / "csrc").mkdir(parents=True, exist_ok=True)
+        (checkout / "csrc" / "runtime.cpp").write_bytes(source)
+        shutil.copyfile(cuda.__file__, checkout / "runtime.py")
+        ns = runpy.run_path(str(checkout / "runtime.py"))
+        try:
+            return ns["runtime"]()
+        finally:
+            ns["_POOL"].shutdown()
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    first = load(a, b"source")
+    os.utime(first, (1000000000, 1000000000))
+    stamp = first.stat().st_mtime_ns
+    assert load(b, b"source") == first
+    assert first.stat().st_mtime_ns == stamp
+    other = load(b, b"changed")
+    assert other.parent != first.parent
+    assert other.read_bytes() == b"changed"
+    assert load(a, b"source") == first
+    assert first.stat().st_mtime_ns == stamp
+    first.write_bytes(b"incomplete")
+    assert load(b, b"source").read_bytes() == b"source"
 
 
 @pytest.mark.parametrize(

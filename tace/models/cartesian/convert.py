@@ -25,9 +25,9 @@ def convert_basis(model, basis="cartesian"):
         Independent model preserving dtype, device, heads and training mode.
         Recreate the optimizer before further training.
     """
+    from equivariantx.o3 import TransposeIrrepsLayout
     from tace.lightning.torch_model import create_model
     from tace.models.adapter import TensorModel
-    from tace.models.layout import LayoutTransform
     from tace.models.linear import switch_e3nn_weight_layout
     from tace.utils.precision import configure_model_precision, torch_default_dtype
 
@@ -88,7 +88,7 @@ def convert_basis(model, basis="cartesian"):
                     "tace.models.cartesian.layers",
                     "tace.models.cartesian.prod",
                 )
-            ) or isinstance(module, LayoutTransform):
+            ) or isinstance(module, TransposeIrrepsLayout):
                 constants.update(
                     f"{name}.{key}" for key, _ in module.named_buffers(recurse=False)
                 )

@@ -92,63 +92,13 @@ def contraction_metadata(
     return repr((0, tuple(channels * d for d in dims), tuple(strided)))
 
 
-class AsymmetricContraction(torch.nn.Module):
-    """Contract independent O(2) inputs into many-body features.
+class ContractionPaths:
+    """Enumerate O(2) coupling labels, output slots and normalization factors."""
 
-    Parameters
-    ----------
-    irreps_in : Irreps, str, or sequence
-        Representation of every independent input. All entries must have one
-        common multiplicity, which is interpreted as the channel count.
-    irreps_out : Irreps, str, or sequence
-        Requested output types. Their multiplicities must equal the common
-        input multiplicity.
-    correlation : int
-        Highest correlation order to enumerate. The module consumes one
-        independent input tensor for every order up to this value.
-    algorithm : {"recursive", "dense"}
-        Batched analytic coupling paths or precomputed generalized coupling
-        tensors. Both use the same paths and external weights.
-    path_mode : {"sum", "expand"}, optional
-        ``"sum"`` accumulates equivalent paths into each requested output
-        type with variance normalization. ``"expand"`` preserves every path
-        as a separate output multiplicity.
-    backend : {None, "torch", "cuda"}, optional
-        ``None`` selects CUDA when available, otherwise optimized PyTorch.
-        PyTorch operations or fused CUDA polynomial evaluation. CUDA requires
-        ``algorithm="recursive"`` and float32 or float64 tensors.
-
-    Notes
-    -----
-    Inputs and outputs use flattened ``ir_mul`` layout. Weights are always
-    supplied externally and are applied directly to the enumerated paths.
-    ``weight_numel`` gives the required trailing weight dimension. Every path
-    multiplies the time parities of its leaves; external weights are invariant.
-
-    Examples
-    --------
-    >>> from equivariantx import o2
-    >>> contraction = o2.AsymmetricContraction("2x1m", "2x0e+2x0o", 2, algorithm="recursive")
-    >>> x, y = torch.randn(5, 4), torch.randn(5, 4)
-    >>> weight = torch.randn(contraction.weight_numel)
-    >>> contraction((x, y), weight).shape
-    torch.Size([5, 4])
-    """
-
-    shared_inputs = False
-
-    def __init__(
-        self,
-        irreps_in: IrrepsLike,
-        irreps_out: IrrepsLike,
-        correlation: int,
-        *,
-        algorithm: str,
-        path_mode: str = "sum",
-        backend: str | None = None,
-    ) -> None:
-        backend = resolve_backend(backend)
-        super().__init__()
+    def __init__(self, irreps_in, irreps_out, correlation, *, path_mode, shared):
+        self.shared_inputs = shared
+        if shared:
+            self.path_normalizations = {}
         self.irreps_in = Irreps(irreps_in)
         muls = {mul for _, mul in self.irreps_in}
         if len(muls) != 1:
@@ -165,13 +115,9 @@ class AsymmetricContraction(torch.nn.Module):
             raise TypeError("correlation must be an integer.")
         if correlation < 1:
             raise ValueError("correlation must be positive.")
-        if algorithm not in ("recursive", "dense"):
-            raise ValueError("algorithm must be 'recursive' or 'dense'.")
         if path_mode not in ("sum", "expand"):
             raise ValueError("path_mode must be 'sum' or 'expand'.")
         self.correlation = correlation
-        self.backend = backend
-        self.algorithm = algorithm
         self.path_mode = path_mode
 
         output_types = []
@@ -270,49 +216,6 @@ class AsymmetricContraction(torch.nn.Module):
         self.input_dim = self.irreps_in.dim
         self.output_dim = self.irreps_out.dim
         self._base_output_slices = Irreps(base_irreps_out.expanded()).slices()
-        self.register_buffer(
-            "_basis_reference", torch.empty(0, dtype=torch.float64), persistent=False
-        )
-        self.set_algorithm(algorithm)
-
-    def build_contraction(self):
-        """Build the selected execution plan without changing the path basis."""
-        arguments = (
-            self._input_irreps,
-            self._paths_by_order,
-            self._path_scales,
-            self._base_input_slices,
-            self._base_output_slices,
-        )
-        from ..ops.torch.o2.contraction import Contraction
-
-        self.contraction = Contraction(
-            *arguments, self._base_irreps_out.dim, shared=self.shared_inputs
-        ).to(self._basis_reference)
-        if self.backend == "cuda":
-            self.kernel_metadata = contraction_metadata(
-                *arguments,
-                self._base_input_dim,
-                self._base_irreps_out.dim,
-                self.num_channels,
-                shared=self.shared_inputs,
-            )
-
-    def set_algorithm(self, algorithm: str) -> None:
-        """Select a contraction order without changing paths or weights."""
-        if algorithm not in ("recursive", "dense"):
-            raise ValueError("algorithm must be 'recursive' or 'dense'.")
-        if self.backend == "cuda" and algorithm != "recursive":
-            raise ValueError("The CUDA backend requires algorithm='recursive'.")
-        if algorithm == "dense" and not hasattr(self, "generalized_cg_1"):
-            self._register_coupling_tensors()
-        elif algorithm == "recursive":
-            self.build_contraction()
-            for order in range(1, self.correlation + 1):
-                name = f"generalized_cg_{order}"
-                if hasattr(self, name):
-                    delattr(self, name)
-        self.algorithm = algorithm
 
     def _enumerate_states(self):
         previous = tuple(
@@ -329,6 +232,8 @@ class AsymmetricContraction(torch.nn.Module):
                         )
             previous = tuple(current)
             states_by_order.append(previous)
+        if self.shared_inputs:
+            return self.symmetric_states(states_by_order)
         return tuple(states_by_order)
 
     def _coupling_tensor(self, path: _Path) -> torch.Tensor:
@@ -354,6 +259,177 @@ class AsymmetricContraction(torch.nn.Module):
                 dims=([-1], [0]),
             ).contiguous()
         return coefficient
+
+    def symmetric_states(self, ordered_states):
+        offsets = []
+        offset = 0
+        for ir in self._input_irreps:
+            offsets.append(offset)
+            offset += ir.dim
+        result = []
+        for states in ordered_states:
+            selected, bases = [], {}
+            for leaves, intermediates in states:
+                if tuple(sorted(leaves)) != leaves:
+                    continue
+                ir = intermediates[-1]
+                if ir not in self.irreps_out_types:
+                    continue
+                coordinates = tuple(
+                    product(
+                        *(
+                            range(offsets[i], offsets[i] + self._input_irreps[i].dim)
+                            for i in leaves
+                        )
+                    )
+                )
+                monomials = sorted({tuple(sorted(x)) for x in coordinates})
+                locations = {x: i for i, x in enumerate(monomials)}
+                coefficient = self._coupling_tensor(_Path(leaves, intermediates, 0))
+                symmetric = coefficient.new_zeros(len(monomials), ir.dim)
+                for indices, value in zip(coordinates, coefficient.reshape(-1, ir.dim)):
+                    symmetric[locations[tuple(sorted(indices))]] += value
+                # Frobenius metric of the symmetrized coefficient tensor.
+                multiplicities = coefficient.new_tensor(
+                    [
+                        math.factorial(len(leaves))
+                        / math.prod(math.factorial(n) for n in Counter(x).values())
+                        for x in monomials
+                    ]
+                )
+                vector = (symmetric / multiplicities.sqrt()[:, None]).flatten()
+                norm = vector.norm()
+                if norm < 1e-12:
+                    continue
+                orthogonal = vector / norm
+                basis = bases.setdefault((leaves, ir), [])
+                for _ in range(2):
+                    for previous in basis:
+                        orthogonal = (
+                            orthogonal - torch.dot(previous, orthogonal) * previous
+                        )
+                length = orthogonal.norm()
+                if length < 1e-10:
+                    continue
+                basis.append(orthogonal / length)
+                selected.append((leaves, intermediates))
+                self.path_normalizations[leaves, intermediates] = math.sqrt(
+                    ir.dim
+                ) / float(norm)
+            result.append(tuple(selected))
+        return tuple(result)
+
+
+class AsymmetricContraction(ContractionPaths, torch.nn.Module):
+    """Contract independent O(2) inputs into many-body features.
+
+    Parameters
+    ----------
+    irreps_in : Irreps, str, or sequence
+        Representation of every independent input. All entries must have one
+        common multiplicity, which is interpreted as the channel count.
+    irreps_out : Irreps, str, or sequence
+        Requested output types. Their multiplicities must equal the common
+        input multiplicity.
+    correlation : int
+        Highest correlation order to enumerate. The module consumes one
+        independent input tensor for every order up to this value.
+    algorithm : {"recursive", "dense"}
+        Batched analytic coupling paths or precomputed generalized coupling
+        tensors. Both use the same paths and external weights.
+    path_mode : {"sum", "expand"}, optional
+        ``"sum"`` accumulates equivalent paths into each requested output
+        type with variance normalization. ``"expand"`` preserves every path
+        as a separate output multiplicity.
+    backend : {None, "torch", "cuda"}, optional
+        ``None`` selects CUDA when available, otherwise optimized PyTorch.
+        PyTorch operations or fused CUDA polynomial evaluation. CUDA requires
+        ``algorithm="recursive"`` and float32 or float64 tensors.
+
+    Notes
+    -----
+    Inputs and outputs use flattened ``ir_mul`` layout. Weights are always
+    supplied externally and are applied directly to the enumerated paths.
+    ``weight_numel`` gives the required trailing weight dimension. Every path
+    multiplies the time parities of its leaves; external weights are invariant.
+
+    Examples
+    --------
+    >>> from equivariantx import o2
+    >>> contraction = o2.AsymmetricContraction("2x1m", "2x0e+2x0o", 2, algorithm="recursive")
+    >>> x, y = torch.randn(5, 4), torch.randn(5, 4)
+    >>> weight = torch.randn(contraction.weight_numel)
+    >>> contraction((x, y), weight).shape
+    torch.Size([5, 4])
+    """
+
+    shared_inputs = False
+
+    def __init__(
+        self,
+        irreps_in: IrrepsLike,
+        irreps_out: IrrepsLike,
+        correlation: int,
+        *,
+        algorithm: str = "recursive",
+        path_mode: str = "sum",
+        backend: str | None = None,
+    ) -> None:
+        torch.nn.Module.__init__(self)
+        super().__init__(
+            irreps_in,
+            irreps_out,
+            correlation,
+            path_mode=path_mode,
+            shared=self.shared_inputs,
+        )
+        self.backend = resolve_backend(backend)
+        self.register_buffer(
+            "_basis_reference", torch.empty(0, dtype=torch.float64), persistent=False
+        )
+        self.set_algorithm(algorithm)
+
+    def build_contraction(self):
+        """Build the selected execution plan without changing the path basis."""
+        arguments = (
+            self._input_irreps,
+            self._paths_by_order,
+            self._path_scales,
+            self._base_input_slices,
+            self._base_output_slices,
+        )
+        from ..ops.common.torch.o2_contraction import Contraction
+
+        self.contraction = Contraction(
+            *arguments,
+            self._base_irreps_out.dim,
+            shared=self.shared_inputs,
+            coupling=coupling_entries,
+        ).to(self._basis_reference)
+        if self.backend == "cuda":
+            self.kernel_metadata = contraction_metadata(
+                *arguments,
+                self._base_input_dim,
+                self._base_irreps_out.dim,
+                self.num_channels,
+                shared=self.shared_inputs,
+            )
+
+    def set_algorithm(self, algorithm: str) -> None:
+        """Select a contraction order without changing paths or weights."""
+        if algorithm not in ("recursive", "dense"):
+            raise ValueError("algorithm must be 'recursive' or 'dense'.")
+        if self.backend == "cuda" and algorithm != "recursive":
+            raise ValueError("The CUDA backend requires algorithm='recursive'.")
+        if algorithm == "dense" and not hasattr(self, "generalized_cg_1"):
+            self._register_coupling_tensors()
+        elif algorithm == "recursive":
+            self.build_contraction()
+            for order in range(1, self.correlation + 1):
+                name = f"generalized_cg_{order}"
+                if hasattr(self, name):
+                    delattr(self, name)
+        self.algorithm = algorithm
 
     def _register_coupling_tensors(self) -> None:
         input_dim = self._base_input_dim
@@ -431,12 +507,12 @@ class AsymmetricContraction(torch.nn.Module):
         torch.Tensor
             Contracted features with shape ``(..., irreps_out.dim)``.
         """
+        if isinstance(inputs, torch.Tensor) or len(inputs) != self.correlation:
+            raise ValueError(
+                f"Expected a sequence of {self.correlation} independent inputs."
+            )
         checked = inputs[:1] if self.shared_inputs else inputs
         validate_module_precision(self, (checked, weight))
-        if len(inputs) != self.correlation:
-            raise ValueError(
-                f"Expected {self.correlation} independent inputs, got {len(inputs)}."
-            )
         for features in checked:
             if features.ndim < 1 or features.size(-1) != self.input_dim:
                 raise ValueError(f"Input trailing dimension must be {self.input_dim}.")
@@ -496,86 +572,6 @@ class SymmetricContraction(AsymmetricContraction):
     """
 
     shared_inputs = True
-
-    def __init__(
-        self,
-        irreps_in,
-        irreps_out,
-        correlation,
-        *,
-        algorithm="recursive",
-        path_mode="sum",
-        backend=None,
-    ):
-        backend = resolve_backend(backend)
-        self.path_normalizations = {}
-        super().__init__(
-            irreps_in,
-            irreps_out,
-            correlation,
-            algorithm=algorithm,
-            path_mode=path_mode,
-            backend=backend,
-        )
-
-    def _enumerate_states(self):
-        offsets = []
-        offset = 0
-        for ir in self._input_irreps:
-            offsets.append(offset)
-            offset += ir.dim
-        result = []
-        for states in super()._enumerate_states():
-            selected, bases = [], {}
-            for leaves, intermediates in states:
-                if tuple(sorted(leaves)) != leaves:
-                    continue
-                ir = intermediates[-1]
-                if ir not in self.irreps_out_types:
-                    continue
-                coordinates = tuple(
-                    product(
-                        *(
-                            range(offsets[i], offsets[i] + self._input_irreps[i].dim)
-                            for i in leaves
-                        )
-                    )
-                )
-                monomials = sorted({tuple(sorted(x)) for x in coordinates})
-                locations = {x: i for i, x in enumerate(monomials)}
-                coefficient = self._coupling_tensor(_Path(leaves, intermediates, 0))
-                symmetric = coefficient.new_zeros(len(monomials), ir.dim)
-                for indices, value in zip(coordinates, coefficient.reshape(-1, ir.dim)):
-                    symmetric[locations[tuple(sorted(indices))]] += value
-                # Frobenius metric of the symmetrized coefficient tensor.
-                multiplicities = coefficient.new_tensor(
-                    [
-                        math.factorial(len(leaves))
-                        / math.prod(math.factorial(n) for n in Counter(x).values())
-                        for x in monomials
-                    ]
-                )
-                vector = (symmetric / multiplicities.sqrt()[:, None]).flatten()
-                norm = vector.norm()
-                if norm < 1e-12:
-                    continue
-                orthogonal = vector / norm
-                basis = bases.setdefault((leaves, ir), [])
-                for _ in range(2):
-                    for previous in basis:
-                        orthogonal = (
-                            orthogonal - torch.dot(previous, orthogonal) * previous
-                        )
-                length = orthogonal.norm()
-                if length < 1e-10:
-                    continue
-                basis.append(orthogonal / length)
-                selected.append((leaves, intermediates))
-                self.path_normalizations[leaves, intermediates] = math.sqrt(
-                    ir.dim
-                ) / float(norm)
-            result.append(tuple(selected))
-        return tuple(result)
 
     def forward(self, features: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Evaluate symmetric powers with external path weights.

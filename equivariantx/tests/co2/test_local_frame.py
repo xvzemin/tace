@@ -43,7 +43,7 @@ def test_reference_backend_routing(device, method, monkeypatch, double_precision
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_projection_reference_bypasses_children(device, monkeypatch, double_precision):
     from equivariantx.ops import config
-    from equivariantx.tests.conv.testing import assert_native_autograd
+    from equivariantx.tests.utils.convolution import assert_native_autograd
 
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")

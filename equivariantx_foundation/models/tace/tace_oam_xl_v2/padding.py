@@ -37,12 +37,12 @@ def enable_padded_readout(readout):
     readout.oam_xl_padded_batches = True
 
 
-def pad_batch(batch, node_multiple, edge_multiple):
+def pad_batch(batch, node_multiple, edge_multiple, *, cutoff=6.0):
     """Round a batch's capacities without changing its physical graphs.
 
     At least 32 dummy atoms distribute the dummy edges and prevent a single
-    exceptionally long CSR row. Periodic self edges have a nonzero vector,
-    avoiding singular spherical harmonics even though their energies are masked.
+    exceptionally long CSR row. Dummy edges join disjoint atom pairs beyond
+    ``cutoff``, independent of the physical cells.
     """
     if node_multiple < 1 or edge_multiple < 1:
         raise ValueError("Padding multiples must be positive")
@@ -75,16 +75,17 @@ def pad_batch(batch, node_multiple, edge_multiple):
             extra[:] = value[0]
         elif key == "batch":
             extra[:] = batch["ptr"].numel() - 2
+        elif key == "positions" and extra_edges:
+            extra[1::2, 0] = cutoff + 1.0
         result[key] = torch.cat((value, extra))
-    dummy = (
-        torch.arange(extra_edges, device=batch["edge_index"].device) % extra_nodes
-        + nodes
+    # Keep complete pairs even when the number of padding atoms is odd.
+    dummy = torch.arange(extra_edges, device=batch["edge_index"].device) % (
+        extra_nodes // 2 * 2
     )
     result["edge_index"] = torch.cat(
-        (batch["edge_index"], torch.stack((dummy, dummy))), dim=1
+        (batch["edge_index"], torch.stack((dummy, dummy ^ 1)) + nodes), dim=1
     )
     shifts = batch["edge_shifts"].new_zeros((extra_edges, 3))
-    shifts[:, 0] = 1
     result["edge_shifts"] = torch.cat((batch["edge_shifts"], shifts))
     result["num_nodes"] = padded_nodes
     return result

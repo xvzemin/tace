@@ -130,14 +130,15 @@ def polynomial_decompositions():
         retains its measured dispatch policy.
     """
     from . import registration  # noqa: F401 - Ensure the schemas exist.
-    from .common.torch.ace import ace_contract, bilinear_contract
+    from .common.polynomial import EXTERNAL_POLYNOMIALS
+    from .common.torch.ace import ace_contract
     from .common.torch.channel_product import channel_product
     from .common.torch.linear import contract
     from .common.torch.symmetric import evaluate_torch
 
     return {
         torch.ops.eqx.ace_contract.default: ace_contract,
-        torch.ops.eqx.bilinear_ace.default: bilinear_contract,
+        **dict(EXTERNAL_POLYNOMIALS.values()),
         torch.ops.eqx.element_linear.default: contract,
         torch.ops.eqx.local_channel_product.default: channel_product,
         torch.ops.eqx.symmetric_contract.default: evaluate_torch,

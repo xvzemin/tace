@@ -11,7 +11,7 @@ import torch
 from e3nn import o3
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.conv import O3TensorProductConv
+from equivariantx.o3 import O3TensorProductConv
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx_foundation.models.tace.tace_oam_xl_v2 import TACEOAMXLV2
 from equivariantx_foundation.models.tace.tace_oam_xl_v2.angular import (
@@ -289,20 +289,44 @@ def test_matrix_plan_lifetime(monkeypatch, tf32_precision):
     assert reference() is None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("edges", [0, 4])
-@pytest.mark.parametrize("reset_pool", [False, True])
-def test_capture_reuses_warmup_and_tracks_live_inputs(monkeypatch, edges, reset_pool):
+@pytest.mark.parametrize(
+    "device,edges,reset_pool,defer",
+    [
+        ("cuda", 0, False, False),
+        ("cuda", 0, True, False),
+        ("cuda", 4, False, False),
+        ("cuda", 4, True, False),
+        ("cuda", 4, False, True),
+        ("cuda", 4, True, True),
+        ("cpu", 4, False, True),
+    ],
+)
+def test_capture_reuses_warmup_and_tracks_live_inputs(
+    monkeypatch, device, edges, reset_pool, defer
+):
+    from contextlib import nullcontext
+
     joint = pytest.importorskip("tace.models.compile.joint")
+    from equivariantx_foundation.models.tace.tace_oam_xl_v2 import extensions
     from equivariantx_foundation.models.tace.tace_oam_xl_v2.capture import (
         CapturedTraining,
     )
 
-    weight = torch.nn.Parameter(torch.tensor([0.2, -0.3, 0.4], device="cuda"))
-    unused = torch.nn.Parameter(torch.ones(1, device="cuda"))
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required for graph recording and replay")
+    if device == "cpu":
+        stream = SimpleNamespace(wait_stream=lambda _: None, synchronize=lambda: None)
+        monkeypatch.setattr(torch.cuda, "MemPool", lambda: SimpleNamespace(id=None))
+        monkeypatch.setattr(torch.cuda, "Stream", lambda: stream)
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda _: stream)
+        monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+        monkeypatch.setattr(torch.cuda, "use_mem_pool", lambda *_: nullcontext())
+        monkeypatch.setattr(extensions, "extension_identity", lambda: None)
+    weight = torch.nn.Parameter(torch.tensor([0.2, -0.3, 0.4], device=device))
+    unused = torch.nn.Parameter(torch.ones(1, device=device))
     adapter = SimpleNamespace(prepare_property_data=lambda data: data)
     workspace = GradientWorkspace([weight, unused])
-    executions = torch.zeros((), device="cuda", dtype=torch.int64)
+    executions = torch.zeros((), device=device, dtype=torch.int64)
     failures = []
 
     class ExplicitProgram:
@@ -310,7 +334,12 @@ def test_capture_reuses_warmup_and_tracks_live_inputs(monkeypatch, edges, reset_
             assert model is adapter
 
         def __call__(self, batch):
-            if reset_pool and batch["positions"].shape[0] == 4 and not failures:
+            failing_size = 5 if defer else 4
+            if (
+                reset_pool
+                and batch["positions"].shape[0] == failing_size
+                and not failures
+            ):
                 failures.append(True)
                 raise torch.OutOfMemoryError("Exercise graph-pool recovery")
             executions.add_(1)
@@ -332,21 +361,34 @@ def test_capture_reuses_warmup_and_tracks_live_inputs(monkeypatch, edges, reset_
         adapter,
         SimpleNamespace(loss_property=["energy"]),
         workspace,
+        maximum=2,
         shared_graph_plan=False,
+        **({"defer_new_shapes": True} if defer else {}),
     )
-    for index, nodes in enumerate((3, 3, 4, 3)):
+    if device == "cpu":
+        # One resident graph; new signatures do not need a CUDA recorder.
+        # The final shape 3 has already aged out of the two-entry pending list.
+        capture.entries[()] = None
+        sizes = (3, 4, 5, 3)
+    elif reset_pool and defer:
+        # Shape 4 is pending when the first attempt at size 5 resets the pool.
+        sizes = (3, 3, 4, 5, 5, 3, 3)
+    else:
+        sizes = (3, 3, 4, 4, 4, 3)
+    for index, nodes in enumerate(sizes):
         if index == 2 and reset_pool:
             capture.constants["previous_pool"] = torch.ones(1, device="cuda")
         with torch.no_grad():
             weight.add_(0.1)
+        unused.grad = torch.ones_like(unused)
         batch = {
-            "positions": torch.arange(nodes * 3, device="cuda")
+            "positions": torch.arange(nodes * 3, device=device)
             .float()
             .reshape(nodes, 3)
             / (index + 2),
-            "energy": torch.tensor([index + 0.5], device="cuda"),
-            "ptr": torch.tensor([0, nodes], device="cuda"),
-            "edge_index": torch.zeros((2, edges), device="cuda", dtype=torch.int64),
+            "energy": torch.tensor([index + 0.5], device=device),
+            "ptr": torch.tensor([0, nodes], device=device),
+            "edge_index": torch.zeros((2, edges), device=device, dtype=torch.int64),
         }
         expected = (batch["positions"] @ weight).square().sum().reshape(1)
         expected_loss = (expected - batch["energy"]).square().sum()
@@ -355,12 +397,66 @@ def test_capture_reuses_warmup_and_tracks_live_inputs(monkeypatch, edges, reset_
         torch.testing.assert_close(result["energy"], expected)
         torch.testing.assert_close(loss, expected_loss)
         torch.testing.assert_close(weight.grad, expected_gradient)
+        assert weight.grad is workspace.views[0]
         assert unused.grad is None
         assert executions.item() == index + 1
-    assert capture.captures == capture.warmups == 2 + int(reset_pool)
+        if device == "cuda" and index < 2:
+            assert (capture.captures, capture.warmups, capture.direct_steps) == (
+                1,
+                1,
+                0,
+            )
+        if device == "cuda" and defer and index == 2:
+            assert (capture.captures, capture.direct_steps) == (1, 1)
+    if device == "cpu":
+        assert (capture.captures, capture.direct_steps, len(capture.pending)) == (
+            0,
+            4,
+            2,
+        )
+        return
+    assert capture.captures == 2 + int(reset_pool)
+    assert capture.direct_steps == (1 + int(reset_pool)) * int(defer)
+    assert capture.warmups == capture.captures + capture.direct_steps
+    assert not capture.pending
     assert len(capture.entries) == 2
     assert capture.pool_resets == int(reset_pool)
     assert "previous_pool" not in capture.constants
+
+
+def test_padding_with_zero_cell_preserves_force_loss_gradients(
+    double_precision, monkeypatch
+):
+    from equivariantx_foundation.models.tace.tace_oam_xl_v2.padding import (
+        enable_padded_readout,
+        pad_batch,
+    )
+    from equivariantx_foundation.tests.test_tace_plan import graph, make_model
+
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    model = make_model().double().train()
+    data = graph("cpu")
+    data["pbc"][-1].zero_()
+    data["lattice"][-1].zero_()
+    n = len(data["positions"])
+    padded = pad_batch(data, 8, 16, cutoff=model.readout_fn.model_config["cutoff"])
+    reference = model(data)
+    enable_padded_readout(model.readout_fn)
+    output = model(padded)
+    torch.testing.assert_close(
+        output["forces"][n:], torch.zeros_like(output["forces"][n:])
+    )
+    output = {**output, "forces": output["forces"][:n]}
+    props = ("energy", "forces", "stress")
+    for key in props:
+        torch.testing.assert_close(output[key], reference[key])
+
+    def gradients(result):
+        loss = sum(result[key].square().sum() for key in props)
+        return torch.autograd.grad(loss, tuple(model.parameters()), allow_unused=True)
+
+    for actual, expected in zip(gradients(output), gradients(reference), strict=True):
+        torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize(

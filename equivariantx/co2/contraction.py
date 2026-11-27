@@ -1,16 +1,15 @@
-"""Symmetric powers of planar Cartesian tensors."""
+"""Channel-wise contractions of planar Cartesian tensors."""
 
 from collections import defaultdict
 from functools import lru_cache
 
 import torch
 
-from ..mbe.ace.generalized import channel_permutation
-from ..o2.contraction import SymmetricContraction as CircularContraction
-from ..o2.contraction import contraction_metadata
+from ..o2.contraction import ContractionPaths, contraction_metadata
 from ..ops import resolve_backend
+from ..ops.common.torch.o2_contraction import Contraction
 from ..ops.precision import validate_module_precision
-from ..ops.torch.o2.contraction import Contraction
+from ..utils.layout import channel_permutation
 from .basis import projector_matrix
 from .irreps import Irrep, Irreps
 from .tensor_product import coupling_entries
@@ -31,8 +30,8 @@ def projected_entries(a, b, c):
     return tuple((*key, w) for key, w in rows.items() if w)
 
 
-class SymmetricContraction(torch.nn.Module):
-    """Contract repeated planar STF features with external path weights.
+class AsymmetricContraction(torch.nn.Module):
+    """Contract independent planar STF features with external path weights.
 
     Parameters
     ----------
@@ -49,10 +48,12 @@ class SymmetricContraction(torch.nn.Module):
     --------
     >>> from equivariantx import co2
     >>> import torch
-    >>> layer = co2.SymmetricContraction("4x1m", "4x0e", 2)
-    >>> layer(torch.randn(3, 8), torch.ones(layer.weight_numel)).shape
+    >>> layer = co2.AsymmetricContraction("4x1m", "4x0o", 2)
+    >>> layer((torch.randn(3, 8), torch.randn(3, 8)), torch.ones(layer.weight_numel)).shape
     torch.Size([3, 4])
     """
+
+    shared_inputs = False
 
     def __init__(
         self, irreps_in, irreps_out, correlation, *, path_mode="sum", backend=None
@@ -60,12 +61,12 @@ class SymmetricContraction(torch.nn.Module):
         super().__init__()
         self.backend = resolve_backend(backend)
         self.irreps_in = Irreps(irreps_in)
-        labels = CircularContraction(
+        labels = ContractionPaths(
             self.irreps_in.circular(),
             Irreps(irreps_out).circular(),
             correlation,
             path_mode=path_mode,
-            backend="torch",
+            shared=self.shared_inputs,
         )
         self.irreps_out = Irreps([(n, Irrep(ir)) for ir, n in labels.irreps_out])
         self.correlation = correlation
@@ -94,7 +95,7 @@ class SymmetricContraction(torch.nn.Module):
             base_in.slices(),
             base_out.slices(),
             base_out.dim,
-            shared=True,
+            shared=self.shared_inputs,
             coupling=projected_entries,
         )
         self.kernel_metadata = None
@@ -122,7 +123,7 @@ class SymmetricContraction(torch.nn.Module):
                 base_in.dim,
                 base_out.dim,
                 self.num_channels,
-                shared=True,
+                shared=self.shared_inputs,
                 coupling=projected_entries,
                 component_layout=(layout(inputs), layout(outputs)),
             )
@@ -134,38 +135,48 @@ class SymmetricContraction(torch.nn.Module):
             "output_order", channel_permutation(expanded).argsort(), persistent=False
         )
 
-    def forward(self, features, weight):
+    def forward(self, inputs, weight):
         """Evaluate the contraction with broadcastable leading dimensions."""
-        validate_module_precision(self, (features, weight))
+        if isinstance(inputs, torch.Tensor) or len(inputs) != self.correlation:
+            raise ValueError(f"Expected a sequence of {self.correlation} factors.")
+        features = inputs[0]
+        factors = inputs[:1] if self.shared_inputs else inputs
+        validate_module_precision(self, (*factors, weight))
         if (
-            features.shape[-1] != self.input_dim
+            any(x.shape[-1] != self.input_dim for x in factors)
             or weight.shape[-1] != self.weight_numel
         ):
             raise ValueError(
                 "Features and weights must match the declared trailing dimensions."
             )
-        leading = torch.broadcast_shapes(features.shape[:-1], weight.shape[:-1])
+        leading = torch.broadcast_shapes(
+            *(x.shape[:-1] for x in factors), weight.shape[:-1]
+        )
         if self.kernel_metadata is not None and features.is_cuda:
             from ..ops.common.channel_product import polynomial_contraction
 
             return polynomial_contraction(
                 self.kernel_metadata,
-                (features,) * self.correlation,
+                inputs,
                 weight,
                 leading,
                 self.output_dim,
-                shared=True,
+                shared=self.shared_inputs,
             )
-        x = features.index_select(-1, self.input_order).expand(*leading, self.input_dim)
-        x = x.reshape(*leading, self.input_width, self.num_channels)
+        packed = tuple(
+            x.index_select(-1, self.input_order)
+            .expand(*leading, self.input_dim)
+            .unflatten(-1, (self.input_width, self.num_channels))
+            for x in factors
+        )
         weights = weight.split(self.weight_splits, -1)
         weights = tuple(
             w.reshape(*w.shape[:-1], n, self.num_channels)
             for w, n in zip(weights, self.order_num_paths)
         )
-        cuda = self.backend == "cuda" and x.is_cuda
+        cuda = self.backend == "cuda" and features.is_cuda
         values = self.contraction(
-            (x,) * self.correlation,
+            packed * self.correlation if self.shared_inputs else packed,
             weights,
             "cuda" if cuda else "torch",
             cuda,
@@ -174,3 +185,20 @@ class SymmetricContraction(torch.nn.Module):
             else None,
         )
         return values.flatten(-2).index_select(-1, self.output_order)
+
+
+class SymmetricContraction(AsymmetricContraction):
+    """Contract repeated planar STF features. Parameters match AsymmetricContraction.
+
+    Examples
+    --------
+    >>> from equivariantx import co2
+    >>> op = co2.SymmetricContraction("4x1m", "4x0e", 2)
+    >>> op(torch.randn(3, 8), torch.ones(op.weight_numel)).shape
+    torch.Size([3, 4])
+    """
+
+    shared_inputs = True
+
+    def forward(self, features, weight):
+        return super().forward((features,) * self.correlation, weight)

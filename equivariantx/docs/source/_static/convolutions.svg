@@ -4,7 +4,7 @@
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#526276"/></marker></defs>
   <rect width="1020" height="478" rx="14" fill="#fff"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#192b3d">
-    <text x="28" y="35" text-anchor="start" font-size="22" font-weight="600">equivariantx.conv: four convolution interfaces</text>
+    <text x="28" y="35" text-anchor="start" font-size="22" font-weight="600">EquivariantX convolution interfaces</text>
     <text x="28" y="119" text-anchor="start" font-size="17" font-weight="600">O3TensorProductConv</text>
     <rect x="300" y="80" width="212" height="66" rx="9" fill="#e4efeb" stroke="#8595a6"/>
     <text x="406" y="119" text-anchor="middle" font-size="17" font-weight="600">Gather</text>

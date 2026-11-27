@@ -23,6 +23,8 @@ Activations
 Tensor products
 ---------------
 
+.. autofunction:: equivariantx.o3.w3j
+
 Available from ``equivariantx.o3`` and its ``cgtp``, ``gtp``, ``mtp``, and ``wigner6j``
 submodules. ``TensorProduct``, ``FullyConnectedTensorProduct``,
 ``FullTensorProduct``, and ``ElementwiseTensorProduct`` retain e3nn instructions,
@@ -47,8 +49,49 @@ See :class:`equivariantx.o3.TensorProduct` for execution options.
 .. autoclass:: equivariantx.o3.Wigner6jTensorProduct
    :members: forward, forward_reference
 
-Grid transforms
----------------
+Sphere sampling and grid transforms
+-----------------------------------
+
+.. autofunction:: equivariantx.o3.s2_points
 
 .. autoclass:: equivariantx.o3.S2Grid
    :members: forward, to_grid, from_grid
+
+Layouts
+-------
+
+.. autoclass:: equivariantx.o3.TransposeIrrepsLayout
+   :members: forward, inverse
+
+Convolutions
+------------
+
+.. autoclass:: equivariantx.o3.O3TensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.o3.GauntTensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.o3.MatrixTensorProductConv
+   :members: forward
+
+.. autoclass:: equivariantx.o3.Wigner6jTensorProductConv
+   :members: forward
+
+Many-body contractions
+----------------------
+
+.. autoclass:: equivariantx.o3.SymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.o3.AsymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.o3.UuuSymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.o3.UuuFullyConnectedSymmetricContraction
+   :members: forward
+
+.. autoclass:: equivariantx.o3.GeneralizedContraction
+   :members: forward

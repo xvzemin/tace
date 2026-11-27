@@ -10,9 +10,10 @@ from typing import Union
 import torch
 from e3nn import o3
 
+import equivariantx as eqx
 from equivariantx import co3, o2
-from equivariantx import conv as eqx_conv
-from equivariantx.mbe.ace import UuuSymmetricContraction as EqxUuuSymmetricContraction
+from equivariantx.o3 import TransposeIrrepsLayout
+from equivariantx.o3 import UuuSymmetricContraction as EqxUuuSymmetricContraction
 from equivariantx.o3.cgtp import TensorProduct as EqxTensorProduct
 from tace.utils.env import (
     acceleration_enabled,
@@ -22,7 +23,6 @@ from tace.utils.env import (
 )
 from tace.utils.torch_scatter import scatter_sum
 
-from ..layout import LayoutTransform
 from ..time_reversal import contains_time_odd_irreps
 from ..utils import repr_without
 from .paths import SymmetricProductPaths, generate_paths
@@ -201,8 +201,18 @@ class UvO2TensorProduct(torch.nn.Module):
         self.irreps_out = o3.Irreps(irreps_out)
         self.local_frame_in = o2.LocalFrame(self.irreps_in)
         self.local_frame_out = o2.LocalFrame(self.irreps_out, reverse=True)
-        self.reshape_in = LayoutTransform(self.irreps_in, layout_out="flatten_ir_mul")
-        self.reshape_out = LayoutTransform(self.irreps_out, layout_out="flatten_ir_mul")
+        self.reshape_in = TransposeIrrepsLayout(
+            self.irreps_in,
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("linear"),
+        )
+        self.reshape_out = TransposeIrrepsLayout(
+            self.irreps_out,
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("linear"),
+        )
         local_irreps_in = self.local_frame_in.irreps_out
         local_irreps_out = self.local_frame_out.irreps_out
         hidden_irreps = local_irreps_out.filter(
@@ -314,7 +324,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
         )
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = eqx_conv.CartesianTensorProductConv(
+        self.eqx_tp = eqx.co3.CartesianTensorProductConv(
             self.tp,
             radial_mode="full" if memory_first() else "last",
             normalize=False,
@@ -422,20 +432,29 @@ class O3TensorProductConv(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        self.eqx_tp = eqx_conv.O3TensorProductConv(
+        self.eqx_tp = eqx.o3.O3TensorProductConv(
             self.tp,
             normalize=False,
             batch_paths=True,
             radial_mode="full" if memory_first() else "last",
         )
-        self.reshape_in = LayoutTransform(
-            self.irreps_in1, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
+        self.reshape_in = TransposeIrrepsLayout(
+            self.irreps_in1,
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_attrs = LayoutTransform(
-            self.irreps_in2, layout_in="flatten_mul_ir", layout_out="flatten_ir_mul"
+        self.reshape_attrs = TransposeIrrepsLayout(
+            self.irreps_in2,
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_out = LayoutTransform(
-            self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+        self.reshape_out = TransposeIrrepsLayout(
+            self.irreps_out,
+            source="ir_mul",
+            target="mul_ir",
+            backend=eqx_backend("conv"),
         )
         backend = select_acceleration("eqx", "luna", "oeq", "cue", kernel="conv")
         self.use_luna = backend == "luna" and bool(instructions)
@@ -593,20 +612,22 @@ class O2TensorProductConv(torch.nn.Module):
             shared_weights=False,
             backend=eqx_backend("conv"),
         )
-        self.eqx_tp = eqx_conv.O2O3TensorProductConv(
+        self.eqx_tp = eqx.o2.O2O3TensorProductConv(
             self.tp,
             radial_mode="full" if memory_first() else "last",
         )
         self.weight_numel = self.tp.weight_numel
-        self.reshape_in = LayoutTransform(
+        self.reshape_in = TransposeIrrepsLayout(
             self.irreps_in1,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_out = LayoutTransform(
+        self.reshape_out = TransposeIrrepsLayout(
             self.irreps_out,
-            layout_in="flatten_ir_mul",
-            layout_out="flatten_mul_ir",
+            source="ir_mul",
+            target="mul_ir",
+            backend=eqx_backend("conv"),
         )
         self.register_buffer(
             "harmonic_degrees",
@@ -698,15 +719,17 @@ class UuO2TensorProductConv(torch.nn.Module):
         self.local_frame_out = o2.LocalFrame(
             self.irreps_out, mmax=self.mmax, reverse=True
         )
-        self.reshape_in = LayoutTransform(
+        self.reshape_in = TransposeIrrepsLayout(
             self.irreps_in,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
-        self.reshape_out = LayoutTransform(
+        self.reshape_out = TransposeIrrepsLayout(
             self.irreps_out,
-            layout_in="flatten_mul_ir",
-            layout_out="flatten_ir_mul",
+            source="mul_ir",
+            target="ir_mul",
+            backend=eqx_backend("conv"),
         )
         self.local_irreps_in = self.local_frame_in.irreps_out
         self.local_irreps_out = self.local_frame_out.irreps_out
@@ -717,7 +740,7 @@ class UuO2TensorProductConv(torch.nn.Module):
             backend=eqx_backend("linear"),
         )
         self.weight_numel = self.linear.weight_numel
-        self.eqx_tp = eqx_conv.UuO2TensorProductConv(
+        self.eqx_tp = eqx.o2.UuO2TensorProductConv(
             self.local_frame_in,
             self.linear,
             self.local_frame_out,
@@ -835,7 +858,7 @@ class Wigner6jTensorProductConv(torch.nn.Module):
         instructions2, irreps_out = generate_paths(
             irreps_out, irreps_mid, irreps_in3, e3nn_mode="uvu"
         )
-        self.eqx_tp = eqx_conv.Wigner6jTensorProductConv(
+        self.eqx_tp = eqx.o3.Wigner6jTensorProductConv(
             irreps_in1,
             irreps_in2,
             irreps_in3,
@@ -875,7 +898,7 @@ class UuuSymmetricContraction(EqxUuuSymmetricContraction):
         Input and output representations with equal multiplicities.
     coupling_tensors : sequence of tuple
         ``(output_index, degree, tensor)`` entries accepted by
-        :class:`equivariantx.mbe.ace.UuuSymmetricContraction`.
+        :class:`equivariantx.o3.UuuSymmetricContraction`.
 
     Notes
     -----

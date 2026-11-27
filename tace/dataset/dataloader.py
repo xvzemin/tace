@@ -213,6 +213,8 @@ def build_statistics_dataloader(
         config.pop("multiprocessing_context", None)
     config["shuffle"] = False
     config["drop_last"] = False
+    # DataLoader draws its worker base seed even for a sequential, zero-worker pass.
+    config["generator"] = torch.Generator().manual_seed(torch.initial_seed())
     config.setdefault(
         "pin_memory",
         str(cfg.get("misc", {}).get("device", "cpu")).startswith("cuda"),

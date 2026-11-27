@@ -3,7 +3,7 @@
 import sys
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import numpy as np
 import pytest
@@ -485,6 +485,19 @@ def test_lightning_training_routes(tmp_path, monkeypatch):
             if isinstance(cb, FoundationTrainingCallback)
         ]
 
+    assert build_trainer(cfg).num_sanity_val_steps == 2
+    for requested, no_valid, fast, expected in (
+        (0, False, True, 0),
+        (3, False, False, 3),
+        (3, True, True, 0),
+    ):
+        configured = {
+            **cfg,
+            "trainer": {**cfg["trainer"], "num_sanity_val_steps": requested},
+            "dataset": {"no_valid_set": no_valid},
+        }
+        assert build_trainer(configured, fast=fast).num_sanity_val_steps == expected
+
     monkeypatch.setenv("TACE_USE_EQX", "1")
     monkeypatch.setenv("TACE_USE_COMPILE", "1")
     assert not providers()
@@ -826,6 +839,469 @@ def test_packaged_fit_owns_only_its_instance_loss(monkeypatch):
     model.forward_loss = replacement
     callback.teardown(None, wrapper, "fit")
     assert model.forward_loss is replacement
+
+
+def test_foundation_auto_replay_eligibility_and_fit_ownership(monkeypatch):
+    from types import SimpleNamespace
+
+    from lightning.pytorch.plugins.precision import Precision
+    from lightning.pytorch.strategies import DDPStrategy, SingleDeviceStrategy
+
+    from equivariantx_foundation.models.tace.replay_loss import OnlineTrainingLoss
+    from tace.lightning.foundation import FoundationTrainingCallback
+
+    model = torch.nn.Linear(2, 1, dtype=torch.float32)
+    source = torch.nn.Linear(2, 1, dtype=torch.float32)
+    source.weight, source.bias = model.weight, model.bias
+    objective = torch.nn.Identity()
+    wrapper = SimpleNamespace(model=model, loss_fn=objective)
+    trainer = SimpleNamespace(
+        strategy=SingleDeviceStrategy(device="cuda"),
+        train_dataloader=SimpleNamespace(batch_size=16),
+        optimizers=[torch.optim.AdamW(model.parameters())],
+        precision_plugin=Precision(),
+        accumulate_grad_batches=1,
+        num_training_batches=256,
+        val_check_batch=256,
+        enable_validation=True,
+        max_steps=-1,
+        global_step=0,
+        fast_dev_run=False,
+        fit_loop=Mock(),
+    )
+    trainer.fit_loop.epoch_loop.batch_progress.current.completed = 0
+    first, second = Mock(), Mock()
+    admit = Mock(side_effect=(first, second))
+    monkeypatch.setattr(OnlineTrainingLoss, "try_create", admit)
+
+    def start(callback):
+        callback._source = source
+        wrapper.model = model
+        callback.on_train_epoch_start(trainer, wrapper)
+
+    for options in (
+        {"replay_bucket": None},
+        {"backend": "torch"},
+        {"training_package": "model.pt2"},
+    ):
+        start(FoundationTrainingCallback(**options))
+    for key, value in (
+        ("num_training_batches", 8),
+        ("num_training_batches", None),
+        ("num_training_batches", float("nan")),
+        ("val_check_batch", 8),
+        ("val_check_batch", None),
+        ("val_check_batch", 0),
+        ("val_check_batch", "00:05:00"),
+        ("max_steps", 8),
+        ("accumulate_grad_batches", 2),
+        ("strategy", DDPStrategy()),
+        ("optimizers", []),
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(trainer, key, value)
+            start(FoundationTrainingCallback())
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.distributed, "is_initialized", lambda: True)
+        start(FoundationTrainingCallback())
+    with monkeypatch.context() as patch:
+        patch.setattr(trainer, "val_check_batch", 64)
+        patch.setattr(
+            trainer.fit_loop.epoch_loop.batch_progress.current, "completed", 60
+        )
+        start(FoundationTrainingCallback())
+    with monkeypatch.context() as patch:
+        patch.setattr(trainer, "num_training_batches", float("inf"))
+        patch.setattr(trainer, "val_check_batch", float("inf"))
+        start(FoundationTrainingCallback())
+    replacement = object()
+    model.forward_loss = replacement
+    start(FoundationTrainingCallback())
+    assert model.forward_loss is replacement
+    del model.forward_loss
+    admit.assert_not_called()
+
+    callback = FoundationTrainingCallback()
+    start(callback)
+    assert model.forward_loss is first and not hasattr(source, "forward_loss")
+    callback.on_train_epoch_start(trainer, wrapper)
+    admit.assert_called_once_with(
+        model, trainer.optimizers[0], objective, ddp=False, batch_size=16
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(trainer, "max_steps", 64)
+        patch.setattr(trainer, "global_step", 48)
+        assert first.allow_capture(16)
+        assert not first.allow_capture(128)
+        patch.setattr(trainer, "global_step", 49)
+        assert not first.allow_capture(16)
+    callback.on_validation_start(trainer, wrapper)
+    first.clear.assert_called_once()
+    assert model.forward_loss is first
+    first.clear.reset_mock()
+    callback.on_exception(trainer, wrapper, RuntimeError("interrupted"))
+    first.clear.assert_called_once()
+    assert wrapper.model is source and not hasattr(model, "forward_loss")
+
+    start(callback)
+    assert model.forward_loss is second
+    model.forward_loss = replacement
+    callback.teardown(trainer, wrapper, "fit")
+    second.clear.assert_called_once()
+    assert model.forward_loss is replacement and wrapper.model is source
+
+
+def test_foundation_replay_across_validation(monkeypatch):
+    from types import SimpleNamespace
+
+    from lightning.pytorch.callbacks import Callback
+    from torch_geometric.loader import DataLoader
+
+    from equivariantx_foundation.models.tace.replay_loss import (
+        OnlineTrainingLoss,
+        _loss_signature,
+    )
+    from tace.dataset.datamodule import GraphDataModule
+    from tace.lightning.foundation import FoundationTrainingCallback
+    from tace.utils.callbacks import EMACallback
+    from tace.utils.loss.normal import NormalLoss
+
+    callback = FoundationTrainingCallback()
+    wrapper = torch.nn.Module()
+    model = wrapper.model = torch.nn.Linear(2, 1)
+    objective = wrapper.loss_fn = NormalLoss(
+        ["energy", "forces", "stress"],
+        ["mse_energy_per_atom", "mse_forces", "mse_stress"],
+        [1.0] * 3,
+    )
+    optimizer = torch.optim.AdamW(model.parameters())
+    step = OnlineTrainingLoss(
+        model, optimizer, objective, _loss_signature(objective), "regional_cgtp", None
+    )
+    callback._step, callback._source = (model, step), model
+    model.forward_loss = step
+    step.clear, step.can_retain = Mock(), Mock(return_value=True)
+    step.can_resume = Mock(
+        side_effect=lambda m, opt, loss: m.training and loss is objective
+    )
+    batch = dict(positions=torch.zeros(4, 3), edge_index=torch.zeros(2, 8), ptr=[0, 4])
+    trainer = SimpleNamespace(
+        datamodule=GraphDataModule.__new__(GraphDataModule),
+        val_dataloaders=DataLoader([batch]),
+        num_val_batches=[1],
+        reload_dataloaders_every_n_epochs=0,
+        callbacks=[callback],
+        should_stop=False,
+        max_epochs=3,
+        current_epoch=0,
+        max_steps=-1,
+        global_step=0,
+        optimizers=[optimizer],
+        strategy=SimpleNamespace(root_device=torch.device("cuda:0")),
+    )
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _: 1024)
+
+    def validate(data=batch):
+        model.eval()
+        callback.on_validation_start(trainer, wrapper)
+        callback.on_validation_batch_start(trainer, wrapper, data, 0)
+        callback.on_validation_end(trainer, wrapper)
+        model.train()
+
+    validate()
+    step.clear.assert_called_once()  # First complete validation measures its footprint.
+    step.clear.reset_mock()
+    step.policy.choose((40, 900, 8))
+    assert step.policy.pending and step.policy.probe is not None
+    validate()
+    assert not step.policy.pending and step.policy.probe is None
+    step.can_resume.assert_not_called()
+    callback.on_train_batch_start(trainer, wrapper, batch, 0)
+    step.can_resume.assert_called_once_with(model, optimizer, objective)
+    step.clear.assert_not_called()
+
+    validate()
+    replacement = wrapper.loss_fn = deepcopy(objective)
+    callback.on_train_batch_start(trainer, wrapper, batch, 0)
+    step.can_resume.assert_called_with(model, optimizer, replacement)
+    step.clear.assert_called_once()
+    wrapper.loss_fn = objective
+    step.clear.reset_mock()
+    validate({**batch, "edge_index": torch.zeros(2, 9)})
+    step.clear.assert_called_once()  # The previously measured shape no longer covers it.
+    step.clear.reset_mock()
+    step.can_retain.side_effect = (True, False)
+    validate()  # Another consumer can claim memory after validation starts.
+    step.clear.assert_called_once()
+    step.can_retain.side_effect = None
+
+    class CustomValidation(Callback):
+        def on_validation_epoch_start(self, trainer, pl_module):
+            pass
+
+    ema = EMACallback(device="cpu")
+    ema.initialize(wrapper)
+    initial = model.weight.detach().clone()
+    ema.ema.shadow_params[0].zero_()
+    for other in (ema, CustomValidation()):
+        step.clear.reset_mock()
+        trainer.callbacks = [other, callback]
+        if other is ema:
+            ema.on_validation_start(trainer, wrapper)
+            torch.testing.assert_close(model.weight, torch.zeros_like(initial))
+        validate()
+        step.clear.assert_called_once()
+        if other is ema:
+            ema.on_validation_end(trainer, wrapper)
+            torch.testing.assert_close(model.weight, initial)
+
+    explicit = FoundationTrainingCallback(replay_bucket=(4, 8))
+    explicit._step = model, step
+    step.clear.reset_mock()
+    explicit.on_validation_start(trainer, wrapper)
+    step.clear.assert_called_once()
+
+
+def test_foundation_native_ema_validation_retention(monkeypatch):
+    from types import SimpleNamespace
+
+    from torch_geometric.loader import DataLoader
+
+    from equivariantx_foundation.models.tace.replay_loss import OnlineTrainingLoss
+    from tace.dataset.datamodule import GraphDataModule
+    from tace.lightning.foundation import (
+        FoundationTrainingCallback,
+        _profile_validation,
+    )
+    from tace.utils.callbacks import EMACallback
+
+    plan, ema = FoundationTrainingCallback(), EMACallback()
+    module = torch.nn.Module()
+    module.device = torch.device("cpu")
+    model = module.model = torch.nn.Linear(2, 1)
+    objective = module.loss_fn = torch.nn.MSELoss()
+    opt = torch.optim.AdamW(model.parameters())
+    step = OnlineTrainingLoss(
+        model, opt, objective, (("energy", "forces", "stress"),), "regional_cgtp", None
+    )
+    plan._source, plan._step, model.forward_loss = model, (model, step), step
+    step.clear, step.can_retain, step.can_resume = (
+        Mock(),
+        Mock(return_value=True),
+        Mock(return_value=True),
+    )
+    batch = dict(positions=torch.zeros(4, 3), edge_index=torch.zeros(2, 8), ptr=[0, 4])
+    trainer = SimpleNamespace(
+        datamodule=GraphDataModule.__new__(GraphDataModule),
+        val_dataloaders=DataLoader([batch]),
+        reload_dataloaders_every_n_epochs=0,
+        num_val_batches=[1],
+        callbacks=[plan, ema],
+        should_stop=False,
+        max_epochs=3,
+        current_epoch=0,
+        max_steps=-1,
+        global_step=0,
+        optimizers=[opt],
+        strategy=SimpleNamespace(root_device=module.device),
+        sanity_checking=True,
+    )
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda _: 1024)
+    initial = model.weight.detach().clone()
+    address = model.weight.data_ptr()
+    size = sum(p.numel() * p.element_size() for p in model.parameters())
+
+    def start():
+        model.eval()
+        plan.on_validation_start(trainer, module)
+        ema.on_validation_start(trainer, module)
+        plan.on_validation_batch_start(trainer, module, batch, 0)
+        plan.on_validation_end(trainer, module)
+
+    def restore():
+        ema.on_validation_end(trainer, module)
+        torch.testing.assert_close(model.weight, initial)
+        assert model.weight.data_ptr() == address
+        model.train()
+        plan.on_train_batch_start(trainer, module, batch, 0)
+
+    start()  # Sanity can qualify one complete pass, even with an unbound native EMA.
+    restore()
+    step.clear.assert_called_once()
+    assert plan._validation_profile.ema is ema
+    step.clear.reset_mock()
+    trainer.sanity_checking = False
+    ema.ema.shadow_params[0].zero_()
+    start()
+    assert not torch.count_nonzero(model.weight)
+    assert step.can_retain.call_args_list[-2:] == [
+        call(1024, extra_bytes=size),
+        call(1024),
+    ]
+    restore()
+    step.can_resume.assert_called_once_with(model, opt, objective)
+    step.clear.assert_not_called()
+
+    start()
+    plan.on_train_batch_start(
+        trainer, module, batch, 0
+    )  # An unfinished swap cannot resume.
+    step.clear.assert_called_once()
+    restore()
+    step.clear.reset_mock()
+    trainer.current_epoch = 2
+    start()
+    restore()
+    step.clear.assert_called_once()  # Final validation never keeps graphs.
+
+    class OtherEMA(EMACallback):
+        pass
+
+    for callbacks in (
+        [ema, plan],
+        [plan, ema, ema],
+        [plan, OtherEMA()],
+        [plan, EMACallback(device="cpu")],
+    ):
+        trainer.callbacks = callbacks
+        assert _profile_validation(trainer, plan, module) is None
+    trainer.callbacks = [plan, ema]
+    for owner, key, invalid in (
+        (ema, "pending_state", {}),
+        (ema, "owner", lambda: None),
+        (ema.ema, "_params_refs", []),
+        (ema.ema, "shadow_params", [p.double() for p in ema.ema.shadow_params]),
+        (ema.ema, "copy_to", lambda: None),
+    ):
+        with monkeypatch.context() as change:
+            change.setattr(owner, key, invalid)
+            assert _profile_validation(trainer, plan, module) is None
+
+
+def test_foundation_ddp_auto_admission(monkeypatch):
+    from types import SimpleNamespace
+
+    from lightning.pytorch.plugins.precision import Precision
+    from lightning.pytorch.strategies import DDPStrategy
+    from torch.nn.parallel import DistributedDataParallel
+
+    from equivariantx_foundation.models.tace.replay_loss import OnlineTrainingLoss
+    from tace.lightning import foundation
+
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    objective = SimpleNamespace(loss_property=("energy", "forces", "stress"))
+    wrapped = SimpleNamespace(model=model, loss_fn=objective)
+    strategy = DDPStrategy(parallel_devices=[torch.device("cuda:0")])
+    ddp = DistributedDataParallel.__new__(DistributedDataParallel)
+    torch.nn.Module.__init__(ddp)
+    ddp.module = wrapped
+    ddp.process_group = torch.distributed.group.WORLD
+    ddp._comm_hooks = []
+    ddp.parameters_to_ignore = set()
+    ddp.static_graph = ddp.find_unused_parameters = False
+    ddp.broadcast_buffers = True
+    ddp.require_backward_grad_sync = ddp.require_forward_param_sync = True
+    ddp._join_config = SimpleNamespace(enable=False)
+    strategy.model = ddp
+    trainer = SimpleNamespace(
+        strategy=strategy,
+        optimizers=[optimizer],
+        precision_plugin=Precision(),
+        accumulate_grad_batches=1,
+        num_training_batches=64,
+        train_dataloader=SimpleNamespace(batch_size=8),
+        num_val_batches=[4],
+        val_check_batch=64,
+        enable_validation=True,
+        max_steps=-1,
+        fast_dev_run=False,
+        global_step=0,
+        fit_loop=Mock(),
+    )
+    trainer.fit_loop.epoch_loop.batch_progress.current.completed = 0
+    dist = torch.distributed
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda: "nccl")
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    admit = Mock(return_value=Mock())
+    monkeypatch.setattr(OnlineTrainingLoss, "try_create", admit)
+    agree = foundation._agree_ddp_replay
+    peer = []
+
+    def reduce(vote, op):
+        assert op == dist.ReduceOp.MIN
+        if peer:
+            other = vote.new_tensor(peer)
+            vote.copy_(vote.minimum(torch.stack((other, -other))))
+
+    reduce = Mock(side_effect=reduce)
+    monkeypatch.setattr(dist, "all_reduce", reduce)
+
+    def cpu_vote(trainer, objective, step, remaining):
+        cpu_trainer = SimpleNamespace(**vars(trainer))
+        cpu_trainer.strategy = SimpleNamespace(root_device="cpu")
+        return agree(cpu_trainer, objective, step, remaining)
+
+    monkeypatch.setattr(foundation, "_agree_ddp_replay", cpu_vote)
+
+    def run(expected_admit, expected_install, expected_votes=1):
+        callback = foundation.FoundationTrainingCallback()
+        callback._defer_auto_ddp = True
+        callback._source = torch.nn.Identity()
+        admit.reset_mock()
+        reduce.reset_mock()
+        callback.on_train_epoch_start(trainer, wrapped)
+        callback.on_train_epoch_start(trainer, wrapped)
+        assert reduce.call_count == expected_votes
+        if expected_admit:
+            admit.assert_called_once_with(
+                model, optimizer, objective, ddp=True, batch_size=8
+            )
+        else:
+            admit.assert_not_called()
+        assert hasattr(model, "forward_loss") == expected_install
+        if expected_install:
+            assert model.forward_loss is admit.return_value
+            del model.forward_loss
+
+    run(True, True)
+    with monkeypatch.context() as patch:
+        # A sanity-validation forward does not disable DDP training sync.
+        patch.setattr(ddp, "require_forward_param_sync", False)
+        run(True, True)
+        patch.setattr(ddp, "require_backward_grad_sync", False)
+        run(False, False)
+    for remote in (
+        [0, 64, 64, 4, 64],
+        [1, 64, 64, 4, 64],
+        [2, 63, 64, 4, 64],
+        [2, 64, 60, 4, 64],
+        [2, 64, 64, 3, 64],
+        [2, 64, 64, 4, 63],
+    ):
+        peer[:] = remote
+        run(True, False)
+    peer.clear()
+    for owner, key, value in (
+        (ddp, "static_graph", True),
+        (ddp, "find_unused_parameters", True),
+        (ddp, "_comm_hooks", [object()]),
+        (ddp, "broadcast_buffers", False),
+        (ddp, "require_backward_grad_sync", False),
+        (ddp, "parameters_to_ignore", {"weight"}),
+        (ddp._join_config, "enable", True),
+        (strategy, "_ddp_comm_hook", object()),
+        (trainer, "accumulate_grad_batches", 2),
+        (trainer, "max_steps", 8),
+        (trainer, "fast_dev_run", True),
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(owner, key, value)
+            run(False, False)
+    with monkeypatch.context() as patch:
+        patch.setattr(ddp, "process_group", object())
+        run(False, False, expected_votes=0)
 
 
 def test_foundation_callback_ordinary_fit_and_native_load(precision_model, tmp_path):

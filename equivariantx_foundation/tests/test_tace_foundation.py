@@ -355,10 +355,10 @@ def test_rra_throughput_selects_one_graph_for_available_workspace(monkeypatch):
 
 @pytest.mark.parametrize("matrix", [False, True])
 def test_message_transpose_preserves_individual_path_layout_and_normalization(matrix):
+    from equivariantx.o3 import TransposeIrrepsLayout
     from equivariantx_foundation.models.tace.tace_oam_l.convolution import (
         MessageTranspose,
     )
-    from tace.models.layout import LayoutTransform
     from tace.models.linear import e3nnLinear
 
     raw = o3.Irreps("3x0e + 2x1o + 2x1o + 2x1o + 4x2e + 4x2e")
@@ -372,9 +372,7 @@ def test_message_transpose_preserves_individual_path_layout_and_normalization(ma
         .double()
         .requires_grad_(False)
     )
-    layout = LayoutTransform(
-        raw, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
-    )
+    layout = TransposeIrrepsLayout(raw, source="ir_mul", target="mul_ir")
     rng = torch.Generator().manual_seed(42)
     primal = torch.randn(
         7, raw.dim, generator=rng, dtype=torch.float64, requires_grad=True

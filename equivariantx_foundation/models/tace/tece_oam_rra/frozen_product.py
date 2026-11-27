@@ -3,10 +3,11 @@
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import BilinearContraction
 from equivariantx.o3 import ElementLinear
 from tace.models.linear import has_lora
 from tace.models.spherical.tece_oam_rra import BilinearMoEACE
+
+from ..bilinear import BilinearContraction
 
 
 def matrices(module):

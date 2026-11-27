@@ -93,8 +93,9 @@ their own implementation.
 
 For extension and benchmarking criteria, see [Adding a TACE execution schedule](#adding-a-tace-execution-schedule).
 
-With `backend="cuda"`, compatible second-order TACE bilinear products can fuse
-their angular contraction and coefficient map. Expert, shared and gate weights
+The Foundation TACE adapter fuses compatible spherical and ICTD second-order
+bilinear products with their coefficient maps on CUDA. Ordinary TACE evaluates
+the product and coefficient maps separately. Expert, shared and gate weights
 remain trainable. Small training batches gather only the species rows used by
 the bilinear contraction. Explicit CUDA can also fuse eligible asymmetric
 path-gated products and use CUDA for eligible FP32 multi-block spherical
@@ -153,9 +154,25 @@ The explicit `joint_training` task is the specialized XL-v2 training entry,
 not a prerequisite for training other architectures.
 Use `regional_only=True` to request per-layer matching on an eager model
 even when its architecture also supports a whole-model schedule.
-`tace-fast-train` selects a checkpoint- and optimizer-compatible training
-plan. `tace-train` keeps the host model and its generic EQX/AOTInductor path.
-For fixed-capacity E/F or E/F/S training, set `replay_bucket` in the
+`tace-fast-train` selects the captured schedule for the matching from-scratch
+XL-v2 E/F/S recipe and the usual Foundation planner otherwise.
+`+fast_schedule=foundation` selects the latter explicitly.
+`tace-train` keeps the host model and its generic EQX/AOTInductor path.
+The default `replay_bucket: auto` learns recurring E/F(/S) batch sizes for
+supported release models on one GPU or with standard NCCL DDP. Each rank can
+replay or run an ordinary step for its own batch. Regional spherical CGTP
+also supports automatic recording with two layers, 64 channels, hidden
+degree 2 and IEEE FP32 matmul. E/F uses one GPU, edge degree 3 and correlation
+3. E/F/S uses one GPU or two NCCL ranks, edge degree 2 and correlation 2 with the
+[single-fidelity parity-complete configuration](../docs/source/guide/foundation_adapters.rst).
+Its recordings can persist across measured, read-only validation with the
+standard graph loader, including the standard device-local EMA callback
+after the planner when memory covers its temporary backup. Custom validation
+hooks and unsupported EMA configurations release the recordings.
+The planner checks memory headroom before
+recording. Set `replay_bucket: null`
+to retain ordinary Foundation training without graph recording.
+For explicit fixed-capacity E/F or E/F/S training, set `replay_bucket` in the
 Foundation callback. Supported spherical and Cartesian plans can replay on
 one GPU or with NCCL DDP.
 On the fast entry, the optional `training_package` on

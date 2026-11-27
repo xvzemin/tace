@@ -230,7 +230,12 @@ def test_foreign_aoti_export_registers_only_referenced_eqx_namespaces(
     tmp_path, monkeypatch
 ):
     package = tmp_path / "model.pt2"
-    operators = ("eqx_oam_l_conv::affine", "aten::mm", "vendor::user_op")
+    operators = (
+        "eqx_oam_l_conv::affine",
+        "eqx_tace_product::bilinear_ace",
+        "aten::mm",
+        "vendor::user_op",
+    )
     with zipfile.ZipFile(package, "w") as archive:
         for model, targets in (("model", operators), ("other", ("eqx_unused::f",))):
             archive.writestr(
@@ -247,14 +252,20 @@ def test_foreign_aoti_export_registers_only_referenced_eqx_namespaces(
     runner = Compiled()
     monkeypatch.setattr(torch._inductor, "aoti_load_package", lambda *a, **kw: runner)
     with zipfile.ZipFile(package) as archive:
-        assert aoti._package_namespaces(archive) == ["eqx_oam_l_conv"]
+        assert aoti._package_namespaces(archive) == [
+            "eqx_oam_l_conv",
+            "eqx_tace_product",
+        ]
     if not torch.cuda.is_available():
         with pytest.raises(RuntimeError, match="requires an NVIDIA CUDA device"):
             aoti.load(package)
         assert not imports
         return
     assert aoti.load(package) is runner
-    assert imports == ["equivariantx_foundation.models.tace.tace_oam_l.convolution"]
+    assert imports == [
+        "equivariantx_foundation.models.tace.tace_oam_l.convolution",
+        "equivariantx_foundation.ops.bilinear",
+    ]
 
 
 def test_standalone_fixed_input_guard(monkeypatch):

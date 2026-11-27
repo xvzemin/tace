@@ -8,7 +8,7 @@ from sys import modules
 import torch
 from e3nn import o3
 
-from equivariantx.conv import O3TensorProductConv as EQXConvolution
+from equivariantx.o3 import O3TensorProductConv as EQXConvolution
 from equivariantx.ops.precision import cpu_matmul_allowed
 from tace.models.mlp import MLPV1, MLPV2
 from tace.models.spherical.fused import O3TensorProductConv
@@ -300,30 +300,30 @@ def _weighted_uvu(tp):
 
 def host_interaction_provider(layer):
     """Identify the unchanged convolution selected by the host on this device."""
-    from equivariantx import conv as kernels
+    import equivariantx as eqx
     from tace.models.spherical import fused, inter, mtace, o2
 
     types = {
         inter.O3CgtpInteraction: (fused.O3TensorProductConv, EQXConvolution),
         inter.O3IctdInteraction: (
             fused.O3CartesianTensorProductConv,
-            kernels.CartesianTensorProductConv,
+            eqx.co3.CartesianTensorProductConv,
         ),
         inter.O2CgtpInteraction: (
             fused.O2TensorProductConv,
-            kernels.O2O3TensorProductConv,
+            eqx.o2.O2O3TensorProductConv,
         ),
         inter.UuO2Interaction: (
             fused.UuO2TensorProductConv,
-            kernels.UuO2TensorProductConv,
+            eqx.o2.UuO2TensorProductConv,
         ),
         inter.UvO2Interaction: (
             o2.UvO2TensorProductConv,
-            kernels.UvO2TensorProductConv,
+            eqx.o2.UvO2TensorProductConv,
         ),
         mtace.O2MagneticInteraction: (
             mtace.MagneticUvO2TensorProductConv,
-            kernels.UvO2TensorProductConv,
+            eqx.o2.UvO2TensorProductConv,
         ),
     }
     expected = types.get(type(layer))

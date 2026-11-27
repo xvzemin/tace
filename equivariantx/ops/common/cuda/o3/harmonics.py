@@ -29,7 +29,7 @@ def angular_source(
     if transverse:
         normalization = normalization[1]
     if isinstance(normalization, tuple):
-        from .....conv.co3.polynomials import component_powers, harmonic_polynomial
+        from .....co3.conv.polynomials import component_powers, harmonic_polynomial
 
         if normalization[0] == "cartesian_symmetric":
             from .....co3.symmetric import symmetric_powers

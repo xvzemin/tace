@@ -1,6 +1,8 @@
 """Device-local energy and force replay with optional stress."""
 
+import logging
 from collections import OrderedDict
+from math import ceil
 from threading import get_ident
 
 import torch
@@ -16,6 +18,7 @@ from .matching import custom_forward
 from .training import (
     FixedShapeTrainingStep,
     PaddedEFSLoss,
+    UnsupportedReplayBatch,
     _regional_bucket_model,
     _released_bucket_model,
     _replay_ddp_group,
@@ -409,6 +412,10 @@ def _bind_parameter_loss(parameters, gradients):
     return attach
 
 
+class _ReplayBindingChanged(ValueError):
+    pass
+
+
 class BucketedTrainingLoss:
     """Bind atom/edge/structure replay capacities to the live training model.
 
@@ -445,6 +452,8 @@ class BucketedTrainingLoss:
     stress is requested. DDP owns parameter reductions, including no_sync.
     """
 
+    _trim_before_capture = False
+
     def __init__(self, model, optimizer, objective, capacity, *, ddp=False):
         if type(ddp) is not bool:
             raise ValueError("ddp must be a boolean")
@@ -473,7 +482,7 @@ class BucketedTrainingLoss:
                 None
             )
 
-    def __call__(self, batch, loss_fn):
+    def __call__(self, batch, loss_fn, *, _global_stress=False):
         if (
             loss_fn is not self.objective
             or not torch.is_grad_enabled()
@@ -495,7 +504,7 @@ class BucketedTrainingLoss:
                 "A training replay belongs to its original CUDA stream and thread."
             )
         if self.step is not None and not self._state.matches(self.model):
-            raise ValueError(
+            raise _ReplayBindingChanged(
                 "Model state, hooks, configuration or precision changed since bucket capture; clear or rebuild the training plan."
             )
         graphs = len(batch["ptr"]) - 1
@@ -523,18 +532,26 @@ class BucketedTrainingLoss:
         else:
             targets = self.targets
         stress = "stress" in targets
+        if _global_stress and not (ddp and stress):
+            raise ValueError("Global stress counts require a DDP E/F/S binding.")
         with torch.no_grad():
             packed = pack_efs_training_batch(
-                self.model, batch, *capacity, stress=stress
+                self.model,
+                batch,
+                *capacity,
+                stress=stress,
+                _global_stress=_global_stress,
             )
             if ddp:
                 if self._group is not _replay_ddp_group():
                     raise ValueError("The replay DDP process group changed")
-                if stress:
+                if stress and not _global_stress:
                     from tace.utils.loss.common import prepare_tensor_loss_counts
 
                     packed = prepare_tensor_loss_counts(packed, ("stress",))
         if cached is None:
+            if self._trim_before_capture:
+                torch.cuda.empty_cache()
             step = FixedShapeTrainingStep(
                 self.model,
                 self.optimizer,
@@ -577,3 +594,443 @@ class BucketedTrainingLoss:
         loss = attach_loss(out["loss"])
         self.replays += 1
         return predictions, loss
+
+
+def _scaled_workspace(nbytes, source, target):
+    n, e, g = source
+    m, f, h = target
+    # The padded forward has an extra node, an edge slot per node and a graph slot.
+    return ceil(
+        nbytes * max(1, (m + 1) / (n + 1), (f + m) / (e + n), (h + 1) / (g + 1))
+    )
+
+
+def _replay_headroom(device):
+    free, total = torch.cuda.mem_get_info(device)
+    fraction = getattr(torch.cuda, "get_per_process_memory_fraction", None)
+    if fraction is not None and (limit := fraction(device)) < 1:
+        total = int(total * limit)
+        free = min(free, total - torch.cuda.memory_reserved(device))
+    return max(0, free - total // 10)
+
+
+class _ReplayCapacities:
+    def __init__(self, limits=(256, 8192, 8), *, wide_edges=0, full_batches_only=False):
+        self.limits = limits
+        self.wide_edges = wide_edges
+        self.full_batches_only = full_batches_only
+        self.wide = False
+        self.pending = OrderedDict()
+        self.probe = None
+        self.workspace = 0
+
+    def clear_probes(self):
+        self.pending.clear()
+        self.probe = None
+        self.workspace = 0
+
+    def choose(self, shape, live=()):
+        self.probe = None
+        self.workspace = 0
+        nmax, emax, gmax = self.limits
+        full_batch = bool(self.wide_edges and shape[2] == gmax)
+        if self.full_batches_only and shape[2] != gmax:
+            return None
+        if min(shape) < 1 or shape[0] > nmax or shape[2] > gmax:
+            return None
+        if full_batch and not live and emax < shape[1] <= self.wide_edges:
+            self.wide = True
+        wide = full_batch and (self.wide or self.full_batches_only)
+        if wide:
+            emax = self.wide_edges
+        if shape[1] > emax:
+            return None
+
+        def fits(cap):
+            return (
+                all(x <= y for x, y in zip(shape, cap)) and 2 * cap[1] <= 5 * shape[1]
+            )
+
+        def smallest(caps):
+            return min(
+                (c for c in caps if fits(c)),
+                key=lambda c: (sum(c[:2]), c),
+                default=None,
+            )
+
+        cap = smallest(live)
+        if cap is not None or len(live) >= 2:
+            return cap
+        key = smallest(self.pending) or tuple(1 << (n - 1).bit_length() for n in shape)
+        samples = self.pending.pop(key, [])
+        if len(samples) < (3 if wide else 2):
+            self.probe = [shape, 0]
+            samples.append(self.probe)
+            self.pending[key] = samples
+            if len(self.pending) > 8:
+                self.pending.popitem(last=False)
+            return None
+        n, e, g = map(max, zip(shape, *(s for s, _ in samples), strict=True))
+        if wide:
+            factor = 1.125 if live else 1
+            cap = (
+                min(nmax, 16 * ceil(n * factor / 16)),
+                min(emax, 512 * ceil(e * factor / 512)),
+                g,
+            )
+            if not fits(cap):
+                return None
+        else:
+            cap = min(n + 1, nmax), min(e + 8, emax), g
+            if full_batch and live:
+                larger = cap[0], min(emax, ceil(1.125 * cap[1])), g
+                if fits(larger):
+                    cap = larger
+        if all(size > 0 for _, size in samples):
+            self.workspace = max(_scaled_workspace(size, s, cap) for s, size in samples)
+        return cap
+
+
+class OnlineTrainingLoss:
+    """Compute a Lightning loss and its requested E/F or E/F/S observables."""
+
+    # Maximum atom/edge/structure capacity and free GiB required at admission.
+    _families = {
+        "tace_oam_7m": ((1536, 65536, 85), 6),
+        "tace_oam_l": ((160, 8192, 16), 6),
+        "tece_oam_rra": ((144, 6400, 16), 12),
+        "regional_cgtp": ((256, 4096, 8), 6),
+    }
+
+    @staticmethod
+    def _regional_recipe(model, *, scheduled):
+        from tace.models.spherical.inter import O3CgtpInteraction
+        from tace.models.spherical.prod import CgtpACE
+
+        from .interactions import StreamedInteraction
+        from .products import _ScheduledCgtpACE
+
+        host = model.readout_fn
+        rep = getattr(host, "representation", None)
+        interaction = StreamedInteraction if scheduled else O3CgtpInteraction
+        product = _ScheduledCgtpACE if scheduled else CgtpACE
+        if (
+            len(getattr(rep, "interactions", ())) != 2
+            or len(getattr(rep, "products", ())) != 2
+            or any(type(m) is not interaction for m in rep.interactions)
+            or any(type(m) is not product for m in rep.products)
+        ):
+            return None
+        cfg = host.model_config
+        if (cfg["num_channel"], cfg["Lmax"]) != (64, 2):
+            return None
+        targets = set(model.get_target_property())
+        orders = tuple(m.correlation for m in rep.products)
+        if targets == {"energy", "forces"} and (cfg["lmax"], orders) == (3, (3, 3)):
+            return "ef"
+        if (
+            targets == {"energy", "forces", "stress"}
+            and (cfg["lmax"], orders) == (2, (2, 2))
+            and cfg["parity"] is True
+            and model.num_fidelities == 1
+            and all(m.l1l2 is None for m in (*rep.interactions, *rep.products))
+            and cfg["edge_update"]["type"]
+            == cfg["edge_embedding"]["type"]
+            == "identity"
+            and cfg["radial_basis"]["hidden"] in ([64, 64], (64, 64))
+            and cfg["radial_basis"]["num_radial_basis"] == 8
+            and not cfg["radial_basis"]["apply_cutoff"]
+        ):
+            return "efs"
+        return None
+
+    @classmethod
+    def ddp_candidate(cls, model):
+        from .planner import release_schedule
+
+        return (
+            release_schedule(model, task="training_buckets")[0] is not None
+            or cls._regional_recipe(model, scheduled=False) == "efs"
+        )
+
+    @classmethod
+    def _family(cls, model):
+        from .planner import release_schedule
+
+        if _released_bucket_model(model):
+            return release_schedule(model, task="training_buckets")[0]
+        if (
+            torch.get_float32_matmul_precision() == "highest"
+            and _regional_bucket_model(model)
+            and cls._regional_recipe(model, scheduled=True)
+        ):
+            return "regional_cgtp"
+        return None
+
+    @staticmethod
+    def _owns_parameters(model, optimizer):
+        return {p for p in model.parameters() if p.requires_grad} == {
+            p for group in optimizer.param_groups for p in group["params"]
+        }
+
+    @classmethod
+    def try_create(cls, model, optimizer, objective, *, ddp=False, batch_size=None):
+        if (
+            type(optimizer) not in (torch.optim.Adam, torch.optim.AdamW)
+            or torch.distributed.is_initialized() != ddp
+            or torch.is_autocast_enabled("cuda")
+            or not torch.is_grad_enabled()
+            or not model.training
+            or hasattr(model, "forward_loss")
+            or not cls._owns_parameters(model, optimizer)
+        ):
+            return None
+        family = cls._family(model)
+        if family not in cls._families or (
+            ddp
+            and family == "regional_cgtp"
+            and (
+                torch.distributed.get_world_size() != 2
+                or "stress" not in model.get_target_property()
+            )
+        ):
+            return None
+        try:
+            group = _replay_ddp_group() if ddp else None
+            _validate_model(model, properties=getattr(objective, "loss_property", ()))
+            signature = _loss_signature(objective)
+            PaddedEFSLoss(objective, _ddp=ddp)
+        except (AttributeError, ValueError):
+            return None
+        return cls(
+            model, optimizer, objective, signature, family, group, batch_size=batch_size
+        )
+
+    def __init__(
+        self, model, optimizer, objective, signature, family, group, *, batch_size=None
+    ):
+        self.model, self.optimizer, self.objective = model, optimizer, objective
+        self.signature = signature
+        self.family = family
+        self._group = group
+        self._global_stress = group is not None and "stress" in signature[0]
+        limits, free_gib = self._families[family]
+        regional_stress = family == "regional_cgtp" and "stress" in signature[0]
+        full_batches_only = regional_stress and batch_size == 16
+        wide_edges = 6144 if regional_stress else 0
+        if full_batches_only:
+            limits = (256, 8192, 16)
+            wide_edges = limits[1]
+        self.policy = _ReplayCapacities(
+            limits, wide_edges=wide_edges, full_batches_only=full_batches_only
+        )
+        self.fast_limits = (
+            (512, 32768, 32)
+            if family == "tace_oam_7m"
+            else (limits[0], wide_edges or limits[1], limits[2])
+        )
+        self.min_free = free_gib * 2**30
+        self._tight_memory_attempted = False
+        self.workspaces = {}
+        self.runner = None
+        self.disabled = False
+        self.allow_capture = None
+
+    def clear(self):
+        if self.runner is not None:
+            self.runner.clear()
+            self.runner = None
+        self.policy.clear_probes()
+        self.policy.wide = False
+        self.workspaces.clear()
+
+    def can_retain(self, peak, *, extra_bytes=0):
+        """Leave the validation reserve free after an upcoming allocation (e.g. EMA.store)."""
+        if not (
+            self.family == "regional_cgtp"
+            and "stress" in self.signature[0]
+            and not self.disabled
+            and self.runner is not None
+            and self.runner.step is not None
+            and self.workspaces
+            and peak > 0
+        ):
+            return False
+        reserve = max(self.min_free, 2 * peak + 2**30)
+        return _replay_headroom(self.runner.step.device) >= reserve + extra_bytes
+
+    def can_resume(self, model, optimizer, objective):
+        """Check a retained recording after validation restores training mode."""
+        runner = self.runner
+        if not (
+            runner is not None
+            and runner.step is not None
+            and model is self.model
+            and model.training
+            and optimizer is self.optimizer
+            and objective is self.objective
+            and self._owns_parameters(model, optimizer)
+            and runner._thread == get_ident()
+            and runner._stream == torch.cuda.current_stream(runner.step.device)
+            and runner._state.matches(model)
+        ):
+            return False
+        try:
+            return self.signature == _loss_signature(objective)
+        except (AttributeError, ValueError):
+            return False
+
+    def _eager(self, batch, objective):
+        data = self.model.prepare_property_data(batch)
+        predictions = self.model(data)
+        return predictions, objective(predictions, data)
+
+    def _can_capture(self, workspace, device):
+        if not workspace:
+            return False
+        free = _replay_headroom(device)
+        if free >= max(self.min_free, 4 * workspace + 2**30):
+            return True
+        if (
+            self.family != "tece_oam_rra"
+            or self.workspaces
+            or self._tight_memory_attempted
+        ):
+            return False
+        self._tight_memory_attempted = True
+        required = max(self.min_free, 2 * workspace + 2**30)
+        if free < required:
+            if (
+                torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+                < required - free
+            ):
+                return False
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
+            free = _replay_headroom(device)
+        return free >= required
+
+    def _unrecorded(self, batch, objective, shape):
+        device = batch["positions"].device
+        probe = self.policy.probe
+        if self.workspaces:
+            estimate = min(
+                _scaled_workspace(size, cap, shape)
+                for cap, size in self.workspaces.items()
+            )
+            if _replay_headroom(device) < max(self.min_free, 2 * estimate):
+                self.clear()
+                torch.cuda.empty_cache()
+                probe = None
+        if probe is None:
+            return self._eager(batch, objective)
+        before = torch.cuda.memory_allocated(device)
+        outputs = self._eager(batch, objective)
+        probe[1] = max(0, torch.cuda.memory_allocated(device) - before)
+        return outputs
+
+    def __call__(self, batch, objective):
+        try:
+            unchanged = self.signature == _loss_signature(objective)
+        except (AttributeError, ValueError):
+            unchanged = False
+        if self._group is not None:
+            if self._group is not _replay_ddp_group():
+                raise ValueError("The automatic replay DDP process group changed")
+            if objective is not self.objective or not unchanged:
+                raise ValueError(
+                    "Distributed automatic replay requires its original loss configuration"
+                )
+            if self._global_stress:
+                from tace.utils.loss.common import prepare_tensor_loss_counts
+
+                # Every rank reduces structure counts before its local route decision.
+                batch = prepare_tensor_loss_counts(batch, ("stress",))
+        if (
+            self.disabled
+            or objective is not self.objective
+            or not self.model.training
+            or not torch.is_grad_enabled()
+            or torch.is_autocast_enabled("cuda")
+            or (self._group is None and torch.distributed.is_initialized())
+            or any(v.requires_grad for v in batch.values() if torch.is_tensor(v))
+        ):
+            return self._eager(batch, objective)
+        if not unchanged:
+            self.clear()
+            self.disabled = True
+            return self._eager(batch, objective)
+        shape = (
+            len(batch["positions"]),
+            batch["edge_index"].size(1),
+            len(batch["ptr"]) - 1,
+        )
+        live = self.runner.capacity if self.runner is not None else ()
+        cap = self.policy.choose(shape, live)
+        if cap is None:
+            return self._unrecorded(batch, objective, shape)
+        if cap not in live:
+            window = (
+                16
+                if all(x <= y for x, y in zip(cap, self.fast_limits, strict=True))
+                else 128
+            )
+            if self.allow_capture is not None and not self.allow_capture(window):
+                return self._unrecorded(batch, objective, shape)
+            if self._family(self.model) != self.family or not self._owns_parameters(
+                self.model, self.optimizer
+            ):
+                self.clear()
+                self.disabled = True
+                return self._eager(batch, objective)
+            workspace = self.policy.workspace
+            if not self._can_capture(workspace, batch["positions"].device):
+                return self._unrecorded(batch, objective, shape)
+            if self.runner is None:
+                try:
+                    self.runner = BucketedTrainingLoss(
+                        self.model,
+                        self.optimizer,
+                        objective,
+                        (cap,),
+                        ddp=self._group is not None,
+                    )
+                except ValueError:
+                    self.disabled = True
+                    return self._eager(batch, objective)
+                self.runner._trim_before_capture = True
+            else:
+                self.runner.capacity = replay_capacity((*live, cap))
+        try:
+            outputs = (
+                self.runner(batch, objective, _global_stress=True)
+                if self._global_stress
+                else self.runner(batch, objective)
+            )
+            if cap not in live:
+                self.workspaces[cap] = workspace
+                logging.getLogger(__name__).info(
+                    "Recorded %s training on %s: %d atoms, %d edges, %d structures",
+                    self.family,
+                    batch["positions"].device,
+                    *cap,
+                )
+            return outputs
+        except UnsupportedReplayBatch:
+            # Only input-schema rejection is recoverable here, not a kernel or model error.
+            if cap not in live:
+                if not live:
+                    self.clear()
+                else:
+                    self.runner._steps.pop(cap, None)
+                    self.runner.capacity = live
+        except _ReplayBindingChanged:
+            self.clear()
+            self.disabled = True
+        except torch.OutOfMemoryError:
+            # The private VJP performs no optimizer update and does not write p.grad.
+            self.disabled = True
+        if self.disabled and self.runner is not None:
+            self.clear()
+            torch.cuda.empty_cache()
+        return self._unrecorded(batch, objective, shape)

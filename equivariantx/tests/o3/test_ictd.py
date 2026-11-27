@@ -1,10 +1,12 @@
 """Irreducible tensor decomposition tests."""
 
+from itertools import product
+
 import pytest
 import torch
 from e3nn import o3
 
-from equivariantx import o2
+from equivariantx import co3, o2
 from equivariantx import o3 as eqx_o3
 from equivariantx.tests.utils.testing import (
     DEVICE,
@@ -16,6 +18,73 @@ from equivariantx.tests.utils.testing import (
     check_ictd_precision_and_derivatives,
     check_ictd_projectors,
 )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_w3j_mixed_bases(dtype, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    degrees = (2, 3, 2)
+    symbol = o3.wigner_3j(*degrees, dtype=dtype, device=device)
+    assert torch.equal(eqx_o3.w3j(*degrees, dtype=dtype, device=device), symbol)
+    assert co3.w3j is eqx_o3.w3j
+    q = [co3.path_matrix(l) for l in degrees]
+    a, b, c = [p.to(symbol) for p in q]
+    x, y = (torch.randn(7, 2 * l + 1, dtype=dtype, device=device) for l in degrees[:2])
+    expected = torch.einsum("bi,bj,ijk->bk", x, y, symbol)
+    for selected in product((False, True), repeat=3):
+        paths = tuple(p if use else None for p, use in zip(q, selected))
+        tensor = eqx_o3.w3j(*degrees, paths=paths, dtype=dtype, device=device)
+        assert tensor.is_contiguous()
+        assert tensor.shape == tuple(
+            3**l if use else 2 * l + 1 for l, use in zip(degrees, selected)
+        )
+        value = torch.einsum(
+            "bi,bj,ijk->bk",
+            x @ a.T if selected[0] else x,
+            y @ b.T if selected[1] else y,
+            tensor,
+        )
+        torch.testing.assert_close(value, expected @ c.T if selected[2] else expected)
+        # Unit covariance in the independent output coordinates, not in all 3**l entries.
+        projector = (
+            c @ c.T if selected[2] else torch.eye(c.size(1), dtype=dtype, device=device)
+        )
+        flat = tensor.flatten(0, 1)
+        torch.testing.assert_close((2 * degrees[2] + 1) * flat.T @ flat, projector)
+
+
+@pytest.mark.parametrize("lout", [1, 2])
+def test_w3j_cartesian_normalization(lout, double_precision):
+    degrees = (2, 2, lout)
+    weights = co3.w3j(*degrees, paths=tuple(co3.path_matrix(l) for l in degrees))
+    x, y = (torch.randn(8, 5) @ co3.path_matrix(2).T for _ in range(2))
+    expected = (2 * lout + 1) ** 0.5 * torch.einsum("bi,bj,ijk->bk", x, y, weights)
+    for cls in (co3.ictd.TensorProduct, co3.ictp.TensorProduct):
+        tp = cls("2e", "2e", f"{lout}e", [(0, 0, 0, "uuu", False)], backend="torch")
+        torch.testing.assert_close(tp(x, y), expected, rtol=1e-13, atol=1e-13)
+
+
+def test_w3j_repeated_irrep_paths(double_precision):
+    decomp = eqx_o3.ICTD(3)
+    indices = [i for i, path in enumerate(decomp.paths) if path[-1].l == 1]
+    paths = [decomp.path_matrix(i) for i in indices]
+    assert len(paths) == 3 and decomp._buffers["change_of_basis"] is None
+    x, y = torch.randn(4, 27), torch.randn(4, 3)
+    expected = decomp(x)
+    for i, q in zip(indices, paths):
+        c = eqx_o3.w3j(1, 1, 0, paths=(q, None, None))
+        torch.testing.assert_close(
+            torch.einsum("bi,bj,ij->b", x, y, c[..., 0]),
+            (expected[:, decomp.slices[i]] * y).sum(-1) / 3**0.5,
+        )
+    with pytest.raises(ValueError, match="one entry"):
+        eqx_o3.w3j(1, 1, 0, paths=(q, None))
+    with pytest.raises(ValueError, match=r"paths\[2\]"):
+        eqx_o3.w3j(1, 1, 0, paths=(None, None, q))
+    with pytest.raises(TypeError, match=r"paths\[0\]"):
+        eqx_o3.w3j(1, 1, 0, paths=(q.to(torch.complex128), None, None))
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

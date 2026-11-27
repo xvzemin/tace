@@ -357,7 +357,7 @@ class CustomProduct(CgtpACE):
 
 
 def test_cartesian_storage_does_not_select_spherical_kernels(monkeypatch):
-    from equivariantx.conv.co3 import CartesianTensorProductConv
+    from equivariantx.co3.conv import CartesianTensorProductConv
     from equivariantx_foundation.models.tace import plan, planner, tace_oam_l
     from tace.models.cartesian.tace import CartesianTACE
 
@@ -728,7 +728,6 @@ def test_hip_pair_provider_is_host_owned_and_device_guarded(
     from contextlib import ExitStack
 
     from equivariantx_foundation.models.tace import plan
-    from equivariantx_foundation.models.tace.planner import optimize_model
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
     source = physics_model("direct_hessian").to(device).eval()

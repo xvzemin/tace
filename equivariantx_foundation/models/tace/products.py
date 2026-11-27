@@ -10,17 +10,18 @@ from types import SimpleNamespace
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import (
-    BilinearContraction,
+from equivariantx import co3
+from equivariantx.o3 import (
+    ElementLinear,
+    MoEElementLinear,
+    TransposeIrrepsLayout,
     UuuFullyConnectedSymmetricContraction,
 )
-from equivariantx.mbe.ace.generalized import CouplingBlock, GeneralizedContraction
-from equivariantx.o3 import ElementLinear, MoEElementLinear
 from equivariantx.o3.cgtp import TensorProduct as EqxTensorProduct
+from equivariantx.o3.generalized import CouplingBlock, GeneralizedContraction
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.ops.common.torch.spherical_product import SphericalProduct
 from equivariantx.ops.precision import cpu_matmul_allowed
-from tace.models.layout import LayoutTransform
 from tace.models.linear import (
     e3nnElementLinear,
     e3nnLinear,
@@ -34,6 +35,8 @@ from tace.models.spherical.prod import CgtpACE, MaceACE, NonlinearCgtpACE, TaceA
 from tace.models.spherical.tece_oam_rra import BilinearMoEACE
 from tace.utils.env import acceleration_enabled
 
+from .bilinear import BilinearContraction
+from .ictd_bilinear import IctdBilinearContraction
 from .matching import custom_forward
 from .nonlinear_ace import build_product
 
@@ -240,7 +243,10 @@ def spherical_bucket_product(module):
             and type(op) is BilinearContraction
             and op.backend == "cuda"
             and op.tensor_products[0] is module.aces[0].tp
-            and not any(k in vars(module) for k in ("_contract", "_linear_up_features"))
+            and not any(
+                k in vars(module)
+                for k in ("_contract", "_bilinear_coefficients", "_linear_up_features")
+            )
             and ((op.shared is None) == (not hasattr(module, "shared_coefs")))
             and (
                 op.shared is None
@@ -279,7 +285,7 @@ def spherical_bucket_product(module):
             and not hasattr(op, "fused_tp")
             and op.has_terms
             and op.layout == "mul_ir"
-            and type(module.reshape) is LayoutTransform
+            and type(module.reshape) is TransposeIrrepsLayout
             and (
                 type(module.linear_up) is torch.nn.Identity
                 or local_linear(module.linear_up)
@@ -368,6 +374,56 @@ def _select_mace_backend(candidate, *, backend):
 class _ScheduledBilinearMoEACE(BilinearMoEACE):
     """Fuse only the second-order coefficient term; keep all weights external."""
 
+    def _bilinear_coefficients(self, features, base, gates, node_type):
+        coef = self.coefs[1]
+        elements = getattr(coef, "num_elements", 1)
+        experts = getattr(coef, "num_experts", 1)
+        weight = (
+            torch.cat([w.reshape(elements, experts, -1) for w in coef.weight], dim=-1)
+            if coef.use_matrix_weight
+            else coef.weight.reshape(elements, experts, -1)
+        )
+        types = (
+            node_type
+            if hasattr(coef, "num_elements")
+            else torch.zeros(
+                features.shape[0], device=features.device, dtype=torch.long
+            )
+        )
+        shared = self.shared_coefs[1] if hasattr(self, "shared_coefs") else None
+        shared_weight = None
+        if shared is not None:
+            shared_weight = (
+                torch.cat([w.flatten() for w in shared.weight])
+                if shared.use_matrix_weight
+                else shared.weight
+            )
+        output = self._contract(features, base, gates, weight, types, shared_weight)
+        if shared is not None and shared.bias is not None:
+            output = (
+                output
+                + shared.bias.index_select(-1, shared._bias_index) * shared._bias_mask
+            )
+        if coef.bias is None:
+            return output
+        if hasattr(coef, "num_experts"):
+            outputs = [
+                output[:, sl].reshape(features.shape[0], experts, mul, dim)
+                for sl, mul, dim in zip(
+                    coef._output_slices, coef._output_expert_muls, coef._output_dims
+                )
+            ]
+            bias = coef.bias[types]
+            for i, start, end in coef._bias_out_indices:
+                outputs[i] = outputs[i] + bias[:, :, start:end].unsqueeze(-1)
+            return torch.cat([value.flatten(1) for value in outputs], dim=-1)
+        bias = (
+            coef.bias.reshape(elements, -1)[node_type]
+            if hasattr(coef, "num_elements")
+            else coef.bias
+        )
+        return output + bias.index_select(-1, coef._bias_index) * coef._bias_mask
+
     def _contract(self, features, base, gates, weight, types, shared_weight):
         # The mixed adjoints allocate outputs with one row for every input
         # coefficient row. For a small batch taken from a large species table,
@@ -378,6 +434,7 @@ class _ScheduledBilinearMoEACE(BilinearMoEACE):
         if (
             self.training
             and torch.is_grad_enabled()
+            and not torch.compiler.is_compiling()
             and weight.requires_grad
             and 0 < types.numel() * 4 <= weight.shape[0]
         ):
@@ -391,12 +448,10 @@ class _ScheduledBilinearMoEACE(BilinearMoEACE):
         if (
             not node_feats.is_cuda
             or not _supported_precision(node_feats)
-            or torch.compiler.is_compiling()
             or (not self.agnostic and node_type.dtype != torch.int64)
             or has_lora(self.coefs[1])
             or (hasattr(self, "shared_coefs") and has_lora(self.shared_coefs[1]))
         ):
-            # The original module has no eqx_ace: its complete fallback is intact.
             return super().forward(node_feats, node_type, sc, batch)
         x, base, gates = self._linear_up_features(node_feats)
         out = (
@@ -404,8 +459,6 @@ class _ScheduledBilinearMoEACE(BilinearMoEACE):
         )
         shared = self.shared_coefs[0](x) if hasattr(self, "shared_coefs") else None
         out = out + self._bilinear_coefficients(
-            self._contract,
-            self.coefs[1],
             x,
             base,
             gates[:, self._ace_gate_slices[0]],
@@ -420,25 +473,35 @@ class _ScheduledBilinearMoEACE(BilinearMoEACE):
 
 
 def _install_bilinear(module):
+    tp = module.aces[0].tp
     coef = module.coefs[1]
-    module.scheduled_contraction = BilinearContraction(
-        module.aces[0].tp,
-        coef.linear,
-        getattr(coef, "num_experts", 1),
-        backend="cuda",
-        shared_linear=module.shared_coefs[1].linear
-        if hasattr(module, "shared_coefs")
-        else None,
-    ).train(module.training)
+    contraction = (
+        IctdBilinearContraction
+        if type(tp) is co3.ictd.TensorProduct
+        else BilinearContraction
+    )
+    module.scheduled_contraction = (
+        contraction(
+            tp,
+            coef.linear,
+            getattr(coef, "num_experts", 1),
+            backend="cuda",
+            shared_linear=module.shared_coefs[1].linear
+            if hasattr(module, "shared_coefs")
+            else None,
+        )
+        .to(next(module.parameters()))
+        .train(module.training)
+    )
     module.__class__ = _ScheduledBilinearMoEACE
     return module
 
 
 def _bilinear_rule(module, *, backend, automatic):
-    if hasattr(module, "eqx_ace"):
-        return None, "preserved the host's existing bilinear contraction"
-    if backend != "cuda" or automatic:
-        return None, "explicit CUDA opts into second-order bilinear coefficient fusion"
+    if backend != "cuda" or (
+        automatic and not acceleration_enabled("eqx", kernel="product")
+    ):
+        return None, "requires CUDA bilinear coefficient fusion"
     if not (
         module.use_bilinear_gate
         and module.correlation == 2
@@ -446,7 +509,6 @@ def _bilinear_rule(module, *, backend, automatic):
         and len(module.aces) == 1
         and len(module.coefs) == 2
         and not custom_forward(module, recursive=True)
-        and "_bilinear_coefficients" not in vars(module)
         and "_merge_shared_expert" not in vars(module)
         and all(
             p.is_cuda and p.dtype in (torch.float32, torch.float64)
@@ -455,16 +517,19 @@ def _bilinear_rule(module, *, backend, automatic):
     ):
         return None, "requires an ordinary CUDA FP32/FP64 gated second-order product"
     ace = module.aces[0]
+    if type(ace) is not UuuTensorProduct:
+        return None, "requires the host's channel-wise tensor product"
+    cartesian = type(ace.tp) is co3.ictd.TensorProduct
     if (
-        type(ace) is not UuuTensorProduct
-        or type(ace.tp) not in (o3.TensorProduct, EqxTensorProduct)
+        (not cartesian and type(ace.tp) not in (o3.TensorProduct, EqxTensorProduct))
+        or (cartesian and not ace.tp.project)
         or ace.tp.internal_weights
         or not ace.tp.instructions
         or any(
             p.connection_mode != "uuu" or not p.has_weight for p in ace.tp.instructions
         )
     ):
-        return None, "requires the host's externally gated spherical uuu product"
+        return None, "requires an externally gated uuu product"
     coef = module.coefs[1]
     expected = (
         e3nnLinear
@@ -477,22 +542,29 @@ def _bilinear_rule(module, *, backend, automatic):
         or coef.irreps_in != ace.tp.irreps_out.simplify()
         or (shared and (len(shared) != 2 or type(shared[1]) is not e3nnLinear))
         or any(
-            type(m.linear) is not o3.Linear or m.linear.internal_weights or has_lora(m)
+            type(m.linear) is not (co3.Linear if cartesian else o3.Linear)
+            or m.linear.internal_weights
+            or has_lora(m)
+            or (cartesian and m.linear.output_basis != "cartesian")
             for m in (coef, *shared[1:])
         )
     ):
         return None, "preserved customized or LoRA expert coefficient maps"
     if not module.agnostic:
-        implementation = (
-            MoEElementLinear if expected is e3nnMoEElementLinear else ElementLinear
-        )
+        if expected is e3nnMoEElementLinear:
+            implementation = co3.MoEElementLinear if cartesian else MoEElementLinear
+        else:
+            implementation = co3.ElementLinear if cartesian else ElementLinear
         if any(
             op is not None
             and (
                 type(op) is not implementation
                 or op.element_mode != "single"
                 or op.layout != "mul_ir"
-                or op.projection is not None
+                or not (
+                    op.projection is None
+                    or (cartesian and type(op.projection) is co3.Projector)
+                )
             )
             for op in (coef.eqx_linear, coef.torch_linear)
         ):
@@ -509,23 +581,9 @@ def host_product_provider(module):
         MaceACE,
         CgtpACE,
         TaceACE,
-        BilinearMoEACE,
     ) or custom_forward(module, recursive=True):
         return None
     if next(module.parameters()).dtype not in (torch.float32, torch.float64):
-        return None
-    if type(module) is BilinearMoEACE:
-        op = getattr(module, "eqx_ace", None)
-        if (
-            type(op) is BilinearContraction
-            and next(module.parameters()).is_cuda
-            and op.backend in ("cuda", "torch")
-            and not has_lora(module.coefs[1])
-            and not (
-                hasattr(module, "shared_coefs") and has_lora(module.shared_coefs[1])
-            )
-        ):
-            return f"eqx_{op.backend}"
         return None
     if type(module) is TaceACE:
         op = getattr(module, "generalized", None)

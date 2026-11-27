@@ -11,9 +11,10 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
+from equivariantx.o3 import TransposeIrrepsLayout
+from tace.utils.env import eqx_backend
 
 from ...utils.torch_scatter import scatter_sum
-from ..layout import LayoutTransform
 from ..linear import ElementEmbedding, e3nnElementLinear
 from ..mlp import MLP
 from .base import NodeEmbedding, NodeUpdate
@@ -144,10 +145,11 @@ class SphericalTensorNodeEmbedding(NodeEmbedding):
         self.angular_sections = [
             slice(ir.l**2, (ir.l + 1) ** 2) for _, ir in self.irreps_out
         ]
-        self.reshape = LayoutTransform(
+        self.reshape = TransposeIrrepsLayout(
             self.irreps_out,
-            layout_in="flatten_ir_mul",
-            layout_out="flatten_mul_ir",
+            source="ir_mul",
+            target="mul_ir",
+            backend=eqx_backend("linear"),
         )
         if self.use_wigner:
             self.frame = o2.LocalFrame(self.irreps_out, mmax=0, reverse=True)

@@ -3,13 +3,14 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
-from math import sqrt
 from typing import List, Union
 
 import torch
 from e3nn import o3
 from e3nn.nn import Activation, Gate
 from torch.fx.experimental.symbolic_shapes import statically_known_true
+
+from equivariantx.o3 import path_matrices
 
 from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import ACTIVATION
@@ -138,15 +139,9 @@ class DirectHessianReadout(torch.nn.Module):
             scalar_act=scalar_act,
             tensor_act=tensor_act,
         )
+        basis = {path[-1].l: q for path, q in path_matrices(2)}
         self.register_buffer(
-            "basis",
-            torch.cat(
-                [
-                    o3.wigner_3j(1, 1, ell, dtype=torch.float64) * sqrt(2 * ell + 1)
-                    for ell in range(3)
-                ],
-                dim=-1,
-            ),
+            "basis", torch.cat([basis[l] for l in range(3)], dim=1).reshape(3, 3, 9)
         )
 
     def to_cartesian(

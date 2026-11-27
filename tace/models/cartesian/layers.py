@@ -8,18 +8,18 @@ from e3nn import o3
 from e3nn.nn import Gate
 
 from equivariantx import co3
-from equivariantx.co3 import ElementLinear, MoEElementLinear
-from equivariantx.conv.co3 import CartesianTensorProductConv, Linear
-from equivariantx.mbe.ace import (
-    IctdBilinearContraction,
+from equivariantx.co3 import (
+    ElementLinear,
     IctdUuuFullyConnectedSymmetricContraction,
+    MoEElementLinear,
 )
+from equivariantx.co3.conv import CartesianTensorProductConv, Linear
 from equivariantx.nn import EquivariantLayerNorm
+from equivariantx.o3 import TransposeIrrepsLayout
 from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
 from ..angular import SphericalHarmonics
-from ..layout import LayoutTransform
 from ..linear import (
     ElementEmbedding,
     e3nnElementLinear,
@@ -344,19 +344,17 @@ def cartesian_modules(module):
             module.normalization,
             backend=eqx_backend("conv"),
         )
-    if isinstance(module, LayoutTransform):
-        module.irreps = co3.Irreps(module.irreps)
-        module.dims = [ir.dim for _, ir in module.irreps]
-        module.num_components = sum(module.dims)
-        module.dim = module.irreps.dim
-        module._setup_indices()
-        return module
+    if isinstance(module, TransposeIrrepsLayout):
+        return co3.TransposeIrrepsLayout(
+            module.irreps,
+            source=module.source,
+            target=module.target,
+            flat_in=module.flat_in,
+            flat_out=module.flat_out,
+            backend=module.backend,
+        )
     if isinstance(module, CgtpACE) and hasattr(module, "eqx_ace"):
         del module.eqx_ace
-    if isinstance(module, BilinearMoEACE):
-        for name in list(module._modules):
-            if name.startswith("eqx_"):
-                delattr(module, name)
     for name, child in list(module.named_children()):
         setattr(module, name, cartesian_modules(child))
     if isinstance(module, Convolution):
@@ -367,18 +365,6 @@ def cartesian_modules(module):
             [ace.tp for ace in module.aces],
             [coef.linear for coef in module.coefs],
             backend=eqx_backend("product"),
-        )
-    if isinstance(module, BilinearMoEACE) and module.use_eqx:
-        coef = module.coefs[1]
-        module.eqx_ace = IctdBilinearContraction(
-            module.aces[0].tp,
-            coef.linear,
-            getattr(coef, "num_experts", 1),
-            shared_linear=(
-                module.shared_coefs[1].linear
-                if hasattr(module, "shared_coefs")
-                else None
-            ),
         )
     if hasattr(module, "rejector") and isinstance(
         module.rejector, CartesianTensorProductConvLayer

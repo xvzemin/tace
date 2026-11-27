@@ -184,7 +184,7 @@ def _pair_interaction(layer):
         and param.dtype in (torch.float32, torch.float64)
     )
     if type(product) is rowwise:
-        from equivariantx.conv import O3TensorProductConv
+        from equivariantx.o3 import O3TensorProductConv
 
         if type(product.tp) is not o3.TensorProduct:
             return (

@@ -376,7 +376,7 @@ def _periodic(side, device):
 def test_paired_cartesian_ef_keeps_directed_attributes_and_live_radial(
     monkeypatch, request, product
 ):
-    from equivariantx.conv.co3 import CartesianTensorProductConv
+    from equivariantx.co3.conv import CartesianTensorProductConv
     from equivariantx_foundation import optimize
     from equivariantx_foundation.models.tace import plan
     from equivariantx_foundation.models.tace.replay_loss import BucketedTrainingLoss

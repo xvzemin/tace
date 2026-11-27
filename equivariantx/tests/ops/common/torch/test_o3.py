@@ -9,7 +9,8 @@ import torch
 from e3nn import o3 as e3nn_o3
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx import co3, conv, o3
+import equivariantx as eqx
+from equivariantx import co3, o3
 from equivariantx.ops import get_kernel
 from equivariantx.ops.common.o3 import contraction
 from equivariantx.ops.common.torch.o3 import (
@@ -40,7 +41,7 @@ def convolution_case(geometric, edges=7, shared=False, projected=True, device="c
         internal_weights=False,
         shared_weights=False,
     )
-    module = conv.O3TensorProductConv(product, normalize=False).to(device)
+    module = eqx.o3.O3TensorProductConv(product, normalize=False).to(device)
     rows = 1 if shared else edges
     shapes = [
         (3, module.input_dim),
@@ -166,8 +167,8 @@ def test_functional_transforms(geometric, compiler, double_precision):
 @pytest.mark.parametrize("degree", [0, 1, 2, 3])
 @pytest.mark.parametrize("symmetric", [False, True])
 def test_cartesian_harmonics(degree, symmetric, double_precision):
+    from equivariantx.co3.conv.polynomials import component_powers
     from equivariantx.co3.symmetric import symmetric_powers
-    from equivariantx.conv.co3.polynomials import component_powers
 
     kind = "cartesian_symmetric" if symmetric else "cartesian"
     width = (degree + 1) * (degree + 2) // 2 if symmetric else 3**degree
@@ -379,7 +380,7 @@ def test_transverse_roles(degrees, method, double_precision):
         internal_weights=False,
         shared_weights=False,
     )
-    module = conv.O3TensorProductConv(product, normalize=False).cuda()
+    module = eqx.o3.O3TensorProductConv(product, normalize=False).cuda()
     description = parse_metadata(module.harmonic_metadata)
     metadata = repr((*description[:3], ("transverse", "component", method)))
     source, target = (

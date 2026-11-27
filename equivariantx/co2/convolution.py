@@ -51,7 +51,7 @@ class CartesianConvolution(torch.nn.Module):
         projection : torch.Tensor, optional
             Final radial projection in (input, output) layout, optionally
             with the affine bias in its last row.
-        edge_pairs : equivariantx.conv.EdgePairs, optional
+        edge_pairs : equivariantx.utils.EdgePairs, optional
             Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
 
         Returns

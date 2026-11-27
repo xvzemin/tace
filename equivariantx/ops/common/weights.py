@@ -496,7 +496,7 @@ def indexed_weights(
     radial_mode : {"last", "full"}, optional
         Override the schedule for a deferred network or indexed projection.
         A plain projection uses the convolution's native schedule.
-    edge_pairs : equivariantx.conv.EdgePairs, optional
+    edge_pairs : equivariantx.utils.EdgePairs, optional
         Evaluate the invariant radial tensor on pair rows. Indices in
         ``terms`` are still directed, and may select different rows on reversal.
     term_envelope : torch.Tensor, optional
@@ -510,7 +510,7 @@ def indexed_weights(
 
     Examples
     --------
-    >>> from equivariantx.conv import indexed_weights
+    >>> from equivariantx.nn import indexed_weights
     >>> x, p, table = torch.randn(3, 4), torch.randn(4, 6), torch.randn(2, 6)
     >>> ids = torch.tensor([1, 0, 1])
     >>> radial, projection, network = indexed_weights(x, p, [(table, ids)])

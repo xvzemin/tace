@@ -65,6 +65,7 @@ def select_block(module, rules, *, rank_local, spherical_messages):
 
 def block_rules(model, *, backend, task, automatic=False, rank_local=False):
     """Return interaction and product matchers for a loaded model and task."""
+    from .products import host_product_provider, product_rule
 
     def bind(*rules, spherical_messages=False):
         return partial(
@@ -116,6 +117,11 @@ def block_rules(model, *, backend, task, automatic=False, rank_local=False):
             ),
             bind(
                 BlockRule(
+                    (BilinearMoEACE,),
+                    partial(product_rule, automatic=automatic),
+                    rank_local=True,
+                ),
+                BlockRule(
                     (NonlinearIctdACE, CgtpACE),
                     partial(
                         cartesian_product_rule,
@@ -147,7 +153,6 @@ def block_rules(model, *, backend, task, automatic=False, rank_local=False):
         measured_aligned_stack,
     )
     from .magnetic import magnetic_rule
-    from .products import host_product_provider, product_rule
     from .tece_oam_rra.regional import rotary_rule
     from .wigner6j import host_wigner6j_provider, wigner6j_rule
 

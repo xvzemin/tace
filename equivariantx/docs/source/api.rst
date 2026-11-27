@@ -19,4 +19,3 @@ API Reference
 
    api/nn
    api/convolutions
-   api/mbe

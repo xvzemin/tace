@@ -13,6 +13,7 @@ ADAPTERS = {
 
 REGISTRATION_MODULES = {
     "eqx_foundation": "ops.tece",
+    "eqx_tace_product": "ops.bilinear",
     "eqx_oam_l": "models.tace.tace_oam_l.radial",
     "eqx_oam_l_geometry": "models.tace.tace_oam_l.angular",
     "eqx_oam_l_product": "models.tace.tace_oam_l.product",

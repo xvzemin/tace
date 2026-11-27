@@ -17,6 +17,8 @@ from .. import config
 from ..precision import validate_uniform
 from .compilation import polynomial_work, should_inline, wide_ace, wide_symmetric
 
+EXTERNAL_POLYNOMIALS = {}
+
 
 @lru_cache(maxsize=128)
 def polynomial_groups(metadata, program):
@@ -94,7 +96,7 @@ def program_terms(kind, program):
     terms = parse_metadata(program)
     if kind in ("ace", "linear"):
         return tuple((0, mapping, role, slot, 0) for mapping, role, slot in terms)
-    if kind == "bilinear":
+    if kind == "indexed_plan":
         return tuple(
             (plan, mapping, role, slot, 0) for plan, mapping, role, slot in terms
         )
@@ -105,7 +107,7 @@ def encode_program(kind, terms):
     """Retain the native operator's existing program format."""
     if kind in ("ace", "linear"):
         return repr(tuple((mapping, role, slot) for _, mapping, role, slot, _ in terms))
-    if kind == "bilinear":
+    if kind == "indexed_plan":
         return repr(tuple(term[:4] for term in terms))
     return repr(tuple(term[1:] for term in terms))
 
@@ -163,7 +165,7 @@ def evaluate_polynomial(kind, metadata, program, node_type, operands):
         from .torch.symmetric import evaluate_torch
 
         return evaluate_torch(metadata, program, node_type, operands)
-    if kind in ("ace", "bilinear"):
+    if kind in ("ace", "indexed_plan"):
         from .torch.ace import contract
 
         return contract(kind, metadata, program, node_type, operands)
@@ -293,10 +295,12 @@ class NativePolynomial(torch.autograd.Function):
                     torch.ops.eqx.element_linear, metadata, program, node_type, operands
                 )
             )
+        if kind in EXTERNAL_POLYNOMIALS:
+            op, _ = EXTERNAL_POLYNOMIALS[kind]
+            return tuple(op(metadata, program, node_type, list(operands)))
         name = {
             "symmetric": "symmetric_contract",
             "ace": "ace_contract",
-            "bilinear": "bilinear_ace",
         }[kind]
         return tuple(
             getattr(torch.ops.eqx, name)(metadata, program, node_type, list(operands))
@@ -360,7 +364,7 @@ class NativePolynomial(torch.autograd.Function):
 def native_polynomial(kind, metadata, program, node_type, *operands):
     """Retain native derivatives and expose nested forward AD to ordinary ops."""
     validate_uniform(operands)
-    metadata = metadata if kind == "bilinear" else compact_metadata(metadata)
+    metadata = metadata if kind == "indexed_plan" else compact_metadata(metadata)
     program = compact_metadata(program)
     if (
         (not torch.is_grad_enabled() or not any(x.requires_grad for x in operands))

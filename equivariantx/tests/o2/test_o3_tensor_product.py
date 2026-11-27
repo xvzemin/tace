@@ -5,7 +5,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from equivariantx.tests.conv.testing import layout
+from equivariantx.tests.utils.convolution import layout
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
@@ -15,7 +15,9 @@ def test_scatter_fp64_geometry_with_fp32_features(backend, device):
     irreps = o3.Irreps("2x1o"), o3.Irreps("1o"), o3.Irreps("2x0e+2x1e+2x2e")
     paths = [(0, 0, i, "uvu", True) for i in range(3)]
     opts = dict(internal_weights=False, shared_weights=False)
-    layer = o2.O3TensorProduct(*irreps, paths, backend=backend, **opts).to(device).float()
+    layer = (
+        o2.O3TensorProduct(*irreps, paths, backend=backend, **opts).to(device).float()
+    )
     ref = o3.TensorProduct(*irreps, paths, **opts).to(device).double()
     idx = torch.tensor([[0, 1, 2, 1], [1, 0, 1, 2]], device=device)
     x = torch.randn(3, 6, device=device, dtype=torch.float32, requires_grad=True)
@@ -28,11 +30,13 @@ def test_scatter_fp64_geometry_with_fp32_features(backend, device):
     expected = edge.new_zeros(3, edge.size(1)).index_add(0, idx[1], edge)
     actual = layout(
         layer.forward_scatter(x_layout, idx, vectors=v, harmonic_scale=amp, weight=w),
-        irreps[-1], inverse=True,
+        irreps[-1],
+        inverse=True,
     )
     assert actual.dtype == x.dtype
     torch.testing.assert_close(actual.double(), expected, atol=4e-5, rtol=3e-5)
     probe = torch.randn_like(expected)
+
     def deriv(y):
         grad = torch.autograd.grad((y * probe).sum(), (x, v, w, amp), create_graph=True)
         mixed = torch.autograd.grad(grad[1].square().mean(), (x, w, v))

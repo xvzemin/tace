@@ -5,16 +5,13 @@ import torch
 from e3nn import o3
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from equivariantx.conv import (
-    O3TensorProductConv,
-    indexed_rows,
-    indexed_weights,
-    undirected_edge_pairs,
-)
+from equivariantx.nn import indexed_rows, indexed_weights
+from equivariantx.o3 import O3TensorProductConv
 from equivariantx.ops import config
 from equivariantx.ops.common.convolution import convolve
 from equivariantx.ops.compiler import compile_and_package
 from equivariantx.tests.utils.testing import package_script
+from equivariantx.utils import undirected_edge_pairs
 
 
 def convolution_case(width=4, edges=7, shared=False, device="cpu"):
@@ -272,9 +269,8 @@ def test_reusable_weight_rows(
 @pytest.mark.parametrize("kind", ["uv", "mtp", "gtp"])
 @pytest.mark.parametrize("mode,rows", [("last", 4), ("full", 13)])
 def test_indexed_network_interface(kind, mode, rows, device, double_precision):
-    from equivariantx import conv
     from equivariantx import o3 as eqx_o3
-    from equivariantx.tests.conv.uv_o2.test_convolution import RadialConvolution
+    from equivariantx.tests.o2.uv.test_convolution import RadialConvolution
 
     backend = "cuda" if device == "cuda" else "torch"
     edges = torch.randint(4, (2, 7), device=device)
@@ -305,9 +301,9 @@ def test_indexed_network_interface(kind, mode, rows, device, double_precision):
     else:
         name = "MatrixTensorProduct" if kind == "mtp" else "GauntTensorProduct"
         tp = getattr(eqx_o3, name)("0e+1o", "0e+1o", "0e+1o+2e", shared_weights=False)
-        layer = getattr(conv, name + "Conv")(tp, backend=backend, radial_mode=mode).to(
-            device
-        )
+        layer = getattr(eqx_o3, name + "Conv")(
+            tp, backend=backend, radial_mode=mode
+        ).to(device)
         attrs = torch.randn(7, 4, device=device)
 
         def run(x, w, net):

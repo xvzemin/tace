@@ -1,11 +1,10 @@
 """Numerical-test settings for EQX."""
 
-import sys
-
 import pytest
 import torch
 
 import equivariantx as eqx  # noqa: F401 - Load constants before importing legacy e3nn modules.
+from equivariantx.tests.utils import aoti_threads as aoti_threads
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -31,23 +30,6 @@ def isolated_state():
 def double_precision():
     torch.set_default_dtype(torch.float64)
     torch.manual_seed(12)
-
-
-@pytest.fixture
-def aoti_threads():
-    """Use matching compiler/runtime thread counts in standalone CPU checks."""
-    from torch._inductor import config
-
-    previous = torch.get_num_threads()
-    # Windows OpenMP workers can outlive an unloaded AOTI library. Keep these
-    # standalone checks serial on Windows, as for the macOS runtime.
-    threads = 1 if sys.platform in ("darwin", "win32") else min(previous, 4)
-    torch.set_num_threads(threads)
-    try:
-        with config.patch({"cpp.threads": threads}):
-            yield threads
-    finally:
-        torch.set_num_threads(previous)
 
 
 @pytest.fixture

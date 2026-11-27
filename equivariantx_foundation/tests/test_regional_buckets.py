@@ -24,6 +24,668 @@ from tace.models.spherical.tace import SphericalTACE
 from tace.utils.env import ACCELERATION_ENV
 
 
+def test_online_replay_admits_recurring_capacities_only():
+    from equivariantx_foundation.models.tace.replay_loss import (
+        _ReplayCapacities,
+        _scaled_workspace,
+    )
+
+    policy = _ReplayCapacities()
+    small, medium, large = (16, 128, 2), (112, 3072, 3), (240, 6655, 6)
+    for shape in (small, medium, small, medium):
+        assert policy.choose(shape) is None
+        assert policy.probe == [shape, 0]
+        policy.probe[1] = 100
+    first = policy.choose(small)
+    assert policy.probe is None and policy.workspace == _scaled_workspace(
+        100, small, first
+    )
+    assert all(a <= b for a, b in zip(small, first, strict=True))
+    assert policy.choose((15, 127, 1), (first,)) == first
+    second = policy.choose(medium, (first,))
+    assert all(a <= b for a, b in zip(medium, second, strict=True))
+    for _ in range(5):
+        assert policy.choose(large, (first, second)) is None
+        assert policy.choose(small, (first, second)) == first
+        assert policy.choose(medium, (first, second)) == second
+
+    outside = ((13, 0, 2), (257, 100, 4), (127, 8193, 4), (127, 1024, 9))
+    for shape in outside:
+        for _ in range(4):
+            assert policy.choose(shape) is None
+
+
+def test_online_replay_workspace_and_available_memory(monkeypatch):
+    from equivariantx_foundation.models.tace.replay_loss import (
+        _replay_headroom,
+        _scaled_workspace,
+    )
+
+    # Effective axes are atoms + 1, edges + atoms, and graphs + 1.
+    source = (3, 13, 3)
+    for target in ((7, 9, 3), (3, 29, 3), (3, 13, 7)):
+        assert _scaled_workspace(64, source, target) == 128
+    assert _scaled_workspace(17, source, (4, 12, 3)) == 22
+    assert _scaled_workspace(17, source, (2, 6, 1)) == 17
+
+    gib = 2**30
+    device = torch.device("cuda:1")
+    memory = {"free": 98, "reserved": 31, "fraction": 0.5}
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda d: (memory["free"] * gib, 100 * gib)
+    )
+    monkeypatch.setattr(
+        torch.cuda, "memory_reserved", lambda d: memory["reserved"] * gib
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_per_process_memory_fraction",
+        lambda d: memory["fraction"],
+        raising=False,
+    )
+    assert _replay_headroom(device) == 14 * gib  # Private process quota is tighter.
+    memory["free"] = 7
+    assert _replay_headroom(device) == 2 * gib  # Another process claims the device.
+    memory["reserved"] = 51
+    assert _replay_headroom(device) == 0
+    memory.update(free=47, fraction=1)
+    assert _replay_headroom(device) == 37 * gib
+
+
+def test_online_regional_stress_capacities(online_training_case):
+    from equivariantx_foundation.models.tace.replay_loss import (
+        OnlineTrainingLoss,
+        _loss_signature,
+        _scaled_workspace,
+    )
+    from tace.utils.loss.normal import NormalLoss
+
+    def record(policy, shape, probes, live=()):
+        for _ in range(probes):
+            assert policy.choose(shape, live) is None
+            policy.probe[1] = 100
+        cap = policy.choose(shape, live)
+        assert policy.workspace == _scaled_workspace(100, shape, cap)
+        return cap
+
+    model, _, ef, opt = online_training_case
+    objective = NormalLoss(
+        ["energy", "forces", "stress"],
+        ["mse_energy", "mse_forces", "mse_stress"],
+        [1, 1, 1],
+    )
+    adapter = OnlineTrainingLoss(
+        model, opt, objective, _loss_signature(objective), "regional_cgtp", None
+    )
+    policy = adapter.policy
+    for outside in ((257, 4900, 8), (70, 6145, 8), (70, 4900, 4)):
+        assert policy.choose(outside) is None and not policy.wide
+    first = record(policy, (55, 2200, 8), 2)
+    assert first == (56, 2208, 8)
+    assert policy.choose((70, 4900, 8), (first,)) is None and not policy.wide
+    second = record(policy, (70, 3352, 8), 2, (first,))
+    assert second == (71, 3780, 8)
+    assert policy.choose((70, 3700, 8), (first, second)) == second
+
+    adapter.clear()
+    first = record(policy, (70, 4700, 8), 3)
+    assert policy.wide and first == (80, 5120, 8)
+    second = record(policy, (85, 5700, 8), 3, (first,))
+    assert second == (96, 6144, 8)
+    assert policy.choose((82, 6030, 8), (first, second)) == second
+    assert policy.choose((82, 6145, 8), (first, second)) is None
+    assert policy.choose((10, 100, 8), (first, second)) is None
+    adapter.clear()
+    assert not policy.wide and not policy.pending
+    assert record(policy, (55, 2200, 8), 2) == (56, 2208, 8)
+
+    for group in (None, object()):
+        route = OnlineTrainingLoss(
+            model,
+            opt,
+            objective,
+            _loss_signature(objective),
+            "regional_cgtp",
+            group,
+            batch_size=16,
+        )
+        assert route._global_stress == (group is not None)
+        for shape in ((95, 3800, 8), (204, 7600, 15), (150, 8193, 16), (257, 7100, 16)):
+            assert route.policy.choose(shape) is None and not route.policy.pending
+        first = record(route.policy, (122, 5680, 16), 3)
+        assert first == (128, 6144, 16)
+        second = record(route.policy, (149, 7450, 16), 3, (first,))
+        assert second == (176, 8192, 16)
+        assert route.fast_limits == (256, 8192, 16)
+        assert route.policy.choose((120, 5400, 16), (first, second)) == first
+        assert route.policy.choose((120, 5400, 15), (first, second)) is None
+        route.clear()
+        assert record(route.policy, (122, 5680, 16), 3) == first
+    for loss, group, batch_size in (
+        (objective, object(), 32),
+        (objective, None, 32),
+        (ef, None, 16),
+    ):
+        other = OnlineTrainingLoss(
+            model,
+            opt,
+            loss,
+            _loss_signature(loss),
+            "regional_cgtp",
+            group,
+            batch_size=batch_size,
+        )
+        assert other.policy.choose((122, 5680, 16)) is None and not other.policy.pending
+
+
+def test_online_replay_validation_pool_and_bindings(online_training_case, monkeypatch):
+    from threading import get_ident
+
+    from equivariantx_foundation.models.tace import replay_loss
+    from tace.utils.loss.normal import NormalLoss
+
+    model, _, ef, optimizer = online_training_case
+    objective = NormalLoss(
+        ["energy", "forces", "stress"],
+        ["mse_energy", "mse_forces", "mse_stress"],
+        [1] * 3,
+    )
+    model.flags = SimpleNamespace()
+    model.get_target_property = lambda: objective.loss_property
+    model.get_embedding_property = lambda: []
+    stream = object()
+    runner = SimpleNamespace(
+        step=SimpleNamespace(device=torch.device("cuda:0")),
+        _state=replay_loss._Bindings(model),
+        _stream=stream,
+        _thread=get_ident(),
+    )
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda _: stream)
+    gib = 2**30
+    monkeypatch.setattr(replay_loss, "_replay_headroom", lambda _: 9 * gib)
+
+    def adapter(family, loss):
+        return replay_loss.OnlineTrainingLoss(
+            model, optimizer, loss, replay_loss._loss_signature(loss), family, None
+        )
+
+    auto = adapter("regional_cgtp", objective)
+    assert not auto.can_retain(gib)
+    auto.runner = runner
+    assert not auto.can_retain(gib)
+    auto.workspaces[(16, 256, 8)] = gib
+    model.eval()
+    assert auto.can_retain(4 * gib) and not auto.can_resume(model, optimizer, objective)
+    assert not auto.can_retain(0) and not auto.can_retain(4 * gib + 1)
+    assert auto.can_retain(3 * gib, extra_bytes=2 * gib)
+    assert not auto.can_retain(3 * gib, extra_bytes=2 * gib + 1)
+    for unsupported in (
+        adapter("tace_oam_7m", objective),
+        adapter("regional_cgtp", ef),
+    ):
+        unsupported.runner, unsupported.workspaces = runner, dict(auto.workspaces)
+        assert not unsupported.can_retain(gib)
+
+    model.train()
+    assert auto.can_resume(model, optimizer, objective)
+    assert not auto.can_resume(deepcopy(model), optimizer, objective)
+    assert not auto.can_resume(model, torch.optim.AdamW(model.parameters()), objective)
+    assert not auto.can_resume(model, optimizer, deepcopy(objective))
+    with monkeypatch.context() as change:
+        change.setattr(runner, "_stream", object())
+        assert not auto.can_resume(model, optimizer, objective)
+    objective.loss_property_weights[0] = 2
+    assert not auto.can_resume(model, optimizer, objective)
+    objective.loss_property_weights[0] = 1
+    assert auto.can_resume(model, optimizer, objective)
+    model.scale.data = model.scale.detach().clone()
+    assert not auto.can_resume(model, optimizer, objective)
+
+
+def test_online_replay_factory_declines_native_cpu_model():
+    from equivariantx_foundation.models.tace.replay_loss import OnlineTrainingLoss
+    from tace.utils.loss.normal import NormalLoss
+
+    model = torch.nn.Linear(2, 2)
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer = torch.optim.AdamW(model.parameters())
+    objective = NormalLoss(["energy", "forces"], ["mse_energy", "mse_forces"], [1, 2])
+    original_grad = model.weight.grad
+    assert OnlineTrainingLoss.try_create(model, optimizer, objective) is None
+    assert model.weight.grad is original_grad and not optimizer.state
+    assert not hasattr(model, "forward_loss")
+
+
+@pytest.mark.parametrize("stress", [False, True], ids=["ef", "efs"])
+def test_online_replay_regional_family_matches_scheduled_cgtp(stress, monkeypatch):
+    from equivariantx_foundation.models.tace import planner, replay_loss
+    from equivariantx_foundation.models.tace.interactions import StreamedInteraction
+    from equivariantx_foundation.models.tace.products import _ScheduledCgtpACE
+    from tace.models.spherical.inter import O3CgtpInteraction
+    from tace.models.spherical.prod import CgtpACE
+
+    def stage(cls):
+        module = cls.__new__(cls)
+        torch.nn.Module.__init__(module)
+        module.correlation = 2 if stress else 3
+        module.l1l2 = None
+        return module
+
+    rep = SimpleNamespace(
+        interactions=[stage(StreamedInteraction) for _ in range(2)],
+        products=[stage(_ScheduledCgtpACE) for _ in range(2)],
+    )
+    order = 2 if stress else 3
+    targets = ["energy", "forces", "stress"] if stress else ["energy", "forces"]
+    config = dict(
+        num_channel=64,
+        Lmax=2,
+        lmax=order,
+        parity=True,
+        edge_update={"type": "identity"},
+        edge_embedding={"type": "identity"},
+        radial_basis={"hidden": [64, 64], "num_radial_basis": 8, "apply_cutoff": False},
+    )
+    model = SimpleNamespace(
+        readout_fn=SimpleNamespace(representation=rep, model_config=config),
+        num_fidelities=1,
+        get_target_property=lambda: targets,
+    )
+    family = replay_loss.OnlineTrainingLoss._family
+    monkeypatch.setattr(replay_loss, "_released_bucket_model", lambda model: False)
+    monkeypatch.setattr(replay_loss, "_regional_bucket_model", lambda model: True)
+    monkeypatch.setattr(torch, "get_float32_matmul_precision", lambda: "highest")
+    assert family(model) == "regional_cgtp"
+    candidate = replay_loss.OnlineTrainingLoss.ddp_candidate
+    monkeypatch.setattr(planner, "release_schedule", lambda *a, **kw: (None, ""))
+    assert not candidate(model)
+    with monkeypatch.context() as native:
+        native.setattr(
+            rep, "interactions", [stage(O3CgtpInteraction) for _ in range(2)]
+        )
+        native.setattr(rep, "products", [stage(CgtpACE) for _ in range(2)])
+        assert candidate(model) is stress
+        assert family(model) is None
+        native.setattr(torch, "get_float32_matmul_precision", lambda: "high")
+        assert candidate(model) is stress  # Source setup precedes rank-local policy.
+        native.setitem(config, "num_channel", 32)
+        assert not candidate(model)
+    for key, value in (("num_channel", 32), ("Lmax", 3), ("lmax", 5 - order)):
+        with monkeypatch.context() as change:
+            change.setitem(config, key, value)
+            assert family(model) is None
+    for owner, attr, value in (
+        (rep, "interactions", rep.interactions[:1]),
+        (rep, "products", [rep.products[0], torch.nn.Identity()]),
+        (rep, "interactions", [rep.interactions[0], torch.nn.Identity()]),
+        (rep.products[1], "correlation", 5 - order),
+        (
+            model,
+            "get_target_property",
+            lambda: ["energy", "forces"] if stress else ["energy", "forces", "stress"],
+        ),
+        (replay_loss, "_regional_bucket_model", lambda model: False),
+        (torch, "get_float32_matmul_precision", lambda: "high"),
+    ):
+        with monkeypatch.context() as change:
+            change.setattr(owner, attr, value)
+            assert family(model) is None
+    if stress:
+        for module in (*rep.interactions, *rep.products):
+            with monkeypatch.context() as change:
+                change.setattr(module, "l1l2", "<=")
+                assert family(model) is None
+        for owner, key, value in (
+            (config, "parity", False),
+            (config["edge_update"], "type", "element2"),
+            (config["edge_embedding"], "type", "element"),
+            (config["radial_basis"], "hidden", [1024]),
+            (config["radial_basis"], "num_radial_basis", 16),
+            (config["radial_basis"], "apply_cutoff", True),
+        ):
+            with monkeypatch.context() as change:
+                change.setitem(owner, key, value)
+                assert family(model) is None
+        with monkeypatch.context() as change:
+            change.setattr(model, "num_fidelities", 2)
+            assert family(model) is None
+
+
+@pytest.fixture
+def online_training_case(monkeypatch):
+    from equivariantx_foundation.models.tace import planner, replay_loss
+    from equivariantx_foundation.models.tace.training import UnsupportedReplayBatch
+    from tace.utils.loss.normal import NormalLoss
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.tensor(0.5))
+            self.calls = 0
+
+        def prepare_property_data(self, data):
+            return dict(data.items())
+
+        def forward(self, data):
+            self.calls += 1
+            predictions = {k: self.scale * data[k] for k in ("energy", "forces")}
+            if "_valid_stress_count" in data:
+                predictions["stress"] = self.scale * data["lattice"]
+            return predictions
+
+    class Runner:
+        def __init__(self, model, optimizer, objective, capacity, *, ddp=False):
+            self.capacity, self.cleared = capacity, False
+
+        def __call__(self, batch, objective, *, _global_stress=False):
+            assert _global_stress == ("_valid_stress_count" in batch)
+            if "custom" in batch:
+                raise UnsupportedReplayBatch("custom metadata")
+            if "failure" in batch:
+                raise ValueError("kernel failure")
+            if "oom" in batch:
+                raise torch.OutOfMemoryError("capture")
+            data = model.prepare_property_data(batch)
+            predictions = model(data)
+            return predictions, objective(predictions, data)
+
+        def clear(self):
+            self.cleared = True
+
+    model = Model()
+    _, batch = _weighted_sample()
+    raw = batch.to_dict()
+    obj = NormalLoss(["energy", "forces"], ["mse_energy", "mse_forces"], [1, 2])
+    opt = torch.optim.AdamW(model.parameters())
+    # Substitute the CUDA-only model match and recording, not the admission,
+    # loss signature, shape policy or native fallback.
+    monkeypatch.setattr(replay_loss, "_released_bucket_model", lambda model: True)
+    monkeypatch.setattr(
+        planner, "release_schedule", lambda *a, **kw: ("tace_oam_7m", "")
+    )
+    monkeypatch.setattr(replay_loss, "_validate_model", lambda *a, **kw: None)
+    monkeypatch.setattr(replay_loss, "BucketedTrainingLoss", Runner)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (2**40, 2**40))
+    monkeypatch.setattr(
+        torch.cuda, "get_per_process_memory_fraction", lambda device: 1.0, raising=False
+    )
+    monkeypatch.setattr(
+        torch.cuda, "memory_allocated", lambda device: model.calls * 2**30
+    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    return model, raw, obj, opt
+
+
+@pytest.mark.parametrize("stress", [False, True])
+@pytest.mark.parametrize("regional", [False, True], ids=["release", "regional"])
+def test_online_ddp_counts_before_fallback_and_replay(
+    online_training_case, monkeypatch, stress, regional
+):
+    from equivariantx_foundation.models.tace import replay_loss
+    from tace.utils.loss.normal import NormalLoss
+
+    model, raw, objective, opt = online_training_case
+    group = object()
+    dist = torch.distributed
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda: "nccl")
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(replay_loss, "_replay_ddp_group", lambda: group)
+    calls = []
+
+    def reduce(tensor, op):
+        assert tensor.shape == (1,) and op == dist.ReduceOp.SUM
+        calls.append(tensor.item())
+        tensor.add_(1)
+
+    monkeypatch.setattr(dist, "all_reduce", reduce)
+    if stress:
+        objective = NormalLoss(
+            ["energy", "forces", "stress"],
+            ["mse_energy", "mae_forces", "mse_stress", "huber_voigt_stress"],
+            [1, 2, 3, 4],
+        )
+    create = replay_loss.OnlineTrainingLoss.try_create
+    if regional:
+        monkeypatch.setattr(
+            replay_loss.OnlineTrainingLoss,
+            "_family",
+            staticmethod(lambda m: "regional_cgtp"),
+        )
+        monkeypatch.setattr(
+            model, "get_target_property", lambda: objective.loss_property, raising=False
+        )
+    assert create(model, opt, objective) is None
+    step = create(model, opt, objective, ddp=True)
+    if regional and not stress:
+        assert step is None and not calls
+        return
+    if regional:
+        with monkeypatch.context() as change:
+            change.setattr(dist, "get_world_size", lambda: 4)
+            assert create(model, opt, objective, ddp=True) is None
+    assert step is not None
+    raw["stress_weight"] = torch.zeros_like(raw["stress_weight"])
+    for index, flags in enumerate(({}, {}, {}, {"custom": True}, {"oom": True}, {})):
+        _, loss = step({**raw, **flags}, objective)
+        assert torch.isfinite(loss)
+        if index == 2:
+            assert step.runner is not None
+        assert len(calls) == (index + 1 if stress else 0)
+    assert step.disabled and step.runner is None
+    assert calls == ([0] * 6 if stress else [])
+    assert "_valid_stress_count" not in raw and "_loss_world_size" not in raw
+    if stress:
+        forged = dict(
+            raw,
+            _valid_stress_count=torch.tensor(999),
+            _loss_world_size=torch.tensor(999),
+        )
+        torch.testing.assert_close(step(forged, objective)[1], loss)
+        assert calls[-1] == 0 and len(calls) == 7
+    objective.loss_property_weights[0] += 1
+    with pytest.raises(ValueError, match="original loss configuration"):
+        step(raw, objective)
+    monkeypatch.setattr(replay_loss, "_replay_ddp_group", lambda: object())
+    with pytest.raises(ValueError, match="process group changed"):
+        step(raw, objective)
+
+
+def test_online_replay_fallback_preserves_loss_and_does_not_hide_kernel_errors(
+    online_training_case,
+):
+    from equivariantx_foundation.models.tace import replay_loss
+
+    model, raw, obj, opt = online_training_case
+    create = replay_loss.OnlineTrainingLoss.try_create
+    with torch.no_grad():
+        assert create(model, opt, obj) is None
+    assert create(model, opt, torch.nn.Identity()) is None
+    assert create(model, torch.optim.SGD(model.parameters()), obj) is None
+    assert (
+        create(model, torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))]), obj)
+        is None
+    )
+    auto = create(model, opt, obj)
+    assert auto is not None
+    for _ in range(3):
+        auto({**raw, "custom": True}, obj)
+    assert auto.runner is None and model.calls == 3
+    for _ in range(3):
+        auto(raw, obj)
+    runner = auto.runner
+    assert runner is not None
+    auto({**raw, "custom": True}, obj)
+    assert auto.runner is runner and not runner.cleared
+    before = model.calls
+    with pytest.raises(ValueError, match="kernel failure"):
+        auto({**raw, "failure": True}, obj)
+    assert model.calls == before
+    obj.loss_property_weights[0] = 3.0
+    pred, loss = auto(raw, obj)
+    assert runner.cleared and auto.runner is None
+    expected = model(raw)
+    torch.testing.assert_close(pred, expected)
+    native_loss = obj(expected, raw)
+    torch.testing.assert_close(loss, native_loss)
+    torch.testing.assert_close(
+        torch.autograd.grad(loss, model.scale),
+        torch.autograd.grad(native_loss, model.scale),
+    )
+    assert model.scale.grad is None and not opt.state
+
+    recover = create(model, opt, obj)
+    for _ in range(2):
+        recover(raw, obj)
+    before = model.calls
+    pred, loss = recover({**raw, "oom": True}, obj)
+    assert model.calls == before + 1 and recover.runner is None and recover.disabled
+    torch.testing.assert_close(loss, obj(pred, raw))
+    assert model.scale.grad is None and not opt.state
+
+
+def test_online_replay_memory_admission_and_live_pool_release(
+    online_training_case, monkeypatch
+):
+    from equivariantx_foundation.models.tace.replay_loss import OnlineTrainingLoss
+
+    model, raw, objective, opt = online_training_case
+    auto = OnlineTrainingLoss.try_create(model, opt, objective)
+    gib = 2**30
+    for drift in (0, -1):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                torch.cuda,
+                "memory_allocated",
+                lambda d: (100 + drift * model.calls) * gib,
+            )
+            for _ in range(3):
+                auto(raw, objective)
+        assert auto.runner is None and not auto.disabled
+
+    memory = {"free": 15}
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda device: (memory["free"] * gib, 80 * gib)
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda, "memory_allocated", lambda d: model.calls * 3 * gib)
+        for _ in range(3):
+            auto(raw, objective)
+    # Seven free GiB after headroom exceed the family floor, but not the two observed workspaces.
+    assert auto.runner is None and not auto.disabled
+
+    memory["free"] = 76
+
+    def graph(edges):
+        return {
+            **raw,
+            "edge_index": raw["edge_index"].repeat(1, edges),
+            "edge_shifts": raw["edge_shifts"].repeat(edges, 1),
+        }
+
+    second = graph(4)
+    for batch in (raw, raw, raw, second, second, second):
+        auto(batch, objective)
+    runner = auto.runner
+    assert len(runner.capacity) == len(auto.workspaces) == 2
+    with monkeypatch.context() as patch:
+
+        def unexpected(*_):
+            pytest.fail("Hot replay queried the CUDA allocator")
+
+        for name in (
+            "mem_get_info",
+            "get_per_process_memory_fraction",
+            "memory_reserved",
+            "memory_allocated",
+        ):
+            patch.setattr(torch.cuda, name, unexpected)
+        auto(raw, objective)
+        auto(second, objective)
+    memory["free"] = 10
+    empty = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: empty.append(True))
+    before = model.calls
+    pred, loss = auto(graph(10), objective)
+    assert model.calls == before + 1 and runner.cleared and empty == [True]
+    assert auto.runner is None and not auto.workspaces and not auto.disabled
+    torch.testing.assert_close(loss, objective(pred, raw))
+    assert model.scale.grad is None and not opt.state
+
+    # A large first capture needs a longer horizon; a live graph does not.
+    memory["free"] = 76
+    wide = {**raw, "edge_index": torch.zeros(2, 33000, dtype=torch.long)}
+    time_left = 127
+    auto.allow_capture = lambda steps: steps <= time_left
+    for _ in range(3):
+        auto(wide, objective)
+    assert auto.runner is None
+    time_left = 128
+    for _ in range(3):
+        auto(wide, objective)
+    recorded = auto.runner
+    assert recorded is not None
+    time_left = 0
+    auto(wide, objective)
+    assert auto.runner is recorded and not recorded.cleared
+
+
+def test_online_replay_tece_first_pool_rechecks_driver_headroom(
+    online_training_case, monkeypatch
+):
+    from equivariantx_foundation.models.tace import planner, replay_loss
+
+    model, raw, objective, optimizer = online_training_case
+    gib = 2**30
+    device = raw["positions"].device
+    memory = {"free": 17, "released": 2}
+    trimmed = []
+
+    def trim():
+        trimmed.append(memory["free"])
+        memory["free"] += memory["released"]
+
+    monkeypatch.setattr(
+        torch.cuda, "mem_get_info", lambda d: (memory["free"] * gib, 80 * gib)
+    )
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda d: 44 * gib)
+    monkeypatch.setattr(
+        torch.cuda, "memory_allocated", lambda d: (1 + 4 * model.calls) * gib
+    )
+    monkeypatch.setattr(torch.cuda, "device", lambda d: nullcontext())
+    monkeypatch.setattr(torch.cuda, "empty_cache", trim)
+
+    def make(family):
+        monkeypatch.setattr(planner, "release_schedule", lambda *a, **kw: (family, ""))
+        return replay_loss.OnlineTrainingLoss.try_create(model, optimizer, objective)
+
+    tece = make("tece_oam_rra")
+    for _ in range(3):
+        tece(raw, objective)
+    # Reserved but unallocated bytes need not be releasable (e.g. a private pool).
+    assert trimmed == [17] and tece.runner is None and not tece.disabled
+    memory["free"] = 24
+    for _ in range(3):
+        tece(raw, objective)
+    assert trimmed == [17] and tece.runner is None
+    tece.clear()
+    assert not tece._can_capture(6 * gib, device)
+    memory["free"] = 40
+    assert tece._can_capture(6 * gib, device)
+    assert not optimizer.state and model.scale.grad is None
+
+    memory.update(free=17, released=5)
+    fresh = make("tece_oam_rra")
+    assert fresh._can_capture(6 * gib, device)
+    assert trimmed == [17, 17]
+    # A live first graph must not let its owner open a second tight pool.
+    existing = make("tece_oam_rra")
+    existing.workspaces[(16, 128, 2)] = gib
+    for auto in (existing, make("tace_oam_7m"), make("tace_oam_l")):
+        assert not auto._can_capture(6 * gib, device)
+        assert trimmed == [17, 17]
+
+
 @pytest.mark.parametrize("watch", [False, True])
 def test_replay_registration_updates(monkeypatch, watch):
     from equivariantx_foundation.models.tace import replay_loss
@@ -572,6 +1234,77 @@ def test_weighted_efs_preserves_native_terms_and_gradients_on_cpu(
     )
 
 
+def test_packaged_bucket_preserves_weighted_loss_and_real_prediction_rows(monkeypatch):
+    from equivariantx_foundation.targets import aoti
+    from tace.lightning.foundation import _packaged_loss
+    from tace.utils.loss.normal import NormalLoss
+
+    stub, batch = _weighted_sample()
+    model = torch.nn.Module()
+    model.readout_fn = stub.readout_fn
+    model.prepare_property_data = dict
+    model.weight = torch.nn.Parameter(torch.tensor(0.7))
+    terms = ["mse_energy_per_atom", "huber_forces", "mae_stress"]
+    normal = NormalLoss(["energy", "forces", "stress"], terms, [1, 2, 3])
+    with pytest.raises(ValueError, match="Cartesian UV"):
+        aoti._bucket_objective(model, normal)
+    with pytest.raises(ValueError, match="one"):
+        aoti._fixed_bucket([8, 18])
+    with pytest.raises(ValueError, match="one"):
+        aoti._fixed_bucket([[8, 18, 4]])
+
+    def predict(data):
+        nodes = model.weight * data["positions"].cos()
+        node_energy = nodes.sum(-1)
+        energy = nodes.new_zeros(len(data["ptr"]) - 1).index_add(
+            0, data["batch"], node_energy
+        )
+        return dict(
+            energy=energy,
+            node_energy=node_energy,
+            forces=nodes,
+            stress=model.weight * data["lattice"],
+        )
+
+    wrapped = PaddedEFSLoss(normal)
+    capture = []
+
+    def load(path, *, device_index, replay_inputs=None):
+        def run(data, params, buffers):
+            assert replay_inputs is not None and params["model.weight"] is model.weight
+            out = predict(data)
+            loss = wrapped(out, data)
+            (grad,) = torch.autograd.grad(loss, model.weight)
+            return out, loss.detach(), {"model.weight": grad}
+
+        capture.append(replay_inputs is not None)
+        run.replay_bucket = (8, 18, 4)
+        run._host_binding = {"contract": "test"}
+        return run
+
+    calls = []
+    monkeypatch.setattr(aoti, "_bucket_objective", lambda *args: wrapped)
+    monkeypatch.setattr(aoti, "load_training", load)
+    monkeypatch.setattr(
+        aoti, "validate_training_model", lambda *args: calls.append(args)
+    )
+    compute = _packaged_loss("test.pt2", model, normal, torch.device("cpu"))
+    for _ in range(2):
+        expected = predict(batch)
+        expected_loss = normal(expected, batch)
+        (expected_grad,) = torch.autograd.grad(expected_loss, model.weight)
+        model.weight.grad = None
+        actual, loss = compute(batch, normal)
+        loss.backward()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(loss, expected_loss)
+        torch.testing.assert_close(model.weight.grad, expected_grad)
+    assert capture == [False, True] and len(calls) == 1
+    normal.loss_property_weights[0] = 4.0
+    with pytest.raises(ValueError, match="objective changed"):
+        compute(batch, normal)
+
+
 def test_graph_capacity_preserves_real_components_and_replay_shapes():
     model, sample = _weighted_sample()
     two = sample.to_dict()
@@ -614,27 +1347,42 @@ def test_graph_capacity_preserves_real_components_and_replay_shapes():
 
 
 def test_weighted_efs_rejects_custom_inputs_and_objectives_on_cpu(monkeypatch):
+    from equivariantx_foundation.models.tace.replay_loss import _loss_signature
+    from equivariantx_foundation.models.tace.training import UnsupportedReplayBatch
     from tace.utils.loss.normal import NormalLoss
     from tace.utils.loss.registry import LOSS_FN
 
     model, data = _weighted_sample()
     b = data.to_dict()
-    with pytest.raises(ValueError, match="graph|structure"):
+    with pytest.raises(ValueError, match="graph|structure") as exc:
         pack_efs_training_batch(model, b, 8, 18, max_graphs=1)
+    assert not isinstance(exc.value, UnsupportedReplayBatch)
     for bad in (
         "edge_pair_rows",
         "lmp_data",
         "initial_noncollinear_magmoms",
         "user_field",
     ):
-        with pytest.raises(ValueError, match=bad):
+        with pytest.raises(UnsupportedReplayBatch, match=bad):
             pack_efs_training_batch(model, {**b, bad: b["positions"]}, 8, 18)
-    with pytest.raises(ValueError, match="per structure"):
+    with pytest.raises(UnsupportedReplayBatch, match="per structure"):
         pack_efs_training_batch(model, {**b, "entropy": torch.zeros(2, 1)}, 8, 18)
-    with pytest.raises(ValueError, match="geometry or label shape"):
+    with pytest.raises(UnsupportedReplayBatch, match="geometry or label shape"):
         pack_efs_training_batch(model, {**b, "energy": b["energy"][:, None]}, 8, 18)
     names = ["mse_energy", "huber_forces", "mae_stress"]
-    obj = NormalLoss(["energy", "forces", "stress"], names, [1.0, 1.0, 1.0])
+    obj = NormalLoss(
+        ["energy", "forces", "stress"],
+        names,
+        [1.0, 1.0, 1.0],
+        [{}, {"element_weights": [1.0, 2.0]}, {}],
+    )
+    initial = _loss_signature(obj)
+    obj.loss_property_weights[0] = 2.0
+    reweighted = _loss_signature(obj)
+    assert reweighted != initial
+    obj.loss_function_kwargs[1]["element_weights"][1] = 0.25
+    changed_elements = _loss_signature(obj)
+    assert changed_elements != reweighted
     with (
         obj.register_forward_hook(lambda *_: None),
         pytest.raises(ValueError, match="unmodified"),
@@ -642,6 +1390,7 @@ def test_weighted_efs_rejects_custom_inputs_and_objectives_on_cpu(monkeypatch):
         PaddedEFSLoss(obj)
     with monkeypatch.context() as m:
         m.setitem(LOSS_FN, names[0], lambda *_: None)
+        assert _loss_signature(obj) != changed_elements
         with pytest.raises(ValueError, match="Replaced"):
             PaddedEFSLoss(obj)
     with pytest.raises(ValueError, match="constant numeric"):
@@ -832,8 +1581,26 @@ def test_ddp_bucket_requires_nccl_and_global_counts(monkeypatch, world_size):
     )
     assert calls == [(1,)]  # no collective from the actual local objective
     raw = data.to_dict()
-    native = obj(predict(raw), prepare_tensor_loss_counts(raw, ("stress",)))
+    calls.clear()
+    counted = prepare_tensor_loss_counts(raw, ("stress",))
+    native = obj(predict(raw), counted)
     torch.testing.assert_close(actual, native)
+    with pytest.raises(ValueError, match="Unsupported E/F/S replay fields"):
+        pack_efs_training_batch(model, counted, 8, 16)
+    for bad in (
+        {**counted, "_valid_stress_count": torch.zeros(1, dtype=torch.long)},
+        {**counted, "_loss_world_size": torch.tensor(2.0)},
+        raw,
+    ):
+        with pytest.raises(ValueError, match="scalar global stress counts"):
+            pack_efs_training_batch(model, bad, 8, 16, _global_stress=True)
+    counted_padded = pack_efs_training_batch(
+        model, counted, 8, 16, max_graphs=4, _global_stress=True
+    )
+    for key in ("_valid_stress_count", "_loss_world_size"):
+        assert counted_padded[key] is counted[key]
+    torch.testing.assert_close(loss(predict(counted_padded), counted_padded), native)
+    assert calls == [(1,)]  # Eager and padded branches share the one real-batch count.
     calls.clear()
     ef = NormalLoss(["energy", "forces"], ["mse_energy", "huber_forces"], [1.0, 1.0])
     packed = pack_efs_training_batch(model, data, 8, 16, stress=False)
@@ -1080,7 +1847,8 @@ def test_multihead_bucket_switches_fidelity_without_recapture(monkeypatch, basis
         # the registered model classes or their Python forwards.
         assert hits["eqx_foundation::tece_interaction"] == 3
         assert hits["eqx_foundation::tece_contraction"] >= 3
-        assert hits["eqx::edge_program"] >= 3 and hits["eqx::bilinear_ace"] >= 6
+        assert hits["eqx::edge_program"] >= 3
+        assert hits["eqx_tace_product::bilinear_ace"] >= 6
     capture = bucket.step.graph
     for i, (default, ids) in enumerate(
         [(0, None), (0, [1, 0]), (1, None), (1, [0, 1])]

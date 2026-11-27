@@ -8,7 +8,7 @@ class CueUuuSymmetricContraction(torch.nn.Module):
 
     Parameters
     ----------
-    module : equivariantx.mbe.ace.UuuSymmetricContraction
+    module : equivariantx.o3.UuuSymmetricContraction
         Contraction supplying angular coefficients and weight ordering.
     """
 
@@ -28,7 +28,11 @@ class CueUuuSymmetricContraction(torch.nn.Module):
             descriptor = cue.SegmentedTensorProduct.from_subscripts(
                 ",".join(["u"] * (degree + 2))
             )
-            sizes = (module.num_paths, *([module.input_dim] * degree), module.output_dim)
+            sizes = (
+                module.num_paths,
+                *([module.input_dim] * degree),
+                module.output_dim,
+            )
             for operand, size in enumerate(sizes):
                 descriptor.add_segments(operand, [(self.num_channels,)] * size)
             weights = getattr(module, f"weights_{degree}").tolist()
@@ -55,6 +59,9 @@ class CueUuuSymmetricContraction(torch.nn.Module):
             input_indices={0: node_type},
         )[0].reshape(features.shape[0], self.output_dim, self.num_channels)
         return torch.cat(
-            [part.transpose(1, 2).flatten(1) for part in output.split(self.output_dims, 1)],
+            [
+                part.transpose(1, 2).flatten(1)
+                for part in output.split(self.output_dims, 1)
+            ],
             dim=1,
         )

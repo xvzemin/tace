@@ -680,7 +680,8 @@ class Representation(torch.nn.Module):
             and self.angular_mode == "cg"
         )
         if degree_stream:
-            from equivariantx.conv import EdgePairs, indexed_rows
+            from equivariantx.nn import indexed_rows
+            from equivariantx.utils import EdgePairs
 
             if radial_map is not None:
                 pairs = EdgePairs(representatives, radial_map)

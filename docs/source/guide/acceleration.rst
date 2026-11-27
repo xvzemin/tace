@@ -74,8 +74,9 @@ To select an operator backend explicitly, configure the
 ``backend: torch`` or ``backend: cuda``. If only existing host operators match,
 use ``tace-train`` unless supplying an explicit joint training package.
 Installed plans must preserve checkpoint keys, parameter order and optimizer roles.
-For the separate XL-v2 capture schedule use
-``tace-fast-train -cn omat.yaml +fast_schedule=oam_v2``.
+The matching XL-v2 E/F/S training recipe selects the capture schedule
+automatically. Set ``+fast_schedule=oam_v2`` to require it, or
+``+fast_schedule=foundation`` to use the ordinary Foundation planner.
 
 For TECE rotary attention, explicit regional CUDA can stream the radial MLP
 and attention without materializing the full edge update. It uses the model's
@@ -208,21 +209,23 @@ EQX in TACE
    * - TACE operation
      - EQX implementation
    * - ``cgtp``
-     - ``equivariantx.conv.O3TensorProductConv``
+     - ``equivariantx.o3.O3TensorProductConv``
    * - ``o2_cgtp``
-     - ``equivariantx.conv.O2O3TensorProductConv``
+     - ``equivariantx.o2.O2O3TensorProductConv``
    * - ``co3``
-     - ``equivariantx.conv.CartesianTensorProductConv``
+     - ``equivariantx.co3.CartesianTensorProductConv``
    * - ``uu_o2``
-     - ``equivariantx.conv.UuO2TensorProductConv``
+     - ``equivariantx.o2.UuO2TensorProductConv``
    * - ``w6j_mag``
-     - ``equivariantx.conv.Wigner6jTensorProductConv``
+     - ``equivariantx.o3.Wigner6jTensorProductConv``
    * - ``uv_o2`` / ``uv_o2_mag``
-     - ``equivariantx.conv.UvO2TensorProductConv``
+     - ``equivariantx.o2.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
      - ``equivariantx_foundation.models.tace.tece_oam_rra``
-   * - Standard / gated bilinear ACE
-     - ``equivariantx.mbe.ace.UuuFullyConnectedSymmetricContraction`` / ``equivariantx.mbe.ace.BilinearContraction``
+   * - Standard ACE
+     - ``equivariantx.o3.UuuFullyConnectedSymmetricContraction``
+   * - Gated bilinear ACE (Foundation)
+     - ``equivariantx_foundation.models.tace.bilinear.BilinearContraction``
    * - Nonlinear CGTP / ICTD ACE
      - ``equivariantx_foundation.models.tace.nonlinear_ace``
 

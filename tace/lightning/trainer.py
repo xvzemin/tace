@@ -228,8 +228,8 @@ def build_trainer(
             filter_keys = ["logger", "callbacks", "precision", "plugins"]
             if k not in filter_keys:
                 filter_trainer_cfg.update({k: v})
-        num_batch = 2 if not cfg.get("dataset", {}).get("no_valid_set", False) else 0
-        filter_trainer_cfg.update({"num_sanity_val_steps": num_batch})
+        if cfg.get("dataset", {}).get("no_valid_set", False):
+            filter_trainer_cfg["num_sanity_val_steps"] = 0
         policy = resolve_precision(cfg, training=True)
         policy.apply()
         if policy.autocast is not None:

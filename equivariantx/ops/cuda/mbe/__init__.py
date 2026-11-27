@@ -1,1 +1,0 @@
-"""CUDA many-body expansions."""

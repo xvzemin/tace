@@ -7,6 +7,27 @@ from equivariantx.o2 import rotation_matrix_to_y_axis
 from equivariantx.ops import config
 
 
+@pytest.mark.parametrize("mmax", [0, 2])
+def test_cartesian_plan_owns_synthesis_tables(mmax):
+    frame = co2.LocalFrame("2x0e+2x1e+2x2e", mmax=mmax, backend="torch")
+    ir = frame.irreps_out
+    layer = co2.UuTensorProductConv(
+        frame, co2.UuLinear(ir, ir, 2, backend="torch"), frame, backend="torch"
+    )
+    for dtype in (None, torch.float32, torch.float64, torch.float32):
+        if dtype is not None:
+            layer.to(dtype=dtype, device="cpu")
+        for rank in range(3):
+            source = getattr(frame, f"synthesis_{rank}").T
+            table = getattr(layer.plan, f"synthesis_{rank}")
+            assert (
+                table.untyped_storage().data_ptr()
+                != source.untyped_storage().data_ptr()
+            )
+            assert table.stride() == (table.size(1), 1)
+            torch.testing.assert_close(table, source)
+
+
 @pytest.mark.parametrize("kind", ["uu", "uv"])
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("radial_mode", ["full", "last"])

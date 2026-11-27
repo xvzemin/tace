@@ -186,7 +186,7 @@ def _regional_bucket_stages(host, rep):
         return messages and all(spherical_bucket_product(m) for m in rep.products)
     elif type(host) is CartesianTACE:
         from equivariantx import co3
-        from equivariantx.conv.co3 import CartesianTensorProductConv
+        from equivariantx.co3.conv import CartesianTensorProductConv
         from tace.models.spherical.inter import O3CgtpInteraction
 
         from .cartesian import (
@@ -516,6 +516,10 @@ class _LocalParameterVJP:
         return outputs, loss, grads
 
 
+class UnsupportedReplayBatch(ValueError):
+    """The input fields do not match the training graph contract."""
+
+
 class FixedShapeTrainingStep:
     """Replay forward and parameter backward, then update live optimizer state.
 
@@ -727,7 +731,7 @@ class FixedShapeTrainingStep:
             self._replay_model, batch, get_fidelity_idx=self.get_fidelity_idx
         )
         if batch.keys() != self.static.keys():
-            raise ValueError("The training batch field set changed")
+            raise UnsupportedReplayBatch("The training batch field set changed")
         with torch.no_grad():
             for k, dst in self.static.items():
                 src = batch[k]
@@ -738,10 +742,14 @@ class FixedShapeTrainingStep:
                         or src.dtype != dst.dtype
                         or src.device != dst.device
                     ):
-                        raise ValueError(f"Training input signature changed at {k}")
+                        raise UnsupportedReplayBatch(
+                            f"Training input signature changed at {k}"
+                        )
                     dst.copy_(src)
                 elif src != dst:
-                    raise ValueError(f"Static non-tensor input changed at {k}")
+                    raise UnsupportedReplayBatch(
+                        f"Static non-tensor input changed at {k}"
+                    )
         self.graph.replay()
         return self.outputs
 
@@ -966,6 +974,7 @@ _EF_GEOMETRY = {
 }
 # PyG bookkeeping or derivable from edge_index, unused by the admitted models.
 _EFS_METADATA = {"num_neighbors", "num_nodes", "_num_nodes"}
+_GLOBAL_STRESS = ("_valid_stress_count", "_loss_world_size")
 
 
 def _directed_edge_layout(model):
@@ -976,7 +985,14 @@ def _directed_edge_layout(model):
 
 
 def pack_efs_training_batch(
-    model, batch, max_atoms, max_edges, max_graphs=None, *, stress=True
+    model,
+    batch,
+    max_atoms,
+    max_edges,
+    max_graphs=None,
+    *,
+    stress=True,
+    _global_stress=False,
 ):
     """Pack E/F or E/F/S graphs and sample weights for a fixed capacity.
 
@@ -987,6 +1003,17 @@ def pack_efs_training_batch(
     labels and their weights are ignored. Feed the result to PaddedEFSLoss only.
     """
     fields = set(batch.keys())
+    if _global_stress:
+        device = batch["positions"].device
+        if not stress or any(
+            not torch.is_tensor(count := batch.get(k))
+            or count.ndim != 0
+            or count.dtype != torch.int64
+            or count.device != device
+            for k in _GLOBAL_STRESS
+        ):
+            raise UnsupportedReplayBatch("Expected scalar global stress counts")
+        fields.difference_update(_GLOBAL_STRESS)
     if stress:
         geometry_keys = _EF_GEOMETRY | {"stress"}
         weights = (*_EF_WEIGHTS, "stress_weight")
@@ -995,12 +1022,14 @@ def pack_efs_training_batch(
         fields.difference_update(("stress", "stress_weight"))
     unknown = fields - geometry_keys - _EFS_METADATA - set(weights)
     if unknown:
-        raise ValueError(f"Unsupported E/F/S replay fields: {sorted(unknown)}")
+        raise UnsupportedReplayBatch(
+            f"Unsupported E/F/S replay fields: {sorted(unknown)}"
+        )
     required = geometry_keys - {"atomic_numbers", "node_type", "fidelity_idx"}
     if not required.union(weights) <= fields or not fields.intersection(
         {"atomic_numbers", "node_type"}
     ):
-        raise ValueError(
+        raise UnsupportedReplayBatch(
             "Expected complete geometry, requested labels and sample weights"
         )
     geometry = {k: batch[k] for k in fields & geometry_keys}
@@ -1009,7 +1038,9 @@ def pack_efs_training_batch(
         not torch.is_tensor(batch[k]) or batch[k].device != device
         for k in fields - _EFS_METADATA
     ):
-        raise ValueError("E/F/S replay inputs and model must share one device")
+        raise UnsupportedReplayBatch(
+            "E/F/S replay inputs and model must share one device"
+        )
     n, e, g = (
         len(batch["positions"]),
         batch["edge_index"].size(-1),
@@ -1028,9 +1059,11 @@ def pack_efs_training_batch(
         "fidelity_idx": (g,),
     }
     if any(k in fields and batch[k].shape != shape for k, shape in shapes.items()):
-        raise ValueError("Invalid E/F/S replay geometry or label shape")
+        raise UnsupportedReplayBatch("Invalid E/F/S replay geometry or label shape")
     if any(batch[k].shape != (g,) or batch[k].is_complex() for k in weights):
-        raise ValueError("Expected one real E/F/S weight and entropy per structure")
+        raise UnsupportedReplayBatch(
+            "Expected one real E/F/S weight and entropy per structure"
+        )
     packed = _pack(
         geometry,
         max_atoms,
@@ -1052,6 +1085,8 @@ def pack_efs_training_batch(
         packed["_efs_loss_ptr"] = torch.cat((ptr, end))
     for k in weights:
         packed[k] = torch.cat((batch[k], batch[k].new_zeros(slots - g)))
+    if _global_stress:
+        packed.update((k, batch[k]) for k in _GLOBAL_STRESS)
     # Runtime inputs: an identical bucket shape need not have the same real N.
     # Fill on-device. new_tensor([python scalars]) would block the submitting
     # thread on a pageable H2D copy, even with substantial training work queued.

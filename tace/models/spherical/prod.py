@@ -10,15 +10,15 @@ from typing import Dict
 import torch
 from e3nn import o3
 
-from equivariantx.mbe.ace import (
+from equivariantx.o3 import (
     ContractionInstruction,
     GeneralizedContraction,
+    TransposeIrrepsLayout,
     UuuFullyConnectedSymmetricContraction,
 )
 from equivariantx.ops import config as eqx_config
 from tace.utils.env import acceleration_enabled, eqx_backend
 
-from ..layout import LayoutTransform
 from ..linear import (
     e3nnElementLinear,
     e3nnLinear,
@@ -281,7 +281,13 @@ class MaceACE(Product):
             if self.num_channel != self.num_hidden_channel
             else torch.nn.Identity()
         )
-        self.reshape = LayoutTransform(self.irreps_hidden, layout_out="mul_ir")
+        self.reshape = TransposeIrrepsLayout(
+            self.irreps_hidden,
+            source="mul_ir",
+            target="mul_ir",
+            flat_out=False,
+            backend=eqx_backend("product"),
+        )
         coupling_irreps = o3.Irreps([(1, ir) for _, ir in self.irreps_hidden])
         tensors, weights = [], []
         num_elements = 1 if self.agnostic else self.num_elements
@@ -603,7 +609,15 @@ class TaceACE(PathProduct):
         else:
             self.layouts = torch.nn.ModuleList(
                 [
-                    LayoutTransform(order) if order else torch.nn.Identity()
+                    TransposeIrrepsLayout(
+                        order,
+                        source="mul_ir",
+                        target="ir_mul",
+                        flat_out=False,
+                        backend=eqx_backend("product"),
+                    )
+                    if order
+                    else torch.nn.Identity()
                     for order in irreps
                 ]
             )

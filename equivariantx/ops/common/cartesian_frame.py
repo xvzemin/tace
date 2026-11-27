@@ -129,13 +129,14 @@ def build_plan(module):
             if rank in maps:
                 continue
             rows = (
-                getattr(frame, f"synthesis_{rank}").T
-                if inverse
-                else frame.analysis_matrix(rank, len(paths) - 1).to(
-                    getattr(frame, f"basis_{rank}_0")
+                getattr(frame, f"synthesis_{rank}").T.clone(
+                    memory_format=torch.contiguous_format
                 )
+                if inverse
+                else frame.analysis_matrix(rank, len(paths) - 1)
+                .to(getattr(frame, f"basis_{rank}_0"))
+                .contiguous()
             )
-            rows = rows.contiguous()
             name = f"{'synthesis' if inverse else 'analysis'}_{rank}"
             plan.register_buffer(name, rows, persistent=False)
             table = p.input(4 + len(tables), "shared", rows.numel())
@@ -219,7 +220,9 @@ class CartesianEdgeProgram(torch.nn.Module):
                     if inverse
                     else LocalFrame.analysis_matrix(rank, order)
                 )
-                self._buffers[name] = rows.contiguous().to(table)
+                self._buffers[name] = rows.to(
+                    table, copy=True, memory_format=torch.contiguous_format
+                )
         return self
 
     def forward(

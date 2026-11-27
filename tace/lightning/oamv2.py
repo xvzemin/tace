@@ -147,11 +147,15 @@ class OAMLightningModule(LightningWrapperModel):
                 self.workspace,
                 maximum=self.capture_limit,
                 shared_graph_plan=True,
+                defer_new_shapes=self.cfg.get("fast_schedule", "auto") == "auto",
             )
             self.captured_training.programs = self._training_programs()
         data = dict(batch.items())
         nodes = data["positions"].shape[0]
-        predictions, value = self.captured_training(pad_batch(data, 64, 1024))
+        cutoff = self.canonical_model.readout_fn.model_config["cutoff"]
+        predictions, value = self.captured_training(
+            pad_batch(data, 64, 1024, cutoff=cutoff)
+        )
         loss = value.detach()
         predictions = {
             key: tensor[:nodes] if key in ("forces", "node_energy") else tensor

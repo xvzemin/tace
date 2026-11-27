@@ -549,7 +549,9 @@ def test_element_linear_indexed(moe, matrix_weight, num_nodes):
         **({"num_experts": 2} if moe else {}),
     )
     assert module.torch_linear.backend == "torch"
-    assert module.eqx_linear.backend == "cuda"
+    from equivariantx.ops.config import DEFAULT_BACKEND
+
+    assert module.eqx_linear.backend == DEFAULT_BACKEND
     with torch.no_grad():
         module.bias.normal_()
     x = torch.randn(num_nodes, 16, requires_grad=True)
@@ -2025,45 +2027,47 @@ def test_time_reversal_wigner6j_rejects_scatter_acceleration(
     [(1, False, False), (2, False, False), (2, True, False), (1, False, True)],
 )
 def test_bilinear_product_integration(monkeypatch, matrix, experts, shared, agnostic):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is unavailable")
     from tace.models.linear import switch_e3nn_weight_layout
-    from tace.models.spherical.tece_oam_rra import BilinearMoEACE
 
-    monkeypatch.setenv("TACE_USE_EQX", "1")
-    model = (
-        BilinearMoEACE(
-            layer=0,
-            num_layers=1,
-            num_elements=2,
-            Lmax=1,
-            lmax=1,
-            num_channel=4,
-            num_expert=experts,
-            num_channel_per_expert=2,
-            target_irreps=o3.Irreps("0e+1o"),
-            irreps_in=o3.Irreps("4x0e+4x1o"),
-            correlation=[2],
-            l1l2=None,
-            bias=True,
-            nonlinear="silu_bilineargate",
-            parity=True,
-            use_shared_expert=shared,
-            agnostic=agnostic,
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def build(enabled):
+        monkeypatch.setenv("TACE_USE_EQX", str(int(enabled)))
+        layer = (
+            BilinearMoEACE(
+                layer=0,
+                num_layers=1,
+                num_elements=2,
+                Lmax=1,
+                lmax=1,
+                num_channel=4,
+                num_expert=experts,
+                num_channel_per_expert=2,
+                target_irreps=o3.Irreps("0e+1o"),
+                irreps_in=o3.Irreps("4x0e+4x1o"),
+                correlation=[2],
+                l1l2=None,
+                bias=True,
+                nonlinear="silu_bilineargate",
+                parity=True,
+                use_shared_expert=shared,
+                agnostic=agnostic,
+            )
+            .double()
+            .to(device)
         )
-        .double()
-        .cuda()
-    )
-    switch_e3nn_weight_layout(model, "matrix" if matrix == "1" else "flat")
+        return switch_e3nn_weight_layout(layer, "matrix" if matrix == "1" else "flat")
+
+    model, reference = build(True), build(False)
     with torch.no_grad():
         for name, p in model.named_parameters():
             if "bias" in name:
                 p.normal_()
-    reference = deepcopy(model)
-    del reference.eqx_ace
-    x = torch.randn(3, 16, device="cuda", dtype=torch.float64, requires_grad=True)
-    types = torch.tensor([0, 1, 1], device="cuda")
-    batch = torch.zeros(3, device="cuda", dtype=torch.long)
+    reference.load_state_dict(model.state_dict(), strict=True)
+    assert not hasattr(model, "eqx_ace")
+    x = torch.randn(3, 16, device=device, dtype=torch.float64, requires_grad=True)
+    types = torch.tensor([0, 1, 1], device=device)
+    batch = torch.zeros(3, device=device, dtype=torch.long)
     actual, expected = [m(x, types, None, batch) for m in (model, reference)]
     torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
     gradients = [

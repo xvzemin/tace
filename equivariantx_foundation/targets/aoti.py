@@ -328,8 +328,75 @@ def _sum_single_graph(graph, batch):
         graph.erase_node(node)
 
 
+def _fixed_bucket(capacity):
+    from ..execution.replay import replay_capacity
+
+    capacity = replay_capacity(capacity)
+    if len(capacity) != 3 or not all(type(n) is int for n in capacity):
+        raise ValueError(
+            "A training package requires one [max_atoms, max_edges, max_graphs] capacity."
+        )
+    return capacity
+
+
+def _bucket_objective(model, objective):
+    from tace.models.cartesian.tace import CartesianTACE
+    from tace.models.spherical.inter import UvO2Interaction
+
+    from ..models.tace.replay_loss import _validate_model
+    from ..models.tace.training import PaddedEFSLoss
+
+    host = model.readout_fn
+    if not (
+        type(host) is CartesianTACE
+        and getattr(host.representation, "_foundation_regional", False)
+        and all(type(m) is UvO2Interaction for m in host.representation.interactions)
+        and _validate_model(model, properties=getattr(objective, "loss_property", ()))
+        == ("energy", "forces", "stress")
+    ):
+        raise ValueError(
+            "Fixed bucket packages require a regional Cartesian UV E/F/S training plan."
+        )
+    return PaddedEFSLoss(objective).to(device=host.cutoff.device)
+
+
+def _bucket_data(model, raw, capacity):
+    from ..models.tace.training import pack_efs_training_batch, prepare_training_data
+
+    with torch.no_grad():
+        packed = pack_efs_training_batch(model, raw, *capacity)
+    return prepare_training_data(model, packed)
+
+
+def _bucket_trace(adapter, objective, data):
+    from tace.models.compile.joint import JointTraining, supports_joint_loss
+
+    from ..models.tace.training import PaddedEFSLoss
+
+    if not (
+        type(objective) is PaddedEFSLoss
+        and not objective._ddp
+        and adapter.training
+        and objective.training
+        and supports_joint_loss(adapter, objective.objective)
+        and {"_efs_loss_ptr", "_efs_term_scales"} <= data.keys()
+    ):
+        raise ValueError("Expected a fixed, single-device, padded E/F/S training loss.")
+    with torch.autograd.set_multithreading_enabled(False):
+        return JointTraining(
+            adapter, objective, data, _trace_only=True, _fixed_shapes=True
+        ).trace
+
+
 def export_training(
-    model, objective, sample, output, *, dynamic_shapes=False, max_edges=None
+    model,
+    objective,
+    sample,
+    output,
+    *,
+    dynamic_shapes=False,
+    max_edges=None,
+    replay_bucket=None,
 ):
     """Package a TACE training loss and its explicit parameter gradients.
 
@@ -347,6 +414,9 @@ def export_training(
     max_edges : int, optional
         Inclusive upper bound on directed edges for a dynamic package. Inputs
         are not padded. The export sample must contain at least two edges.
+    replay_bucket : sequence of int, optional
+        Maximum real atoms, directed edges and structures per microbatch for
+        single-device FP32 Cartesian UV energy, force and stress training.
 
     Examples
     --------
@@ -359,8 +429,18 @@ def export_training(
     from ..models.tace.training_contract import _training_host_contract
 
     require_cuda(model)
-    adapter = as_joint_export_model(model, sample)
-    data = training_batch(model, objective, sample)
+    if replay_bucket is None:
+        adapter = as_joint_export_model(model, sample)
+        data = training_batch(model, objective, sample)
+    else:
+        if dynamic_shapes or max_edges is not None:
+            raise ValueError(
+                "Use a fixed replay_bucket without dynamic_shapes or max_edges."
+            )
+        replay_bucket = _fixed_bucket(replay_bucket)
+        objective = _bucket_objective(model, objective)
+        data = _bucket_data(model, sample, replay_bucket)
+        adapter = as_joint_export_model(model, data)
     if max_edges is not None and not (
         dynamic_shapes
         and type(max_edges) is int
@@ -370,8 +450,16 @@ def export_training(
         raise ValueError(
             "max_edges requires a dynamic training batch with 2 <= edges <= max_edges and max_edges > 2."
         )
-    traced = trace_joint_training(
-        adapter, objective, data, fixed_shapes=not dynamic_shapes, max_edges=max_edges
+    traced = (
+        _bucket_trace(adapter, objective, data)
+        if replay_bucket is not None
+        else trace_joint_training(
+            adapter,
+            objective,
+            data,
+            fixed_shapes=not dynamic_shapes,
+            max_edges=max_edges,
+        )
     )
     graph = traced.graph
     devices = {value.device for value in traced.args}
@@ -386,6 +474,10 @@ def export_training(
             "max_edges": max_edges,
         }
     except Exception as exc:
+        if replay_bucket is not None:
+            raise ValueError(
+                f"Cannot bind fixed bucket training package: {exc}"
+            ) from exc
         # Standalone inference of explicit gradients has never required a live
         # Python model; unsupported host verification must not break this ABI.
         binding = {"unsupported": str(exc)}
@@ -451,6 +543,16 @@ def export_training(
             static_replay=False,
             forbidden_inputs=sorted(adapter._joint_forbidden_inputs),
         )
+    if replay_bucket is not None:
+        if not schema["static_replay"]:
+            raise ValueError(
+                "The fixed bucket program is not safe for CUDA graph replay."
+            )
+        if set(traced.predictions) != {"energy", "node_energy", "forces", "stress"}:
+            raise ValueError(
+                "Unexpected outputs for a fixed Cartesian UV training package."
+            )
+        schema["replay_bucket"] = replay_bucket
     if getattr(adapter, "_joint_positive_periodic_cell", None):
         schema["positive_periodic_cell"] = adapter._joint_positive_periodic_cell
     if dims:
@@ -542,18 +644,27 @@ def load_training(path, *, device_index=-1, replay_inputs=None):
     if schema is None:
         raise ValueError("Not an EquivariantX joint training package")
     schema = json.loads(schema)
+    replay_bucket = (
+        _fixed_bucket(schema["replay_bucket"]) if "replay_bucket" in schema else None
+    )
+    if replay_bucket is not None and not (
+        schema.get("static_replay") and "contract" in (schema.get("host_binding") or {})
+    ):
+        raise ValueError(
+            "Fixed bucket packages require a static program and a verified host contract."
+        )
 
     def check_local_execution():
         if (
             torch.distributed.is_available()
             and torch.distributed.is_initialized()
-            and torch.distributed.get_world_size() > 1
+            and (replay_bucket is not None or torch.distributed.get_world_size() > 1)
         ):
             raise ValueError(
                 "This joint training package supports single-rank execution only."
             )
 
-    if schema.get("local_only"):
+    if schema.get("local_only") or replay_bucket is not None:
         check_local_execution()
     if replay_inputs is not None and not schema.get("static_replay"):
         raise ValueError(
@@ -594,6 +705,8 @@ def load_training(path, *, device_index=-1, replay_inputs=None):
         yield from (buffers[key] for key in buffer_names)
 
     def batch_tensors(batch):
+        if replay_bucket is not None:
+            check_local_execution()
         if schema.get("local_only"):
             check_local_execution()
             for key in schema["forbidden_inputs"]:
@@ -709,6 +822,7 @@ def load_training(path, *, device_index=-1, replay_inputs=None):
         )
 
     step._host_binding = schema.get("host_binding")
+    step.replay_bucket = replay_bucket
     return step
 
 

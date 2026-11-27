@@ -9,7 +9,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
+import equivariantx as eqx
 from equivariantx import o2
 from equivariantx.ops.compiler import compile_and_package
 from equivariantx.ops.precision import (
@@ -363,7 +363,7 @@ def test_convolution_geometry_precision(kind, backend):
         local_frame = o2.LocalFrame(args[0]).to(device)
         tp = o2.UuLinear(local_frame.irreps_out, local_frame.irreps_out, num_channel=2)
         module = (
-            eqx_conv.UuO2TensorProductConv(
+            eqx.o2.UuO2TensorProductConv(
                 local_frame,
                 tp,
                 local_frame,
@@ -374,9 +374,9 @@ def test_convolution_geometry_precision(kind, backend):
         )
     else:
         module = {
-            "o3": eqx_conv.O3TensorProductConv,
-            "o2": eqx_conv.O2O3TensorProductConv,
-            "co3": eqx_conv.CartesianTensorProductConv,
+            "o3": eqx.o3.O3TensorProductConv,
+            "o2": eqx.o2.O2O3TensorProductConv,
+            "co3": eqx.co3.CartesianTensorProductConv,
         }[kind](
             tp,
             backend=backend,
@@ -475,7 +475,7 @@ def test_uv_convolution_geometry_precision(backend):
     up = o2.Linear((frame.irreps_out * 2).regroup(), gate.irreps_in).float().to(device)
     down = o2.Linear(gate.irreps_out, frame.irreps_out).float().to(device)
     layer = (
-        eqx_conv.UvO2TensorProductConv(
+        eqx.o2.UvO2TensorProductConv(
             frame,
             [up, down],
             [gate],
