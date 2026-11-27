@@ -542,27 +542,19 @@ def test_o2_magnetic_interactions_keep_complete_soc_irreps():
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
-def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
-    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
+def test_time_reversal_model_uses_default_eqx(monkeypatch):
+    for name in ("TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)
     config = _time_reversal_model_config()
     config["product_basis"]["correlation"] = 3
     model = SphericalTACE(**config)
     representation = model.representation
-    interaction = representation.interactions[0]
 
     assert model.use_time_reversal
-    assert type(representation.o3_angular_basis).__module__.startswith("e3nn.")
-    assert type(interaction.linear_up.linear).__module__.startswith("e3nn.")
-    assert type(interaction.nonlinearity).__module__.startswith("e3nn.")
-    assert type(interaction.rejector.tp).__module__.startswith("e3nn.")
+    from equivariantx.o3.cgtp import TensorProduct
+
     assert all(
-        not tensor_product.use_eqt
-        for product in model.representation.products
-        for tensor_product in product.aces
-    )
-    assert all(
-        type(tensor_product.tp).__module__.startswith("e3nn.")
+        type(tensor_product.tp) is TensorProduct
         for product in representation.products
         for tensor_product in product.aces
     )
@@ -574,7 +566,7 @@ def test_time_reversal_model_disables_automatic_eqt(monkeypatch):
 )
 @pytest.mark.parametrize("time_reversal", [False, True])
 def test_o2_model_selects_time_reversal(monkeypatch, time_reversal):
-    for name in ("TACE_USE_EQT", "TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
+    for name in ("TACE_USE_CUE", "TACE_USE_OEQ", "TACE_USE_EQX"):
         monkeypatch.delenv(name, raising=False)
     config = _time_reversal_model_config() if time_reversal else _model_config()
     config["mmax"] = 1
@@ -653,22 +645,6 @@ def test_merge_layer_norm_is_time_reversal_equivariant():
     not supports_time_reversal(),
     reason="the installed e3nn does not represent time-reversal parity",
 )
-def test_time_odd_irreps_reject_eqt(monkeypatch):
-    irreps_in = o3.Irreps("2x0ee + 2x1eo")
-    target_irreps = o3.Irreps("2x0ee + 2x0eo + 2x1ee + 2x1eo + 2x2ee + 2x2eo")
-    monkeypatch.setenv("TACE_USE_EQT", "1")
-    with pytest.raises(ValueError, match="EQT does not support time-reversal"):
-        UuuTensorProduct(
-            irreps_in,
-            irreps_in,
-            target_irreps,
-        )
-
-
-@pytest.mark.skipif(
-    not supports_time_reversal(),
-    reason="the installed e3nn does not represent time-reversal parity",
-)
 @pytest.mark.parametrize(
     ("kernel", "environment"),
     [("CUE", "TACE_USE_CUE"), ("OEQ", "TACE_USE_OEQ")],
@@ -678,6 +654,7 @@ def test_time_odd_irreps_reject_scatter_acceleration(
     kernel,
     environment,
 ):
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     node_irreps = o3.Irreps("2x0ee + 2x1eo")
     edge_irreps = spherical_harmonics_irreps(1, p=-1)
     target_irreps = o3.Irreps("2x0ee + 2x0oo + 2x1eo + 2x1oe + 2x1oo")

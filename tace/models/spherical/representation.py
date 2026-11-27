@@ -13,7 +13,7 @@ from equivariantx import co3, o2
 from equivariantx.conv import EdgePairs, indexed_rows
 
 from ...dataset.quantity import PROPERTIES
-from ...utils.env import acceleration_enabled, get_tace_use_dens
+from ...utils.env import acceleration_enabled, eqx_backend, get_tace_use_dens
 from ..layer_norm import get_normalization_layer, residual_update_count
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
@@ -252,9 +252,7 @@ class NodeRepresentation(torch.nn.Module):
                 if uses_so2_interaction or uses_o2_interaction
                 else 0,
                 wigner_lmax,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="conv")
-                else "torch",
+                backend=eqx_backend("conv"),
             )
         else:
             self.o2_angular_basis = None
@@ -273,9 +271,7 @@ class NodeRepresentation(torch.nn.Module):
                 o3.Irreps.spherical_harmonics(lmax, p=-1),
                 normalize=False,
                 normalization="component",
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="conv")
-                else "torch",
+                backend=eqx_backend("conv"),
             )
             if uses_co3_interaction
             else None
@@ -982,9 +978,7 @@ class PairRepresentation(torch.nn.Module):
                 method="auto"
                 if acceleration_enabled("eqx", kernel="conv")
                 else "recursive",
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="conv")
-                else "torch",
+                backend=eqx_backend("conv"),
             )
         for angular_basis in (self.o2_angular_basis, self.o3_angular_basis):
             if angular_basis is not None:

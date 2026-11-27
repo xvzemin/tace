@@ -830,7 +830,7 @@ def frame_inputs(layer, nodes, edges, *, device, dtype):
     "kind,owners", [("uu", None), ("uv", None), ("uu", 4), ("uv", 4)]
 )
 def test_local_derivatives_and_independent_inverse(kind, owners, monkeypatch):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     torch.set_default_dtype(torch.float64)
     layer = local_layer(kind, 4).cuda().double()
     op, reason = local_rule(layer, backend="cuda", task="training")
@@ -880,7 +880,7 @@ def test_local_derivatives_and_independent_inverse(kind, owners, monkeypatch):
 
 @pytest.mark.parametrize("kind", ["uu", "uv"])
 def test_local_rules_preserve_existing_providers_and_low_degrees(kind, monkeypatch):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     layer = local_layer(kind, 4, lmax=1)
     rule, reason = local_rule(layer, backend="cuda", task="training")
     assert rule is None and "degree range" in reason
@@ -899,7 +899,7 @@ def test_canonical_local_stream_respects_basis_and_force_training(kind, monkeypa
     from equivariantx_foundation.tests.test_tace_plan import efs_loss, graph, make_model
     from tace.models.spherical.tace import SphericalTACE
 
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     torch.set_default_dtype(torch.float64)
 
     def build(**cfg):
@@ -1094,7 +1094,7 @@ def test_mixed_angular_consumers(kinds, node_kind, dtype, monkeypatch):
     )
     from tace.models.spherical.tace import SphericalTACE
 
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     torch.manual_seed(123)
 
     def build(**cfg):

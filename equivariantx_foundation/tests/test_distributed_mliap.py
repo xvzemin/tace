@@ -54,7 +54,7 @@ def potential(basis):
 
 @pytest.mark.parametrize("basis", ["spherical", "cartesian"])
 def test_portable_export_does_not_change_source(tmp_path, monkeypatch, basis):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     src = potential(basis).train()
     before = tuple(src.parameters())
     path = export_distributed(src, tmp_path / "regional.pt")
@@ -452,7 +452,7 @@ def test_real_two_rank_owner_energy_and_ghost_forces(tmp_path, monkeypatch, basi
     import numpy as np
 
     for name in ("TACE_USE_EQX", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_LUNA"):
-        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(name, "0")
     torch.set_default_dtype(torch.float32)
     model = potential(basis)
     export_distributed(model, tmp_path / "regional.pt")

@@ -16,10 +16,7 @@ from equivariantx.mbe.ace import (
     UuuFullyConnectedSymmetricContraction,
 )
 from equivariantx.ops import config as eqx_config
-from tace.utils.env import (
-    acceleration_enabled,
-    select_acceleration,
-)
+from tace.utils.env import acceleration_enabled, eqx_backend
 
 from ..layout import LayoutTransform
 from ..linear import (
@@ -76,9 +73,7 @@ class PathProduct(Product):
             self.irreps_hidden,
             orders,
             shared_inputs=shared,
-            backend="cuda"
-            if acceleration_enabled("eqx", kernel="product")
-            else "torch",
+            backend=eqx_backend("product"),
         )
 
 
@@ -97,7 +92,7 @@ class CgtpACE(PathProduct):
 
     def _setup(self):
         self.validate_instructions()
-        self.use_eqx = select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+        self.use_eqx = acceleration_enabled("eqx", kernel="product")
         for_coefs = {
             "irreps_out": self.irreps_coefs_out,
             "bias": self.use_bias,
@@ -129,15 +124,7 @@ class CgtpACE(PathProduct):
                 l1l2=self.l1l2,
                 trainable=False,
                 identical_inputs=nu == 2,
-                warning=self.correlation > 2
-                and self.layer == 0
-                and not self.use_eqx
-                and not self.use_generalized_cg,
-                use_fused=self.correlation > 2
-                and not self.use_time_reversal
-                and not self.use_eqx,
                 symmetric_paths=symmetric_paths,
-                use_eqt=False if self.use_eqx or self.use_generalized_cg else None,
                 instructions=None
                 if self.instructions is None
                 else self.instructions[nu - 2],
@@ -159,7 +146,6 @@ class CgtpACE(PathProduct):
             self.eqx_ace = UuuFullyConnectedSymmetricContraction(
                 [ace.tp for ace in self.aces],
                 [coef.linear for coef in self.coefs],
-                backend="cuda",
             )
 
         self.linear_up = (
@@ -193,7 +179,10 @@ class CgtpACE(PathProduct):
         corr_feats = node_feats
         if (
             hasattr(self, "eqx_ace")
-            and node_feats.is_cuda
+            and (
+                not self.use_generalized_cg
+                or (self.eqx_ace.backend == "cuda" and node_feats.is_cuda)
+            )
             and not any(has_lora(coef) for coef in self.coefs)
         ):
             weights = []
@@ -394,7 +383,6 @@ class NonlinearCgtpACE(PathProduct):
                     instructions=None
                     if self.instructions is None
                     else self.instructions[degree - 2],
-                    use_eqt=False if self.use_generalized_cg else None,
                 )
                 self.aces.append(product)
                 irreps = product.irreps_out
@@ -600,7 +588,6 @@ class TaceACE(PathProduct):
                     self.irreps_hidden,
                     self.irreps_tp_out_list[stage],
                     instructions=paths,
-                    use_eqt=False,
                 )
                 for module in product.modules():
                     module._non_persistent_buffers_set.update(module._buffers.keys())
@@ -610,9 +597,7 @@ class TaceACE(PathProduct):
             self.generalized = GeneralizedContraction(
                 self.irreps_hidden,
                 orders,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="product")
-                else "torch",
+                backend=eqx_backend("product"),
                 gated_output=None if self.fully_connected else self.irreps_coefs_out,
             )
         else:

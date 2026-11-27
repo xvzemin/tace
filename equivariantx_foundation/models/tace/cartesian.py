@@ -345,6 +345,8 @@ def _local_uu_rule(module, backend, task):
 
 
 class _ScheduledIctdMessages(CartesianTensorProductConvLayer):
+    supports_radial_stream = False
+
     def forward(self, features, edge_attrs, weights, edge_index, num_nodes=None):
         if (
             not _supported_precision(features)
@@ -727,7 +729,6 @@ def _nonlinear_ictd_rule(module, backend, task, automatic, measured_stack):
         or not module.aces
         or any(
             type(factor) is not UuuTensorProduct
-            or hasattr(factor, "fused_tp")
             or type(factor.tp) is not co3.ictd.TensorProduct
             or not factor.tp.project
             for factor in module.aces
@@ -779,7 +780,6 @@ def cartesian_bucket_product(module):
     return node_local_path_gates(module, _cartesian_linear) and all(
         type(f) is UuuTensorProduct
         and type(f.tp) is co3.ictd.TensorProduct
-        and not hasattr(f, "fused_tp")
         and f.tp.project
         and f.tp.backend == f.tp.projection.backend == "cuda"
         and f.tp.kernel_metadata is not None

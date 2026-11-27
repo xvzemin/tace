@@ -513,10 +513,16 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
             self.use_shared_powers
             and self.shared_powers is not None
             and not prefix
-            and features.is_cuda
             and (
-                self.backend == "cuda"
-                or not (config.TORCH_REFERENCE or config.TORCH_RECOMPUTE)
+                (
+                    features.is_cuda
+                    and self.backend == "cuda"
+                    and len(self.product_dims) >= 3
+                )
+                or (
+                    (not features.is_cuda or self.backend == "torch")
+                    and not (config.TORCH_REFERENCE or config.TORCH_RECOMPUTE)
+                )
             )
             and not torch.compiler.is_compiling()
             and get_proxy_mode() is None

@@ -13,7 +13,7 @@ import torch
 from e3nn import o3
 
 from equivariantx import o2
-from tace.utils.env import acceleration_enabled
+from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
 from ..angular import SolidHarmonics
@@ -427,19 +427,19 @@ class MagneticUvO2TensorProductConv(torch.nn.Module):
             irreps_gates,
             gate_acts,
             irreps_gated,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.linear_up = o2.Linear(
             self.local_irreps_in,
             self.nonlinearity.irreps_in,
             biases=use_bias,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.linear_down = o2.Linear(
             self.nonlinearity.irreps_out,
             self.local_irreps_out,
             biases=use_bias,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.weight_numel = self.local_irreps_in.num_irreps
         self.eqx_tp = uv_kernel(self)

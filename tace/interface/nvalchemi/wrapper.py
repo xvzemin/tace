@@ -298,9 +298,8 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         *,
         enable_oeq: bool = False,
         enable_cue: bool = False,
-        enable_eqt: bool = False,
         enable_compile: bool = False,
-        enable_eqx: bool = False,
+        enable_eqx: bool | None = None,
         enable_luna: bool = False,
     ) -> "TACEWrapper":
         """Load a TACE model file or foundation model name.
@@ -315,7 +314,7 @@ class TACEWrapper(nn.Module, BaseModelMixin):
             Model precision.
         fidelity_idx : int, optional
             Fidelity head index.
-        enable_oeq, enable_cue, enable_eqt, enable_eqx, enable_luna : bool, optional
+        enable_oeq, enable_cue, enable_eqx, enable_luna : bool, optional
             Enable the corresponding acceleration backend.
         enable_compile : bool, optional
             Must be False. Pass a ``.pt2`` package for compiled inference.
@@ -330,7 +329,6 @@ class TACEWrapper(nn.Module, BaseModelMixin):
         enable_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
             enable_eqx=enable_eqx,
             enable_luna=enable_luna,
         )

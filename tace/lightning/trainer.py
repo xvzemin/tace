@@ -234,8 +234,7 @@ def build_trainer(
         policy.apply()
         if policy.autocast is not None:
             if any(
-                acceleration_enabled(name)
-                for name in ("eqx", "oeq", "eqt", "cue", "luna")
+                acceleration_enabled(name) for name in ("eqx", "oeq", "cue", "luna")
             ):
                 raise ValueError(
                     "Autocast is not supported by the selected fused backend; disable it or set dtype.autocast=null."

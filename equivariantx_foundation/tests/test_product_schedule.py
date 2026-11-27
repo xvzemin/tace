@@ -45,7 +45,6 @@ def test_local_product_execution(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     source = make_product(kind, degree, agnostic).to(device)
     with torch.no_grad():
         for name, p in source.named_parameters():
@@ -85,7 +84,6 @@ def test_local_product_execution(
 
 def test_unsupported_products_are_left_native(monkeypatch):
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
 
     class DifferentForward(CgtpACE):
         pass
@@ -131,7 +129,6 @@ def test_bilinear_host_selection(monkeypatch, existing):
     from equivariantx_foundation.models.tace.products import host_product_provider
 
     monkeypatch.setenv("TACE_USE_EQX", str(int(existing)))
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     p = make_bilinear(2, True, False)
     assert hasattr(p, "eqx_ace") == existing
     assert host_product_provider(p) is None  # The host never calls eqx_ace on CPU.
@@ -176,7 +173,6 @@ def test_bilinear_live_second_order(
     monkeypatch, double_precision, experts, shared, agnostic, matrix, elements
 ):
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     p = make_bilinear(
         experts, shared, agnostic, matrix=matrix, elements=elements
     ).cuda()
@@ -253,20 +249,17 @@ def test_bilinear_live_second_order(
 def test_existing_eqx_schedule_is_preserved(monkeypatch):
     from equivariantx_foundation.models.tace.products import host_product_provider
 
-    monkeypatch.setenv("TACE_USE_EQX", "1")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.delenv("TACE_USE_EQX", raising=False)
     source = make_product(CgtpACE).float()
     lower, reason = product_rule(source, backend="cuda", task="inference")
     assert lower is None and "existing" in reason
-    # Unlike MaceACE, CgtpACE skips the whole EQX contraction on CPU.
-    assert host_product_provider(source) is None
+    assert host_product_provider(source) == "eqx_torch"
     if torch.cuda.is_available():
         assert host_product_provider(source.cuda()) == "eqx_cuda"
 
 
 def test_nonlinear_torch_is_opt_in(monkeypatch):
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     source = make_product(NonlinearCgtpACE)
     assert (
         product_rule(source, backend="torch", task="training", automatic=True)[0]
@@ -281,7 +274,6 @@ def test_nonlinear_torch_is_opt_in(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_existing_cuda_nonlinear_schedule_is_preserved(monkeypatch):
     monkeypatch.setenv("TACE_USE_EQX", "1")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     source = make_product(NonlinearCgtpACE).float().cuda()
     for backend in ("torch", "cuda"):
         lower, reason = product_rule(source, backend=backend, task="training")
@@ -290,7 +282,8 @@ def test_existing_cuda_nonlinear_schedule_is_preserved(monkeypatch):
 
 @pytest.mark.parametrize("host,other", [("torch", "cuda"), ("cuda", "torch")])
 def test_mace_selects_existing_program_without_rebuilding(monkeypatch, host, other):
-    monkeypatch.setenv("TACE_USE_EQX", "1" if host == "cuda" else "0")
+    monkeypatch.setattr("equivariantx.ops.config.DEFAULT_BACKEND", host)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
     monkeypatch.setenv("TACE_USE_CUE", "0")
     source = make_product(MaceACE, degree=3)
     native, reason = product_rule(source, backend=host, task="inference")

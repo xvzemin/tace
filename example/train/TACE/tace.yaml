@@ -22,14 +22,13 @@ misc:
   log_level: debug # info or debug
   env: # Applied before model construction; overrides matching shell variables. Use strings.
     WANDB_MODE: offline # offline or online logging
-    # Backend switches are independent of compilation. Unset means off, except EQT.
+    # Backend switches are independent of compilation. EQX is enabled by default; other backends are opt-in.
     # TACE_USE_EQX: "1" # supported EquivariantX operators
     # TACE_USE_COMPILE: "1" # torch.compile training/evaluation; not an exported AOTI package
     # TACE_USE_LUNA: "1" # supported LunaEquivariance convolutions
     # TACE_USE_OEQ: "1" # supported OpenEquivariance convolutions
-    # TACE_USE_EQT: "1" # EquiTorch ACE; unset enables selected correlation > 2 paths
     # TACE_USE_CUE: "1" # supported cuEquivariance operators
-    # Per-operator priority: EQX > Luna > OEQ > EQT > CUEQ.
+    # Per-operator priority: EQX > Luna > OEQ > CUEQ.
     # TACE_MEMORY_FIRST: "1" # default: stream the full radial MLP; 0: fuse only the final projection
     # EQX_USE_CUDA_GRAPH: "1" # unset: eligible node products; 0: off; 1: all supported native captures
     # Native EQX replay is independent of torch.compile and can retain extra capture memory.

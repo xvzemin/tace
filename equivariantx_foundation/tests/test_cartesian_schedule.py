@@ -40,7 +40,6 @@ def setup(request, monkeypatch, double_precision):
     if request.param == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     return request.param, "cuda" if request.param == "cuda" else "cpu"
 
 
@@ -587,7 +586,6 @@ def test_paired_cartesian_ef_keeps_directed_attributes_and_live_radial(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_cartesian_uu_real_efs_training(monkeypatch):
     monkeypatch.setenv("TACE_USE_EQX", "0")
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     torch.set_default_dtype(torch.float32)
     host = _local_model("cuda", 64).train()
     fast = shared_parameter_copy(host)

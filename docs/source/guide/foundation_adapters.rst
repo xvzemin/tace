@@ -189,9 +189,8 @@ communication hooks and ``SimpleDDPStrategy`` are not supported for this replay 
 For the 3BPA ``o3.yaml`` recipe (5 Å cutoff, batch size five), the 500
 structures in ``train_300K.xyz`` each have 27 atoms and at most 514 directed
 edges. Use ``replay_bucket: [135, 2570, 5]`` to cover any five structures.
-When replay is requested, ``tace-fast-train`` leaves the products to
-Foundation unless EquiTorch is explicitly selected. Ordinary ``tace-train``
-retains its native backend defaults.
+By default, ``tace-fast-train`` lets Foundation select the operators for its
+training plan. Ordinary ``tace-train`` uses the generic EQX backend.
 
 To keep synchronized parameter gradients in DDP's communication buffers, set
 ``trainer.strategy`` to a ``lightning.pytorch.strategies.DDPStrategy`` with

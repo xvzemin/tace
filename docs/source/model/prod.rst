@@ -28,9 +28,9 @@ Select MACE symmetric contractions with the existing product configuration:
 
 The block applies ``Linear up → symmetric contraction → Linear`` and then the
 configured residual connection. ``Linear up`` is omitted when the input and
-contraction channel counts match. Select fused contractions with ``TACE_USE_EQX=1``
-or ``TACE_USE_CUE=1``. EQX takes priority when both are enabled. With neither
-enabled, or on CPU, the contraction uses PyTorch. The weight layout is unchanged.
+contraction channel counts match. EQX uses CUDA on NVIDIA GPUs and PyTorch on
+CPU by default. To select cuEquivariance on CUDA, set ``TACE_USE_EQX=0`` and
+``TACE_USE_CUE=1``. The weight layout is unchanged.
 
 Explicit selection of MACE symmetric contraction paths is not currently
 supported. Set ``product_basis.l1l2: null``; any other value raises

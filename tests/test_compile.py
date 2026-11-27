@@ -658,7 +658,10 @@ def test_fixed_frozen_graph_export_preserves_values_and_rejects_new_shapes(
         for key in config["target_property"]:
             torch.testing.assert_close(actual[key], expected[key], rtol=1e-4, atol=1e-5)
     with pytest.raises(ValueError, match="Fixed AOTI input 'edge_index'"):
-        observed["runner"](sample | {"edge_index": sample["edge_index"][:, :-2]})
+        observed["runner"](
+            sample
+            | {"edge_index": sample["edge_index"][:, :-2], "edge_shifts": shifts[:-2]}
+        )
 
 
 @pytest.mark.parametrize("target", ["graph", "lammps"])
@@ -2249,24 +2252,23 @@ def test_tf32_environment(monkeypatch, value, training):
 @pytest.mark.parametrize(
     "enabled,supported,expected",
     [
-        ((), ("eqx", "luna", "oeq", "eqt", "cue"), None),
+        ((), ("eqx", "luna", "oeq", "cue"), None),
         (
-            ("eqx", "luna", "oeq", "eqt", "cue"),
-            ("cue", "eqt", "oeq", "luna", "eqx"),
+            ("eqx", "luna", "oeq", "cue"),
+            ("cue", "oeq", "luna", "eqx"),
             "eqx",
         ),
-        (("luna", "oeq", "eqt", "cue"), ("cue", "eqt", "oeq", "luna", "eqx"), "luna"),
-        (("oeq", "eqt", "cue"), ("cue", "eqt", "oeq", "luna", "eqx"), "oeq"),
-        (("eqt", "cue"), ("cue", "eqt", "oeq", "luna", "eqx"), "eqt"),
-        (("cue",), ("cue", "eqt", "oeq", "luna", "eqx"), "cue"),
+        (("luna", "oeq", "cue"), ("cue", "oeq", "luna", "eqx"), "luna"),
+        (("oeq", "cue"), ("cue", "oeq", "luna", "eqx"), "oeq"),
+        (("cue",), ("cue", "oeq", "luna", "eqx"), "cue"),
         (("eqx", "luna", "oeq"), ("oeq", "cue"), "oeq"),
-        (("eqx", "luna", "oeq"), ("eqt",), None),
+        (("eqx", "luna", "oeq"), ("cue",), None),
     ],
 )
 def test_acceleration_priority(monkeypatch, enabled, supported, expected):
     from tace.utils.env import ACCELERATION_ENV, select_acceleration
 
-    for name in ("eqx", "luna", "oeq", "eqt", "cue"):
+    for name in ("eqx", "luna", "oeq", "cue"):
         monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
     monkeypatch.setenv("TACE_USE_COMPILE", "1")
     assert select_acceleration(*supported, kernel="conv") == expected
@@ -2279,7 +2281,7 @@ def test_acceleration_priority_respects_eqx_kernel_switch(monkeypatch):
     monkeypatch.setenv("TACE_USE_OEQ", "1")
     monkeypatch.setitem(EQX_KERNELS, "conv", False)
     assert select_acceleration("eqx", "oeq", kernel="conv") == "oeq"
-    assert select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+    assert select_acceleration("eqx", kernel="product") == "eqx"
 
 
 def test_model_input_properties_include_required_embeddings():
@@ -2438,6 +2440,8 @@ def test_compile_direct_hessian(dtype, interaction_type):
     isolated["batch"] = sample["batch"].new_tensor([0, 1])
     isolated["edge_index"] = sample["edge_index"][:, :0]
     isolated["edge_shifts"] = sample["edge_shifts"][:0]
+    isolated.pop("edge_pair_rows", None)
+    isolated.pop("edge_pair_inverse", None)
     expected = eager(dict(isolated))
     actual = loaded(dict(isolated))
     for key in targets:

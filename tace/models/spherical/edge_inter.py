@@ -104,9 +104,7 @@ class _RowwisePairProduct(UvuTensorProduct):
 
     def _setup_rowwise(self):
         """Install row-wise contractions on the existing weighted CG instructions."""
-        self.contraction = eqx.conv.O3TensorProductConv(
-            self.tp, backend="cuda", batch_paths=True
-        )
+        self.contraction = eqx.conv.O3TensorProductConv(self.tp, batch_paths=True)
         self.to_channels_last = LayoutTransform(
             self.irreps_in1, layout_out="flatten_ir_mul"
         )

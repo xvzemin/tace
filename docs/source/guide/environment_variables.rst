@@ -68,7 +68,7 @@ Operator backends and compilation
      - Unset
      - Effect of ``1``
    * - ``TACE_USE_EQX``
-     - Not enabled
+     - Enabled (CUDA on NVIDIA GPUs, PyTorch on CPU); ``0`` disables EQX
      - Use EquivariantX for supported convolutions, ACE contractions,
        element-dependent Linear maps, and Cartesian operators.
    * - ``TACE_USE_LUNA``
@@ -78,12 +78,6 @@ Operator backends and compilation
    * - ``TACE_USE_OEQ``
      - Not enabled
      - Use OpenEquivariance for supported tensor-product convolutions.
-   * - ``TACE_USE_EQT``
-     - Selected ACE paths enable it automatically
-     - Enable EquiTorch for supported ACE tensor products. Without an explicit
-       setting, ordinary CGTP ACE with correlation greater than two uses it
-       when EQX and time-reversal representations are not selected.
-       Set ``0`` to disable that automatic choice.
    * - ``TACE_USE_CUE``
      - Not enabled
      - Use cuEquivariance for supported convolutions and MACE symmetric
@@ -95,7 +89,7 @@ Operator backends and compilation
        See :doc:`acceleration` for supported training settings.
 
 When multiple backends are enabled, each operator selects the first supported
-one in **EQX > Luna > OEQ > EQT > CUEQ** order. Install the dependencies for the
+one in **EQX > Luna > OEQ > CUEQ** order. Install the dependencies for the
 chosen backend. Compilation support depends on the backend and requested
 outputs. Live compilation with ``TACE_USE_COMPILE`` does not support LES.
 For frozen periodic charge-only graph export, see :doc:`les`.

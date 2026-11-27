@@ -1,6 +1,13 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
 """Foundation execution for the ordinary Lightning training loop."""
 
 import logging
+import os
+from contextlib import contextmanager
 
 import torch
 from lightning.pytorch.callbacks import Callback
@@ -8,6 +15,23 @@ from lightning.pytorch.plugins.precision import DoublePrecision, Precision
 from lightning.pytorch.strategies import DDPStrategy, SingleDeviceStrategy
 
 from tace.utils.strategy import SimpleDDPStrategy
+
+
+@contextmanager
+def foundation_source(env=()):
+    """Leave provider selection to the Foundation plan while constructing its source."""
+    from tace.utils.env import ACCELERATION_ENV, EQX_KERNELS
+
+    flag = ACCELERATION_ENV["eqx"]
+    if flag in os.environ or flag in env:
+        yield
+        return
+    previous = EQX_KERNELS.copy()
+    EQX_KERNELS.update(dict.fromkeys(previous, False))
+    try:
+        yield
+    finally:
+        EQX_KERNELS.update(previous)
 
 
 def _same_native_state(source, candidate):
@@ -248,7 +272,8 @@ class FoundationTrainingCallback(Callback):
             task="training",
             regional_only=regional_only or self.training_package is not None,
         )
-        report, candidate = _optimize_with_report(source, **options)
+        with foundation_source():
+            report, candidate = _optimize_with_report(source, **options)
         if report.schedule == "regional" and candidate is source:
             if self.training_package is not None:
                 return False

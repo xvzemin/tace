@@ -1,7 +1,9 @@
-"""Train using a Foundation plan with the ordinary TACE Hydra configuration."""
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
 
-import os
-from collections.abc import Mapping
+"""Train using a Foundation plan with the ordinary TACE Hydra configuration."""
 
 from tace.utils.cfg import training_cli
 
@@ -23,24 +25,7 @@ def launch(cfg):
         return train_oamv2.launch(cfg)
     from tace.scripts.train import train_from_config
 
-    replay = any(
-        isinstance(cb, Mapping) and cb.get("replay_bucket") is not None
-        for cb in cfg.get("callbacks", {}).values()
-    )
-    # The native constructor implicitly selects EquiTorch for higher-order
-    # products. Leave those products available to the requested replay plan.
-    default_eqt = (
-        replay
-        and "TACE_USE_EQT" not in os.environ
-        and "TACE_USE_EQT" not in cfg.get("misc", {}).get("env", {})
-    )
-    if default_eqt:
-        os.environ["TACE_USE_EQT"] = "0"
-    try:
-        return train_from_config(cfg, fast=True)
-    finally:
-        if default_eqt:
-            os.environ.pop("TACE_USE_EQT", None)
+    return train_from_config(cfg, fast=True)
 
 
 def main():

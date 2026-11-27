@@ -98,7 +98,7 @@ class CoefficientGroup(torch.nn.Module):
         self.width = len(self.rows)
         self.paths = len(coordinates) // dimension
 
-    def forward(self, features, tables, node_type):
+    def forward(self, features, tables, node_type, counts=()):
         n, z = node_type.shape[0], tables[0][0].shape[0]
         x = features.reshape(
             n, self.dimension, self.width * self.channels // self.dimension
@@ -110,7 +110,11 @@ class CoefficientGroup(torch.nn.Module):
                 (w.reshape(z, self.paths, self.channels * self.outputs),)
             )
         w = w.reshape(z, -1, self.outputs)
-        if z == 1:
+        if counts:
+            result = torch.cat(
+                [block @ matrix for block, matrix in zip(x.split(counts), w.unbind(0))]
+            )
+        elif z == 1:
             result = x @ w[0]
         else:
             result = (
@@ -223,6 +227,19 @@ class SharedPowers(torch.nn.Module):
         return self
 
     def forward(self, features, weights, node_type):
+        counts, inverse = (), None
+        if (
+            features.device.type == "cpu"
+            and weights[0].shape[0] > 1
+            and features.shape[0]
+            and not (forward_ad_active() or torch.compiler.is_compiling())
+        ):
+            sorted_types, order = node_type.sort()
+            elements, lengths = sorted_types.unique_consecutive(return_counts=True)
+            counts = tuple(lengths.tolist())
+            inverse = order.argsort()
+            features = features.index_select(0, order)
+            weights = [w.index_select(0, elements) for w in weights]
         x = features.index_select(1, self.permutation).reshape(
             features.shape[0], self.widths[0], self.channels
         )
@@ -252,9 +269,11 @@ class SharedPowers(torch.nn.Module):
             )
         tables = [w.split(parts, 1) for w, parts in zip(weights, self.table_splits)]
         parts = [
-            group(block, tables, node_type) for group, block in zip(self.groups, blocks)
+            group(block, tables, node_type, counts)
+            for group, block in zip(self.groups, blocks)
         ]
-        return parts[0] if len(parts) == 1 else torch.cat(parts, 1)
+        result = parts[0] if len(parts) == 1 else torch.cat(parts, 1)
+        return result if inverse is None else result.index_select(0, inverse)
 
     def fits(self, features, elements):
         from torch.fx.experimental.symbolic_shapes import statically_known_true
@@ -265,7 +284,11 @@ class SharedPowers(torch.nn.Module):
             self.layers[0].w_2.dtype == features.dtype
             and self.permutation.device == features.device
             and statically_known_true(elements > 0)
-            and statically_known_true(elements <= 4)
+            and (
+                features.device.type == "cpu"
+                and not forward_ad_active()
+                or statically_known_true(elements <= 4)
+            )
             and statically_known_true(features.shape[0] > 0)
             and statically_known_true(scratch <= config.ACE_SHARED_POWER_WORKSPACE)
         )
@@ -277,7 +300,7 @@ def shared_powers(module):
     first = tps[0].irreps_in1
     if not first or len(tps) not in (1, 2, 3) or first[0].mul < 32:
         return None
-    if module.backend == "cuda" and len(tps) < 3:
+    if module.backend == "cuda" and len(tps) < 2:
         return None
     channels = first[0].mul
     if sum(ir.dim for _, ir in first) > 48:

@@ -96,7 +96,7 @@ Enable it before constructing or loading a configurable model:
 
 .. code-block:: bash
 
-   export TACE_USE_OEQ=1
+   export TACE_USE_EQX=0 TACE_USE_OEQ=1
 
 cuEquivariance (CUEQ)
 ---------------------
@@ -118,7 +118,7 @@ enable the backend with:
 .. code-block:: bash
 
    python -c "import torch; print(torch.version.cuda)"
-   export TACE_USE_CUE=1
+   export TACE_USE_EQX=0 TACE_USE_CUE=1
 
 LunaEquivariance (LUNA)
 -----------------------
@@ -137,32 +137,7 @@ for more details.
 .. code-block:: bash
 
    pip install "tace[luna]"
-   export TACE_USE_LUNA=1
-
-EquiTorch (EQT)
----------------
-
-The EQT implementation used by TACE is bundled with TACE, so ordinary EQT
-usage does not require installing a separate EquiTorch package:
-
-.. code-block:: bash
-
-   export TACE_USE_EQT=1
-
-The sparse higher-order product path uses ``torch-scatter`` when available
-and otherwise falls back to native PyTorch reductions. To install the optional
-extension, select a wheel matching the PyTorch and CUDA versions in the
-environment. For example, for PyTorch 2.11 and CUDA 13.0:
-
-.. code-block:: bash
-
-   pip install torch-scatter \
-     -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
-
-Use the `PyTorch Geometric installation guide
-<https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html>`_
-to select a different PyTorch or CUDA wheel.
-
+   export TACE_USE_EQX=0 TACE_USE_LUNA=1
 
 Latent Ewald Summation (LES)
 ----------------------------
@@ -258,7 +233,7 @@ fields, and their tensor-product paths automatically.
 
 Time-reversal models use the time-reversal e3nn implementation for global
 representation metadata and coupling rules. Native EQX O(2) operators and
-compatible fused kernels preserve these labels. EQT, CUEQ, and OEQ operators
+compatible fused kernels preserve these labels. CUEQ and OEQ operators
 that do not support time-odd irreps reject them when selected; support is
 checked per operator rather than by removing time-odd coupling paths.
 
@@ -266,8 +241,8 @@ Acceleration Selection
 ----------------------
 
 Enabled backends are selected per supported operator in the order
-EQX, Luna, OEQ, EQT, CUEQ. Multiple backends may be enabled together, for example
-OEQ convolutions with EQT product-basis operations.
+EQX, Luna, OEQ, CUEQ. EQX is enabled by default, with CUDA kernels on NVIDIA
+GPUs and PyTorch on CPU. Set ``TACE_USE_EQX=0`` to select another backend.
 AOTI is a separate compilation and deployment layer. See the
 :ref:`acceleration-tutorial` for backend selection, Python interfaces,
 compilation, and AOTI export.

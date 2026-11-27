@@ -15,6 +15,7 @@ def _magnetic_bucket_stages(rep):
     from e3nn import o3
 
     from equivariantx.o2 import WignerD
+    from equivariantx.o3.cgtp import TensorProduct as EqxTensorProduct
     from tace.models.angular import SolidHarmonics
     from tace.models.linear import e3nnElementLinear, e3nnLinear
     from tace.models.spherical.fused import UuuTensorProduct
@@ -54,8 +55,8 @@ def _magnetic_bucket_stages(rep):
         and type(basis.angular_basis) is SolidHarmonics
         and not basis.angular_basis.normalize
         and type(basis.magnetic_edge_tensor_product) is UuuTensorProduct
-        and type(basis.magnetic_edge_tensor_product.tp) is o3.TensorProduct
-        and not hasattr(basis.magnetic_edge_tensor_product, "fused_tp")
+        and type(basis.magnetic_edge_tensor_product.tp)
+        in (o3.TensorProduct, EqxTensorProduct)
         and type(rep.node_updates) is torch.nn.ModuleList
         and len(rep.node_updates) == len(rep.interactions)
         and all(
@@ -1259,11 +1260,7 @@ class BucketedEFSTrainingStep:
                 "Microbatch accumulation requires parameters without gradient hooks"
             )
         self.microbatches = microbatches
-        self.edge_layout = (
-            _directed_edge_layout(model)
-            if regional
-            else "native"
-        )
+        self.edge_layout = _directed_edge_layout(model) if regional else "native"
         self.dummy_cell = _padding_cell(batch["lattice"], model.get_cutoff())
         self.cap = (
             max_atoms,

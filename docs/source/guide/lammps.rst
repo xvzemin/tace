@@ -92,14 +92,14 @@ Acceleration backends such as OEQ must be selected before export:
 
 .. code-block:: bash
 
-   export TACE_USE_OEQ=1
+   export TACE_USE_EQX=0 TACE_USE_OEQ=1
    tace-export-lammps -m model.pt --backend mliap --device cuda
 
 For AOTI deployment:
 
 .. code-block:: bash
 
-   export TACE_USE_OEQ=1
+   export TACE_USE_EQX=0 TACE_USE_OEQ=1
    tace-export-lammps -m model.pt --backend aoti --device cuda
 
 For eager multi-rank execution, export an ordinary model with the

@@ -6,6 +6,7 @@
 import copy
 import logging
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
 
 import hydra
@@ -27,6 +28,7 @@ from tace.dataset.statistics import (
     missing_model_statistics,
     prepare_atomic_energies,
 )
+from tace.lightning.foundation import foundation_source
 from tace.lightning.lit_model import LightningWrapperModel, finetune, load_tace
 from tace.lightning.torch_model import create_model
 from tace.lightning.trainer import check_training_entry, train
@@ -205,7 +207,15 @@ def train_from_config(
 ):
     """Build the dataset and run the shared fit and test lifecycle."""
     check_training_entry(cfg, fast=fast)
-    cfg, statistics, target_property, embedding_property, model, datamodule = build(cfg)
+    source = (
+        foundation_source(cfg.get("misc", {}).get("env", {}))
+        if fast and module_type is LightningWrapperModel
+        else nullcontext()
+    )
+    with source:
+        cfg, statistics, target_property, embedding_property, model, datamodule = build(
+            cfg
+        )
     train(
         cfg=cfg,
         statistics=statistics,

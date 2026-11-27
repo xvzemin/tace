@@ -842,7 +842,7 @@ def test_regional_physics_heads_update(device, backend, property_name, monkeypat
     from equivariantx_foundation.models.tace import plan
 
     for var in ACCELERATION_ENV.values():
-        monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv(var, "0")
     torch.set_default_dtype(torch.float64)
     ref = physics_model(property_name).to(device).train()
     source = physics_model(property_name).to(device).train()

@@ -217,7 +217,7 @@ def test_cgtp_owned_layer_cut(
 def test_layer_with_gate_cutoff_and_residual(monkeypatch, backend):
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("requires CUDA")
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     device = "cpu" if backend == "torch" else "cuda:0"
     torch.set_default_dtype(torch.float64)
     layer = ordinary_layer().to(device)
@@ -254,7 +254,7 @@ def test_preserves_existing_streaming_eqx(monkeypatch):
 
 
 def test_preserves_customized_tensor_product(monkeypatch):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     layer = ordinary_layer()
     # Hooks are part of the native computation and may modify the result.
     layer.rejector.tp.register_forward_hook(lambda mod, args, y: y * 0.5)
@@ -263,7 +263,7 @@ def test_preserves_customized_tensor_product(monkeypatch):
 
 
 def test_rejector_on_empty_graph(monkeypatch):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     layer = ordinary_layer().double()
     apply, _ = interaction_rule(layer, backend="torch", task="inference")
     fast = apply(shared_parameter_copy(layer))
@@ -274,7 +274,7 @@ def test_rejector_on_empty_graph(monkeypatch):
 
 
 def test_warm_e3nn_script_cache_is_not_an_instance_override(monkeypatch):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     layer = ordinary_layer().double()
     tp = layer.rejector.tp
     kernel = tp._compiled_main_left_right
@@ -312,7 +312,7 @@ def test_warm_e3nn_script_cache_is_not_an_instance_override(monkeypatch):
     ["register_full_backward_pre_hook", "register_full_backward_hook"],
 )
 def test_backward_hooks_stay_on_the_native_tensor_product(monkeypatch, register):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     layer = ordinary_layer().double()
     tp = layer.rejector.tp
     seen = []
@@ -344,7 +344,7 @@ def test_backward_hooks_stay_on_the_native_tensor_product(monkeypatch, register)
     ],
 )
 def test_global_hooks_observe_native_module_boundaries(monkeypatch, register):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     layer = ordinary_layer()
     hooks = torch.nn.modules.module
     # Removing the last global backward hook does not reset PyTorch's
@@ -393,7 +393,7 @@ def test_ordinary_representation_keeps_custom_angular_evaluator(monkeypatch, bac
 
     if backend == "cuda" and not torch.cuda.is_available():
         pytest.skip("requires CUDA")
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     device = "cpu" if backend == "torch" else "cuda"
     source = make_model().to(device=device, dtype=torch.float64).eval()
     rep = source.readout_fn.representation

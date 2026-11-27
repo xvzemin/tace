@@ -1149,7 +1149,7 @@ def test_cartesian_hip_eqx_pair_matches_native(device, monkeypatch):
         .to(device)
         .to_dict()
     )
-    for key in ("OEQ", "EQT", "CUE", "LUNA", "COMPILE"):
+    for key in ("OEQ", "CUE", "LUNA", "COMPILE"):
         monkeypatch.setenv("TACE_USE_" + key, "0")
     params = None
     for eqx in ("0", "1"):

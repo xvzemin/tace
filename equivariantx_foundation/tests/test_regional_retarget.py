@@ -16,7 +16,7 @@ def test_untracked_lowered_block_requires_original_source(monkeypatch):
     from equivariantx_foundation.tests.test_tace_plan import lower_model
 
     for flag in ACCELERATION_ENV.values():
-        monkeypatch.delenv(flag, raising=False)
+        monkeypatch.setenv(flag, "0")
     model = lower_model(make_model(), backend="torch")
     del model.readout_fn.representation.products[0]._foundation_regional_provider
     with pytest.raises(
@@ -31,7 +31,7 @@ def test_untracked_lowered_block_requires_original_source(monkeypatch):
 @pytest.mark.parametrize("kind", ["cgtp", "uu_o2"])
 def test_switches_installed_providers_without_replacing_user_state(kind, monkeypatch):
     for flag in ACCELERATION_ENV.values():
-        monkeypatch.delenv(flag, raising=False)
+        monkeypatch.setenv(flag, "0")
     torch.set_default_dtype(torch.float64)
 
     def build(**cfg):
@@ -150,7 +150,7 @@ def test_merge_rms_norm_training_round_trip(monkeypatch):
     from equivariantx_foundation.tests.test_tace_plan import efs_loss
 
     for flag in ACCELERATION_ENV.values():
-        monkeypatch.delenv(flag, raising=False)
+        monkeypatch.setenv(flag, "0")
     torch.manual_seed(43)
     source = _norm_model()
     # The release saves analytic block weights as FP32, not Python doubles.
@@ -232,7 +232,7 @@ def test_merge_rms_norm_training_round_trip(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="explicit CUDA RMS provider")
 def test_merge_rms_norm_leaves_host_ownership_and_custom_behavior(monkeypatch):
     for flag in ACCELERATION_ENV.values():
-        monkeypatch.delenv(flag, raising=False)
+        monkeypatch.setenv(flag, "0")
     source = _norm_model()
     layer = source.readout_fn.representation.interactions[1]
 

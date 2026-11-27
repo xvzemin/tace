@@ -21,7 +21,7 @@ time-reversal SOC models:
 
 .. code-block:: bash
 
-   export TACE_USE_OEQ=0 TACE_USE_CUE=0 TACE_USE_EQT=0
+   export TACE_USE_OEQ=0 TACE_USE_CUE=0
 
 Training
 --------

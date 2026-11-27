@@ -14,7 +14,7 @@ from equivariantx.ops.common.gate import gate_program
 from equivariantx.ops.common.radial import materialize
 from tace.models.layout import LayoutTransform
 from tace.models.spherical.tece_oam_rra import Convolution
-from tace.utils.env import acceleration_enabled, memory_first
+from tace.utils.env import acceleration_enabled, eqx_backend, memory_first
 from tace.utils.torch_scatter import scatter_sum
 
 
@@ -23,7 +23,7 @@ class RotationMatrices(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.backend = "cuda" if acceleration_enabled("eqx", kernel="conv") else "torch"
+        self.backend = eqx_backend("conv")
 
     def forward(self, vectors):
         backend = self.backend if vectors.is_cuda else "torch"
@@ -48,7 +48,7 @@ def linear(module):
             for j in range(len(module.irreps_out))
         ],
         path_normalization=module.path_normalization,
-        backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        backend=eqx_backend("linear"),
     )
     result.weight, result.bias = module.weight, module.bias
     return result
@@ -62,7 +62,7 @@ def gate(module):
         module.irreps_gates,
         [None] * len(module.act_gates.acts),
         module.irreps_gated,
-        backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        backend=eqx_backend("linear"),
     )
     result.act_scalars, result.act_gates = module.act_scalars, module.act_gates
     result._paths = module._paths
@@ -108,18 +108,18 @@ class UuConvolution(torch.nn.Module):
         self.local_frame_in = co2.LocalFrame(
             self.irreps_in,
             reference.mmax,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.local_frame_out = co2.LocalFrame(
             self.irreps_out,
             reference.mmax,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.linear = co2.UuLinear(
             self.local_frame_in.irreps_out,
             self.local_frame_out.irreps_out,
             reference.num_channel,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.weight_numel = reference.weight_numel
         self.eqx_tp = None
@@ -132,7 +132,6 @@ class UuConvolution(torch.nn.Module):
                 self.local_frame_in,
                 self.linear,
                 self.local_frame_out,
-                backend="cuda",
                 radial_mode="full" if memory_first() else "last",
             ).plan
         self.register_buffer(
@@ -175,7 +174,12 @@ class UuConvolution(torch.nn.Module):
                 )
                 * self.scale
             )
-        radial = materialize(radial, edge_index if edge_pairs is None else edge_index[:, edge_pairs.representatives])
+        radial = materialize(
+            radial,
+            edge_index
+            if edge_pairs is None
+            else edge_index[:, edge_pairs.representatives],
+        )
         if radial_network is not None:
             from equivariantx.ops.common.radial import radial_reference
 
@@ -183,7 +187,14 @@ class UuConvolution(torch.nn.Module):
         if radial.shape[-1] + 1 == projection.shape[0]:
             radial = torch.cat((radial, torch.ones_like(radial[..., :1])), dim=-1)
         weights = radial @ projection if projection.shape[0] else radial
-        return self(features, weights if edge_pairs is None else edge_pairs.expand(weights), edge_index, rotation, rotation, cutoff)
+        return self(
+            features,
+            weights if edge_pairs is None else edge_pairs.expand(weights),
+            edge_index,
+            rotation,
+            rotation,
+            cutoff,
+        )
 
 
 class UvConvolution(torch.nn.Module):
@@ -198,12 +209,12 @@ class UvConvolution(torch.nn.Module):
         self.local_frame_in = co2.LocalFrame(
             self.irreps_in,
             reference.mmax,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.local_frame_out = co2.LocalFrame(
             self.irreps_out,
             reference.mmax,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.node_irreps = self.local_frame_in.irreps_out
         self.linear_up, self.linear_down = (
@@ -228,7 +239,6 @@ class UvConvolution(torch.nn.Module):
                     self.nonlinearity,
                     self.linear_down,
                     self.local_frame_out,
-                    backend="cuda",
                     radial_mode="full" if memory_first() else "last",
                 ).plan
             except NotImplementedError:
@@ -239,9 +249,7 @@ class UvConvolution(torch.nn.Module):
             self.magnetic_frame = co2.LocalFrame(
                 self.magnetic_edge_irreps,
                 reference.mmax,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="conv")
-                else "torch",
+                backend=eqx_backend("conv"),
             )
         self.register_buffer(
             "scale", inverse_scale(self.local_frame_out), persistent=False
@@ -360,11 +368,11 @@ class UvTensorProduct(torch.nn.Module):
         )
         self.local_frame_in = co2.LocalFrame(
             self.irreps_in,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.local_frame_out = co2.LocalFrame(
             self.irreps_out,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.linear_up, self.linear_down = (
             linear(reference.linear_up),
@@ -398,21 +406,21 @@ class RadialRotaryConvolution(Convolution):
         self.local_frame_in = co2.LocalFrame(
             [(2 * mul, ir) for mul, ir in self.reshape_in.irreps],
             self.mmax,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.local_frame_out = co2.LocalFrame(
             self.reshape_out.irreps,
             self.mmax,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.to_circular = co2.ChangeOfBasis(
             self.local_frame_in.irreps_out,
             inverse=True,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.from_circular = co2.ChangeOfBasis(
             self.local_frame_out.irreps_out,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.register_buffer(
             "inverse_scale", inverse_scale(self.local_frame_out), persistent=False
@@ -420,11 +428,11 @@ class RadialRotaryConvolution(Convolution):
         self.to_spherical = co3.ChangeOfBasis(
             self.reshape_in.irreps,
             inverse=True,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.from_spherical = co3.ChangeOfBasis(
             self.reshape_out.irreps,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.stream_reshape_in = LayoutTransform(self.reshape_in.irreps.spherical())
         self.stream_reshape_out = LayoutTransform(self.reshape_out.irreps.spherical())
@@ -432,7 +440,7 @@ class RadialRotaryConvolution(Convolution):
             self.lmax,
             self.lmax,
             method="recursive",
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
 
     def prepare_stream(self, features, rotation, rotation_inv):

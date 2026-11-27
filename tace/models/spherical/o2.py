@@ -9,9 +9,9 @@ from typing import Optional
 import torch
 from e3nn import o3
 
-from equivariantx import o2
 from equivariantx import conv as eqx_conv
-from tace.utils.env import acceleration_enabled
+from equivariantx import o2
+from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
@@ -60,7 +60,6 @@ def uv_kernel(module):
             [module.linear_up, module.linear_down],
             [module.nonlinearity],
             module.local_frame_out,
-            backend="cuda",
             radial_mode="full",
             frame_edge=getattr(module, "magnetic_frame", None),
             with_transverse=False,
@@ -160,17 +159,17 @@ class UvO2TensorProductConv(torch.nn.Module):
             irreps_gates,
             [tensor_act] if len(irreps_gates) else [],
             irreps_gated,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.linear_up = o2.Linear(
             self.local_irreps_in,
             self.nonlinearity.irreps_in,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.linear_down = o2.Linear(
             self.nonlinearity.irreps_out,
             self.local_irreps_out,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.weight_numel = self.local_irreps_in.num_irreps
 

@@ -160,6 +160,13 @@ class O3TensorProductConv(torch.nn.Module):
         self.angular_groups = (
             torch_kernel.angular_groups(self) if backend == "torch" else ()
         )
+        packed = torch_kernel.packed_angular_map(self) if self.angular_groups else None
+        self.register_buffer(
+            "packed_angles", packed[0] if packed else None, persistent=False
+        )
+        self.register_buffer(
+            "packed_paths", packed[1] if packed else None, persistent=False
+        )
         couplings = [
             (
                 self.irreps_in1[p.i_in1].ir.l,
@@ -477,6 +484,10 @@ class O3TensorProductConv(torch.nn.Module):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse)
+        if self.packed_angles is not None and self.packed_angles.dtype == torch.float64:
+            self.packed_angles, self.packed_paths = torch_kernel.packed_angular_map(
+                self
+            )
         if getattr(self, "grouped_reference", False):
             self.reference_scales = torch.tensor(
                 [self.instructions[i].path_weight for i in self.reference_order],

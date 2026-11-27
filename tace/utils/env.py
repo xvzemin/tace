@@ -80,7 +80,6 @@ ACCELERATION_ENV = {
     "eqx": "TACE_USE_EQX",
     "luna": "TACE_USE_LUNA",
     "oeq": "TACE_USE_OEQ",
-    "eqt": "TACE_USE_EQT",
     "cue": "TACE_USE_CUE",
     "compile": "TACE_USE_COMPILE",
 }
@@ -122,9 +121,8 @@ def enable_acceleration(
     *,
     enable_oeq: bool = False,
     enable_cue: bool = False,
-    enable_eqt: bool = False,
     enable_compile: bool = False,
-    enable_eqx: bool = False,
+    enable_eqx: bool | None = None,
     enable_luna: bool = False,
     force: bool = False,
 ) -> None:
@@ -134,13 +132,12 @@ def enable_acceleration(
     enabled_accelerations = {
         "oeq": enable_oeq,
         "cue": enable_cue,
-        "eqt": enable_eqt,
         "compile": enable_compile,
         "eqx": enable_eqx,
         "luna": enable_luna,
     }
     for name, enabled in enabled_accelerations.items():
-        if enabled or force:
+        if enabled or force or (name == "eqx" and enabled is not None):
             os.environ[ACCELERATION_ENV[name]] = "1" if enabled else "0"
 
 
@@ -152,7 +149,7 @@ def acceleration_enabled(name: str, *, kernel: Optional[str] = None) -> Optional
         raise ValueError(
             f"Unknown TACE acceleration {name!r}; expected one of: {options}"
         ) from e
-    value = os.environ.get(env_name)
+    value = os.environ.get(env_name, "1" if name.lower() == "eqx" else None)
     if value is None:
         return None
     if name.lower() == "eqx" and value == "1":
@@ -160,8 +157,19 @@ def acceleration_enabled(name: str, *, kernel: Optional[str] = None) -> Optional
     return value == "1"
 
 
+def eqx_backend(kernel: str) -> str:
+    """Return the installed EQX provider for a TACE operator."""
+    from equivariantx.ops import config
+
+    return (
+        config.DEFAULT_BACKEND
+        if acceleration_enabled("eqx", kernel=kernel)
+        else "torch"
+    )
+
+
 def select_acceleration(*backends: str, kernel: Optional[str] = None) -> Optional[str]:
-    """Select an enabled, supported backend in EQX, Luna, OEQ, EQT, CUEQ order."""
+    """Select an enabled, supported backend in EQX, Luna, OEQ, CUEQ order."""
     return next(
         (
             name

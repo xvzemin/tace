@@ -52,11 +52,13 @@ def test_shared_quartic_product(space, device, double_precision, backend):
     op = layer([tp] * 3, linears, backend=backend).to(device)
     assert op.shared_powers is not None and not op.state_dict()
     x = torch.randn(3, ir.dim, device=device, requires_grad=True)
+    elements = 7 if x.device.type == "cpu" else 2
     ws = tuple(
-        torch.randn(2, linear.weight_numel, device=device, requires_grad=True)
+        torch.randn(elements, linear.weight_numel, device=device, requires_grad=True)
         for linear in linears
     )
-    z = torch.tensor([1, 0, 1], device=device)
+    z = torch.tensor([elements - 1, 0, elements - 1], device=device)
+    assert op.shared_powers.fits(x, elements)
     actual = op.shared_powers(x, ws, z)
     if x.is_cuda and backend == "cuda":
         args = (x.detach(), tuple(w.detach() for w in ws), z)

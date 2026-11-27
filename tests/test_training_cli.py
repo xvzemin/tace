@@ -12,10 +12,22 @@ from omegaconf import OmegaConf
 
 def test_training_entry_policies(monkeypatch):
     from tace.scripts import train, train_fast, train_oamv2
+    from tace.utils.env import acceleration_enabled
 
     cfg = OmegaConf.create({"trainer": {"accumulate_grad_batches": 2}})
-    monkeypatch.setattr(train, "build", lambda cfg: (cfg, [], [], [], object(), None))
-    fit = Mock()
+    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    building, fitting = [], []
+
+    def build(cfg):
+        building.append(acceleration_enabled("eqx", kernel="product"))
+        return cfg, [], [], [], object(), None
+
+    monkeypatch.setattr(train, "build", build)
+    fit = Mock(
+        side_effect=lambda **kw: fitting.append(
+            acceleration_enabled("eqx", kernel="product")
+        )
+    )
     monkeypatch.setattr(train, "train", fit)
     monkeypatch.setattr("equivariantx_foundation.registry.require_cuda", Mock())
     monkeypatch.setattr(
@@ -24,6 +36,7 @@ def test_training_entry_policies(monkeypatch):
     train.main.__wrapped__(cfg)
     train_fast.launch(cfg)
     assert [c.kwargs["fast"] for c in fit.call_args_list] == [False, True]
+    assert building == [True, False] and fitting == [True, True]
     assert all(
         c.kwargs["module_type"] is train.LightningWrapperModel
         for c in fit.call_args_list
@@ -35,29 +48,6 @@ def test_training_entry_policies(monkeypatch):
     cfg.fast_schedule = "typo"
     with pytest.raises(ValueError, match="fast_schedule"):
         train_fast.launch(cfg)
-
-
-def test_replay_leaves_implicit_products_to_foundation(monkeypatch):
-    from tace.scripts import train, train_fast
-    from tace.utils.env import acceleration_enabled, set_env
-
-    monkeypatch.delenv("TACE_USE_EQT", raising=False)
-    monkeypatch.setattr("equivariantx_foundation.registry.require_cuda", Mock())
-
-    def selected(cfg, *, fast):
-        set_env(cfg)
-        return acceleration_enabled("eqt")
-
-    monkeypatch.setattr(train, "train_from_config", selected)
-    cfg = OmegaConf.create({"misc": {"env": {}}, "callbacks": {}})
-    assert train_fast.launch(cfg) is None
-    cfg.callbacks.plan = {"replay_bucket": [10, 20]}
-    assert train_fast.launch(cfg) is False
-    assert "TACE_USE_EQT" not in os.environ
-    monkeypatch.setenv("TACE_USE_EQT", "1")
-    assert train_fast.launch(cfg) is True
-    cfg.misc.env.TACE_USE_EQT = "0"
-    assert train_fast.launch(cfg) is False
 
 
 def test_fast_train_without_cuda(monkeypatch, tmp_path, capsys):

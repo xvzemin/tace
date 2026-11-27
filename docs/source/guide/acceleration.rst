@@ -124,11 +124,11 @@ Alternative backends
 --------------------
 
 Backend adapters are grouped under ``tace.models.backends`` as
-``cuequivariance``, ``openequivariance``, ``equitorch`` and ``lunaequivariance``.
+``cuequivariance``, ``openequivariance`` and ``lunaequivariance``.
 EQX operators are provided by the bundled ``equivariantx`` package.
 
-In either workflow, ``TACE_USE_EQX=1`` can be replaced by the backend flags
-below for supported operators. This changes operator implementations, not the
+EQX is enabled by default. Set ``TACE_USE_EQX=0`` before selecting another
+backend below. This changes operator implementations, not the
 training or export steps for compilation-compatible backends. Keep
 ``TACE_USE_COMPILE=1`` for compiled training and ``--backend aoti`` for compiled
 inference.
@@ -149,18 +149,14 @@ inference.
    * - 3. OpenEquivariance
      - ``TACE_USE_OEQ=1``
      - Convolution
-   * - 4. EquiTorch
-     - ``TACE_USE_EQT=1``
-     - ACE
-   * - 5. cuEquivariance
+   * - 4. cuEquivariance
      - ``TACE_USE_CUE=1``
      - Convolution and MACE symmetric contraction
 
 If several flags are enabled, each operator selects the highest-priority
-backend it supports: **EQX > Luna > OEQ > EQT > CUEQ**. Different operators may therefore
-use different backends. CGTP ACE can select EquiTorch automatically when its
-correlation exceeds two; ``TACE_USE_EQT=0`` disables this default. Other
-operators use their PyTorch reference when no supported backend is enabled.
+backend it supports: **EQX > Luna > OEQ > CUEQ**. EQX uses optimized PyTorch
+on CPU and native CUDA on NVIDIA GPUs. Operators with no selected backend
+use their reference implementation.
 
 For example, replace EQX with OEQ while keeping the same workflow:
 
@@ -193,7 +189,7 @@ accept ``enable_luna=True`` alongside the other backend options. For example:
 
    from tace.interface.ase import TACEAseCalc
 
-   calc = TACEAseCalc("TACE-OAM-L", device="cuda", enable_luna=True)
+   calc = TACEAseCalc("TACE-OAM-L", device="cuda", enable_eqx=False, enable_luna=True)
 
 An exported AOTI package already contains its chosen operator graph; these
 options do not change its backend.

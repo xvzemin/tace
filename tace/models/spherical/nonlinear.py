@@ -29,11 +29,7 @@ def get_nonlinear_layer(
 
     gate_cls = Gate
     if acceleration_enabled("eqx", kernel="linear"):
-        from functools import partial
-
-        from equivariantx.o3 import Gate as EqxGate
-
-        gate_cls = partial(EqxGate, backend="cuda")
+        from equivariantx.o3 import Gate as gate_cls
     if gate_m0:
         if scalar_act is None:
             act_0e_name = "sigmoid"

@@ -120,7 +120,7 @@ class TACEAseCalc(Calculator):
         Extra radius in angstroms for reusing neighbors across MD steps.
         Zero rebuilds the neighbor list on every call. Per-edge properties
         always use the original neighbor ordering.
-    enable_oeq, enable_cue, enable_eqt, enable_eqx, enable_luna : bool, optional
+    enable_oeq, enable_cue, enable_eqx, enable_luna : bool, optional
         Enable the corresponding acceleration backend when loading the model.
     enable_compile : bool, optional
         Enable the compiled model path.
@@ -146,9 +146,8 @@ class TACEAseCalc(Calculator):
         neighbor_skin: float = 0.0,
         enable_oeq: bool = False,
         enable_cue: bool = False,
-        enable_eqt: bool = False,
         enable_compile: bool = False,
-        enable_eqx: bool = False,
+        enable_eqx: bool | None = None,
         enable_luna: bool = False,
         **kwargs,
     ):
@@ -156,7 +155,6 @@ class TACEAseCalc(Calculator):
         enable_acceleration(
             enable_oeq=enable_oeq,
             enable_cue=enable_cue,
-            enable_eqt=enable_eqt,
             enable_compile=enable_compile,
             enable_eqx=enable_eqx,
             enable_luna=enable_luna,

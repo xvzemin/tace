@@ -13,7 +13,13 @@ from e3nn import o3
 from equivariantx import co3, o2
 from equivariantx import conv as eqx_conv
 from equivariantx.mbe.ace import UuuSymmetricContraction as EqxUuuSymmetricContraction
-from tace.utils.env import acceleration_enabled, memory_first, select_acceleration
+from equivariantx.o3.cgtp import TensorProduct as EqxTensorProduct
+from tace.utils.env import (
+    acceleration_enabled,
+    eqx_backend,
+    memory_first,
+    select_acceleration,
+)
 from tace.utils.torch_scatter import scatter_sum
 
 from ..layout import LayoutTransform
@@ -33,10 +39,7 @@ class UuuTensorProduct(torch.nn.Module):
         l3l1: Union[str, None] = None,
         trainable: bool = False,
         identical_inputs: bool = False,
-        warning: bool = False,
-        use_fused: bool = False,
         symmetric_paths: Union[SymmetricProductPaths, None] = None,
-        use_eqt: Union[bool, None] = None,
         instructions=None,
     ) -> None:
         super().__init__()
@@ -72,7 +75,12 @@ class UuuTensorProduct(torch.nn.Module):
                 (i, j, k, "uuu", trainable) for k, (i, j, _) in enumerate(instructions)
             ]
 
-        self.tp = o3.TensorProduct(
+        tensor_product = (
+            EqxTensorProduct
+            if acceleration_enabled("eqx", kernel="product")
+            else o3.TensorProduct
+        )
+        self.tp = tensor_product(
             irreps_in1,
             irreps_in2,
             actual_irreps_out,
@@ -87,56 +95,9 @@ class UuuTensorProduct(torch.nn.Module):
         self.instructions = instructions
         self.weight_numel = self.tp.weight_numel
 
-        if use_eqt is None:
-            use_eqt = acceleration_enabled("eqt")
-        self.use_eqt = use_fused if use_eqt is None else use_eqt
-        self.use_eqt = self.use_eqt and bool(instructions)
-
-        # self.use_cue = acceleration_enabled("cue")
-
-        if self.use_eqt:
-            if contains_time_odd_irreps(
-                irreps_in1,
-                irreps_in2,
-                actual_irreps_out,
-            ):
-                raise ValueError(
-                    "EQT does not support time-reversal irreps. Disable EQT and "
-                    "use the native e3nn tensor product."
-                )
-            from ..backends.equitorch import EqtTensorProduct
-
-            self.fused_tp = EqtTensorProduct(
-                irreps_in1=irreps_in1,
-                irreps_in2=irreps_in2,
-                irreps_out=actual_irreps_out,
-                num_channel=irreps_in2[0].mul,
-                path=instructions,
-                trainable=trainable,
-            )
-        # elif self.use_cue and not trainable:
-        #     from ..backends.cuequivariance import CueTensorProduct
-        #     self.fused_tp = CueTensorProduct(
-        #         irreps_in1=irreps_in1,
-        #         irreps_in2=irreps_in2,
-        #         irreps_out=irreps_out,
-        #         l1l2=l1l2,
-        #         l2l3=l2l3,
-        #         l3l1=l3l1,
-        #         trainable=trainable,
-        #     )
-        elif warning and instructions:
-            logging.warning(
-                "Correlation >= 3 is running without Equitorch. "
-                "For acceleration options, see "
-                "https://tace.readthedocs.io/en/latest/guide/acceleration.html"
-            )
-
     def forward(
         self, x: torch.Tensor, y: torch.Tensor, ws: Union[torch.Tensor, None] = None
     ) -> torch.Tensor:
-        if hasattr(self, "fused_tp"):
-            return self.fused_tp(x, y, ws)
         return self.tp(x, y, ws)
 
 
@@ -263,18 +224,18 @@ class UvO2TensorProduct(torch.nn.Module):
             irreps_gates,
             [torch.nn.Sigmoid()] if len(irreps_gates) else [],
             irreps_gated,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.linear_up = o2.Linear(
             local_irreps_in,
             gate.irreps_in,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.gate = gate
         self.linear_down = o2.Linear(
             gate.irreps_out,
             local_irreps_out,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         indices = []
         offset = 0
@@ -339,7 +300,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
         )
         self.to_cartesian = co3.ChangeOfBasis(
             self.irreps_in1,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.tp = co3.TensorProduct(
             self.irreps_in1,
@@ -349,15 +310,12 @@ class O3CartesianTensorProductConv(torch.nn.Module):
             internal_weights=False,
             shared_weights=False,
             project=False,
-            backend="cuda"
-            if acceleration_enabled("eqx", kernel="product")
-            else "torch",
+            backend=eqx_backend("product"),
         )
         self.weight_numel = self.tp.weight_numel
 
         self.eqx_tp = eqx_conv.CartesianTensorProductConv(
             self.tp,
-            backend="cuda",
             radial_mode="full" if memory_first() else "last",
             normalize=False,
             symmetric_inputs=True,
@@ -468,7 +426,6 @@ class O3TensorProductConv(torch.nn.Module):
             self.tp,
             normalize=False,
             batch_paths=True,
-            backend="cuda",
             radial_mode="full" if memory_first() else "last",
         )
         self.reshape_in = LayoutTransform(
@@ -634,10 +591,11 @@ class O2TensorProductConv(torch.nn.Module):
             self.instructions,
             internal_weights=False,
             shared_weights=False,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
         self.eqx_tp = eqx_conv.O2O3TensorProductConv(
-            self.tp, backend="cuda", radial_mode="full" if memory_first() else "last"
+            self.tp,
+            radial_mode="full" if memory_first() else "last",
         )
         self.weight_numel = self.tp.weight_numel
         self.reshape_in = LayoutTransform(
@@ -756,14 +714,13 @@ class UuO2TensorProductConv(torch.nn.Module):
             self.local_irreps_in,
             self.local_irreps_out,
             num_channel,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.weight_numel = self.linear.weight_numel
         self.eqx_tp = eqx_conv.UuO2TensorProductConv(
             self.local_frame_in,
             self.linear,
             self.local_frame_out,
-            backend="cuda",
             radial_mode="full" if memory_first() else "last",
             with_transverse=max(self.irreps_in.lmax, self.irreps_out.lmax) < 4,
         )
@@ -905,7 +862,7 @@ class Wigner6jTensorProductConv(torch.nn.Module):
             edge_index,
             weight1,
             weight2,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
 
 
@@ -933,7 +890,7 @@ class UuuSymmetricContraction(EqxUuuSymmetricContraction):
             irreps_in,
             irreps_out,
             coupling_tensors,
-            backend="cuda" if backend == "eqx" else "torch",
+            backend=eqx_backend("product") if backend == "eqx" else "torch",
         )
         self.use_eqx = backend == "eqx"
         self.use_cue = backend == "cue"

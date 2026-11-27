@@ -35,7 +35,7 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
         pytest.skip("CUDA is unavailable")
     from tace.models.spherical.fused import O2TensorProductConv, O3TensorProductConv
 
-    for backend in ("EQX", "OEQ", "EQT", "CUEQ"):
+    for backend in ("EQX", "OEQ", "CUEQ"):
         monkeypatch.setenv(f"TACE_USE_{backend}", "0")
     irreps_in, irreps_sh, irreps_out = "2x1o", "0e+1o", "2x0e+2x1o+2x1e+2x2e"
     module = O2TensorProductConv(irreps_in, irreps_sh, irreps_out).cuda()
@@ -297,21 +297,19 @@ def test_uv_o2_compile_and_force_training(
                 torch.testing.assert_close(x, y, atol=1e-8, rtol=1e-8)
 
 
-@pytest.mark.parametrize("mask", range(32))
+@pytest.mark.parametrize("mask", range(16))
 @pytest.mark.parametrize("compile_enabled", [False, True])
 def test_scatter_backend_priority(monkeypatch, mask, compile_enabled):
     from tace.models.spherical.fused import O3TensorProductConv
     from tace.utils.env import ACCELERATION_ENV
 
     enabled = [
-        name
-        for i, name in enumerate(("eqx", "luna", "oeq", "eqt", "cue"))
-        if mask & (1 << i)
+        name for i, name in enumerate(("eqx", "luna", "oeq", "cue")) if mask & (1 << i)
     ]
-    for name in ("eqx", "luna", "oeq", "eqt", "cue"):
+    for name in ("eqx", "luna", "oeq", "cue"):
         monkeypatch.setenv(ACCELERATION_ENV[name], "1" if name in enabled else "0")
     monkeypatch.setenv("TACE_USE_COMPILE", "1" if compile_enabled else "0")
-    expected = next((name for name in enabled if name != "eqt"), None)
+    expected = next(iter(enabled), None)
     if expected == "cue" and compile_enabled:
         expected = None
     constructed = []
@@ -1092,7 +1090,7 @@ def test_streaming_force_training(
     from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
     from tace.models.spherical.tace import SphericalTACE
 
-    for name in ("TACE_USE_EQX", "TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
+    for name in ("TACE_USE_EQX", "TACE_USE_OEQ", "TACE_USE_CUEQ"):
         monkeypatch.setenv(name, "0")
     if memory_first is None:
         monkeypatch.delenv("TACE_MEMORY_FIRST", raising=False)
@@ -1296,7 +1294,7 @@ def test_tace_model_force_training(
     from tace.models.spherical.fused import O3TensorProductConv, UuO2TensorProductConv
     from tace.models.spherical.tace import SphericalTACE
 
-    for name in ("EQX", "OEQ", "CUE", "EQT"):
+    for name in ("EQX", "OEQ", "CUE"):
         monkeypatch.setenv(f"TACE_USE_{name}", "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(

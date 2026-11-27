@@ -163,6 +163,54 @@ def test_shared_angular_matrices_preserve_paths(mode, double_precision):
         ]
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_packed_path_weights(device, double_precision, monkeypatch):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    tp = o3.TensorProduct(
+        "16x0e+16x1o",
+        "0e+1o",
+        "16x2e+16x1o+16x0e",
+        [(1, 1, 2, "uvu", True), (0, 1, 1, "uvu", True), (1, 1, 0, "uvu", True)],
+        shared_weights=False,
+        internal_weights=False,
+    ).to(device)
+    op = eqx_conv.O3TensorProductConv(tp, backend="torch").to(device)
+    assert op.packed_angles is not None
+    assert not any(name.startswith("packed_") for name in op.state_dict())
+    idx = torch.tensor([[0, 1, 2, 1], [2, 2, 1, 0]], device=device)
+    x, a, r, p = (
+        torch.randn(*shape, device=device, requires_grad=True)
+        for shape in [
+            (3, tp.irreps_in1.dim),
+            (1, tp.irreps_in2.dim),
+            (4, 5),
+            (5, tp.weight_numel),
+        ]
+    )
+    actual = op(x, a, r, p, idx)
+    expected = reference(tp, x, a.expand(4, -1), r, p, idx)
+    monkeypatch.setattr(config, "TORCH_EDGE_TILE_BYTES", 1)
+    torch.testing.assert_close(op(x, a, r, p, idx), expected)
+    for order in range(3):
+        torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+        if order < 2:
+            seed = torch.randn_like(actual) / actual.numel() ** 0.5
+            actual, expected = (
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (y.sin() * seed).sum(),
+                            (x, a, r, p),
+                            create_graph=True,
+                        )
+                    ]
+                )
+                for y in (actual, expected)
+            )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU angular matrices")
 def test_high_degree_angular_matrix(double_precision, monkeypatch):
     monkeypatch.setattr(config, "TORCH_CG_ANGULAR_WIDTH_RATIO", 24)

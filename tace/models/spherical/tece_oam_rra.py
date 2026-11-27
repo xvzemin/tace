@@ -16,10 +16,7 @@ from equivariantx.o2.clebsch_gordan import clebsch_gordan_product
 from equivariantx.ops import config as eqx_config
 from equivariantx.ops.common.channel_product import local_product
 from equivariantx.ops.common.rotation import rotate
-from tace.utils.env import (
-    acceleration_enabled,
-    select_acceleration,
-)
+from tace.utils.env import acceleration_enabled, eqx_backend
 
 from ..lammps import Graph
 from ..layout import LayoutTransform
@@ -122,9 +119,7 @@ class Convolution(torch.nn.Module):
             [(o2.Irrep(0, 1), mul) for _, mul in self.irreps_in],
             self.irreps_in,
             [(i, i, i, "uuu", False) for i in range(len(orders))],
-            backend="cuda"
-            if acceleration_enabled("eqx", kernel="product")
-            else "torch",
+            backend=eqx_backend("product"),
         )
         self.num_gates = (
             sum(mul for ir, mul in self.irreps_hidden if gate_m0 or ir.m) // hidden
@@ -139,7 +134,7 @@ class Convolution(torch.nn.Module):
             [(o2.Irrep(0, 1), self.num_gates * hidden)] if self.num_gates else [],
             [None] if self.num_gates else [],
             gated_irreps,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         widths = [
             mul * (2 if use_asymmetric_contraction else 1)
@@ -150,13 +145,13 @@ class Convolution(torch.nn.Module):
             self.irreps_in,
             list(zip(orders, widths)),
             biases=use_bias,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         self.linear_down = o2.Linear(
             self.irreps_hidden,
             node_irreps,
             biases=use_bias,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
 
         first, second = [], []
@@ -204,42 +199,32 @@ class Convolution(torch.nn.Module):
                 path_normalization="none",
                 internal_weights=False,
                 shared_weights=False,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="product")
-                else "torch",
+                backend=eqx_backend("product"),
             )
             self.linear_coefs = o2.Linear(
                 [self.irreps_in[0]],
                 [(o2.Irrep(0, 1), self.ece.weight_numel)],
                 biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
+                backend=eqx_backend("linear"),
             )
         if self.use_radial_rotary_attention:
             self.query_proj = o2.Linear(
                 node_irreps,
                 node_irreps,
                 biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
+                backend=eqx_backend("linear"),
             )
             self.key_proj = o2.Linear(
                 node_irreps,
                 node_irreps,
                 biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
+                backend=eqx_backend("linear"),
             )
             self.radial_proj = o2.Linear(
                 [(o2.Irrep(0, 1), num_radial_basis)],
                 [(o2.Irrep(0, 1), 2 * num_head)],
                 biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
+                backend=eqx_backend("linear"),
             )
             torch.nn.init.zeros_(self.radial_proj.weight)
             self.attention_scale = (
@@ -794,8 +779,7 @@ class BilinearMoEACE(Product):
 
         self.scale = 1.0 / math.sqrt(2.0)
         self.use_eqx = bool(
-            self.use_bilinear_gate
-            and select_acceleration("eqx", "eqt", kernel="product") == "eqx"
+            self.use_bilinear_gate and acceleration_enabled("eqx", kernel="product")
         )
 
         for_coefs = {
@@ -857,10 +841,7 @@ class BilinearMoEACE(Product):
                 l1l2=self.l1l2,
                 trainable=self.use_bilinear_gate,
                 identical_inputs=nu == 2 and not self.use_bilinear_gate,
-                warning=self.correlation > 2 and self.layer == 0,
-                use_fused=self.correlation > 2 and not self.use_time_reversal,
                 symmetric_paths=symmetric_paths,
-                use_eqt=False if self.use_eqx else None,
             )
             self.aces.append(this_ace)
             self.coefs.append(
@@ -892,7 +873,6 @@ class BilinearMoEACE(Product):
                 self.aces[0].tp,
                 coef.linear,
                 getattr(coef, "num_experts", 1),
-                backend="cuda",
                 shared_linear=self.shared_coefs[1].linear
                 if hasattr(self, "shared_coefs")
                 else None,

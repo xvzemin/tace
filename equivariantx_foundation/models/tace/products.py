@@ -16,6 +16,7 @@ from equivariantx.mbe.ace import (
 )
 from equivariantx.mbe.ace.generalized import CouplingBlock, GeneralizedContraction
 from equivariantx.o3 import ElementLinear, MoEElementLinear
+from equivariantx.o3.cgtp import TensorProduct as EqxTensorProduct
 from equivariantx.ops.common.channel_product import channel_product
 from equivariantx.ops.common.torch.spherical_product import SphericalProduct
 from equivariantx.ops.precision import cpu_matmul_allowed
@@ -289,8 +290,7 @@ def spherical_bucket_product(module):
     return node_local_path_gates(module, local_linear) and all(
         type(ace) is _ScheduledUuu
         and ace.schedule_backend == "cuda"
-        and type(ace.tp) is o3.TensorProduct
-        and not hasattr(ace, "fused_tp")
+        and type(ace.tp) in (o3.TensorProduct, EqxTensorProduct)
         for ace in module.aces
     )
 
@@ -457,8 +457,7 @@ def _bilinear_rule(module, *, backend, automatic):
     ace = module.aces[0]
     if (
         type(ace) is not UuuTensorProduct
-        or hasattr(ace, "fused_tp")
-        or type(ace.tp) is not o3.TensorProduct
+        or type(ace.tp) not in (o3.TensorProduct, EqxTensorProduct)
         or ace.tp.internal_weights
         or not ace.tp.instructions
         or any(
@@ -578,11 +577,12 @@ def host_product_provider(module):
         op = getattr(module, "eqx_ace", None)
         if (
             type(op) is not UuuFullyConnectedSymmetricContraction
-            or not next(module.parameters()).is_cuda
             or module.use_generalized_cg
             or any(has_lora(coef) for coef in module.coefs)
         ):
             return None
+    if next(module.parameters()).device.type == "cpu":
+        return "eqx_torch"
     return f"eqx_{op.backend}" if op.backend in ("cuda", "torch") else None
 
 
@@ -662,10 +662,11 @@ def product_rule(module, *, backend, task, automatic=False):
     if custom_forward(module, recursive=True):
         return None, "preserved customized or hooked product execution"
     for ace in module.aces:
-        if type(ace) is not UuuTensorProduct or type(ace.tp) is not o3.TensorProduct:
+        if type(ace) is not UuuTensorProduct or type(ace.tp) not in (
+            o3.TensorProduct,
+            EqxTensorProduct,
+        ):
             return None, "expected native spherical tensor-product factors"
-        if hasattr(ace, "fused_tp"):
-            return None, "preserved the host's alternate tensor-product provider"
         tp = ace.tp
         if not tp.instructions or any(
             ins.connection_mode != "uuu" or ins.has_weight for ins in tp.instructions

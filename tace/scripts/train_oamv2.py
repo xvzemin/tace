@@ -1,3 +1,8 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
 """Train TACE-OAM-XL-v2 on all visible CUDA devices."""
 
 import os
@@ -35,7 +40,6 @@ EXECUTION = {
     "TACE_USE_COMPILE": "1",
     "TACE_USE_CUE": "0",
     "TACE_USE_DENS": "0",
-    "TACE_USE_EQT": "0",
     "TACE_USE_EQX": "1",
     "TACE_USE_LUNA": "0",
     "TACE_USE_MATRIX_WEIGHT": "1",

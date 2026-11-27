@@ -1733,7 +1733,7 @@ def test_tace_indexed_linear(
             ) as cuda_forward,
         ):
             output = module(x, types)
-            use_cuda = device == "cuda" and env == "1" and enabled
+            use_cuda = device == "cuda" and env != "0" and enabled
             assert cuda_forward.call_count == int(use_cuda)
             assert torch_forward.call_count == int(not use_cuda)
         first = torch.autograd.grad(output.square().mean(), x, create_graph=True)[0]

@@ -154,7 +154,6 @@ def test_native_cartesian_model(
 ):
     from tace.lightning import convert_basis
 
-    monkeypatch.setenv("TACE_USE_EQT", "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
         cutoff=4.0,
@@ -1451,7 +1450,7 @@ def test_element_edge_convolution(
 
 @pytest.mark.parametrize("embedding", ["element", "element2"])
 def test_cutoff_element_weights(embedding, double_precision, monkeypatch):
-    monkeypatch.delenv("TACE_USE_EQX", raising=False)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
     torch.manual_seed(26)
     model = make_model(edge_embedding=embedding, scatter_norm="cutoff")
     rep = model.readout_fn.representation
@@ -1848,7 +1847,7 @@ def test_cartesian_conversion(
 ):
     from tace.models.spherical.inter import O3IctdInteraction
 
-    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
+    for name in ("TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(
@@ -2175,7 +2174,7 @@ def test_o2_cgtp_model_matches_energy_forces_stress_and_training(
     from tace.models.adapter import TensorModel
     from tace.models.spherical.tace import SphericalTACE
 
-    for name in ("TACE_USE_EQT", "TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
+    for name in ("TACE_USE_OEQ", "TACE_USE_CUE", "TACE_USE_EQX"):
         monkeypatch.setenv(name, "0")
     config = deepcopy(DEFAULT_MODEL_CONFIG)
     config.update(

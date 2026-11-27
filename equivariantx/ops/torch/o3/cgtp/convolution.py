@@ -5,6 +5,8 @@ from functools import lru_cache
 
 import torch
 from e3nn import o3
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from .... import config
 
@@ -108,6 +110,52 @@ def harmonic_attributes(module, vectors, amplitudes):
     return torch.cat(sections, dim=-1)
 
 
+def packed_angular_map(module):
+    """Pack disjoint, equally wide weighted output paths into one angular map."""
+    paths = module.paths
+    if not paths:
+        return None
+    channels = paths[0][3]
+    if (
+        channels < 16
+        or any(mul != channels for mul, _ in module.irreps_in1)
+        or not module.unit_harmonic_copies
+        or len(paths) != len(module.output_sections)
+        or len({path[2] for path in paths}) != len(paths)
+        or any(path[3] != channels or path[8] < 0 for path in paths)
+    ):
+        return None
+    inputs, outputs = module.input_dim // channels, module.output_dim // channels
+    if inputs > 16 or module.edge_dim > 16 or outputs > 256:
+        return None
+    table = module.cg_0.new_zeros(module.edge_dim, outputs, inputs)
+    indices = torch.empty(outputs, dtype=torch.long, device=table.device)
+    for i, (sx, sa, so, _, _, dx, dy, dz, sw, scale, _) in enumerate(paths):
+        out = slice(so // channels, so // channels + dz)
+        table[sa : sa + dy, out, sx // channels : sx // channels + dx] = (
+            getattr(module, f"cg_{i}").permute(1, 2, 0) * scale
+        )
+        indices[out] = sw // channels
+    return table.flatten(1), indices
+
+
+def packed_convolution(module, x, attrs, radial, projection, edge_index, num_nodes):
+    """Apply one angular matrix per edge and weight each path independently."""
+    source, target = edge_index
+    edges = source.numel()
+    channels = module.paths[0][3]
+    inputs, outputs = module.input_dim // channels, module.output_dim // channels
+    x = x.index_select(0, source).reshape(edges, inputs, channels)
+    angles = (attrs @ module.packed_angles).reshape(-1, outputs, inputs)
+    value = angles * x if inputs == 1 else torch.bmm(angles.expand(edges, -1, -1), x)
+    weights = radial @ projection if projection.numel() else radial
+    weights = weights.reshape(-1, module.weight_numel // channels, channels)
+    value = value * weights.index_select(1, module.packed_paths)
+    return value.new_zeros(num_nodes, module.output_dim).index_add(
+        0, target, value.flatten(1)
+    )
+
+
 def evaluate(
     module,
     features,
@@ -123,6 +171,31 @@ def evaluate(
     if config.TORCH_REFERENCE:
         result = module.reference(
             features, edge_attrs, radial, projection, edge_index, num_nodes
+        )
+    elif (
+        features.device.type in ("cpu", "cuda")
+        and module.packed_angles is not None
+        and radial_network is None
+        and edge_index is not None
+        and not config.TORCH_RECOMPUTE
+        and config.TORCH_CG_ANGULAR_MATRICES
+        and not torch.compiler.is_compiling()
+        and get_proxy_mode() is None
+        and statically_known_true(edge_index[0].numel() > 0)
+        and statically_known_true(
+            edge_index[0].numel()
+            * (
+                module.packed_angles.size(1)
+                + module.input_dim
+                + 2 * module.output_dim
+                + module.weight_numel
+            )
+            * features.element_size()
+            <= config.TORCH_EDGE_TILE_BYTES
+        )
+    ):
+        result = packed_convolution(
+            module, features, edge_attrs, radial, projection, edge_index, num_nodes
         )
     else:
         from equivariantx.ops.common.convolution import convolve

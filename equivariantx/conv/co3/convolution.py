@@ -117,6 +117,8 @@ class CartesianTensorProductConv(O3TensorProductConv):
                 "Compact output requires symmetric inputs and raw outputs."
             )
         self.input_basis = input_basis
+        self.angular_groups = ()
+        self.packed_angles = None
         self.compact_output = compact_output
         self.irreps_in1 = tensor_product.irreps_in1
         self.irreps_in2 = tensor_product.irreps_in2

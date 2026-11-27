@@ -9,7 +9,7 @@ import torch
 from e3nn import o3
 
 from equivariantx.conv import indexed_weights
-from tace.utils.env import acceleration_enabled, memory_first
+from tace.utils.env import acceleration_enabled, eqx_backend, memory_first
 
 from ..lammps import Graph
 from ..layer_norm import get_normalization_layer
@@ -33,8 +33,10 @@ class O3CgtpInteraction(Interaction):
 
     @property
     def use_eqx(self) -> bool:
-        return hasattr(self.rejector, "eqx_tp") and bool(
-            acceleration_enabled("eqx", kernel="conv")
+        return (
+            hasattr(self.rejector, "eqx_tp")
+            and getattr(self.rejector, "supports_radial_stream", True)
+            and bool(acceleration_enabled("eqx", kernel="conv"))
         )
 
     def _prepare_setup(self) -> None:
@@ -446,7 +448,7 @@ class O3IctdInteraction(O3CgtpInteraction):
             self.rejector.eqx_tp.harmonic_output_index,
             internal_weights=False,
             shared_weights=True,
-            backend="cuda" if self.use_eqx else "torch",
+            backend=eqx_backend("conv"),
         )
 
 

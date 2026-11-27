@@ -15,7 +15,7 @@ from equivariantx.mbe.ace import (
     IctdUuuFullyConnectedSymmetricContraction,
 )
 from equivariantx.nn import EquivariantLayerNorm
-from tace.utils.env import acceleration_enabled
+from tace.utils.env import acceleration_enabled, eqx_backend
 from tace.utils.torch_scatter import scatter_sum
 
 from ..angular import SphericalHarmonics
@@ -91,7 +91,7 @@ def cartesian_tensor_product(module, *, project=True):
         internal_weights=False,
         shared_weights=module.shared_weights,
         project=project,
-        backend="cuda" if acceleration_enabled("eqx", kernel="product") else "torch",
+        backend=eqx_backend("product"),
     )
 
 
@@ -226,10 +226,10 @@ def linear_layout(module):
         instructions=[(p.i_in, p.i_out) for p in old.instructions],
         internal_weights=False,
         shared_weights=old.shared_weights,
-        backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+        backend=eqx_backend("linear"),
     )
     if isinstance(module, e3nnElementLinear):
-        module.eqx_linear = ElementLinear(module.linear, backend="cuda")
+        module.eqx_linear = ElementLinear(module.linear)
         module.torch_linear = ElementLinear(module.linear, backend="torch")
     indices = torch.zeros(module.irreps_out.dim, dtype=torch.long)
     mask = torch.zeros(module.irreps_out.dim, dtype=torch.float64)
@@ -275,11 +275,9 @@ def cartesian_modules(module):
             module.expert_irreps_out,
             internal_weights=False,
             shared_weights=False,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
-        module.eqx_linear = MoEElementLinear(
-            module.linear, module.num_experts, backend="cuda"
-        )
+        module.eqx_linear = MoEElementLinear(module.linear, module.num_experts)
         module.torch_linear = MoEElementLinear(
             module.linear, module.num_experts, backend="torch"
         )
@@ -302,7 +300,7 @@ def cartesian_modules(module):
             module.act_gates.irreps_in,
             [None] * len(module.act_gates.acts),
             module.irreps_gated,
-            backend="cuda" if acceleration_enabled("eqx", kernel="linear") else "torch",
+            backend=eqx_backend("linear"),
         )
         # Reuse normalized activations rather than normalizing them twice.
         gate.act_scalars = module.act_scalars
@@ -311,9 +309,7 @@ def cartesian_modules(module):
             gate.irreps_gated,
             module.act_gates.irreps_out,
             project=False,
-            backend="cuda"
-            if acceleration_enabled("eqx", kernel="product")
-            else "torch",
+            backend=eqx_backend("product"),
         )
         gate.irreps_out = (
             co3.Irreps(module.act_scalars.irreps_out) + gate.mul.irreps_out
@@ -346,7 +342,7 @@ def cartesian_modules(module):
             module.irreps_out,
             module.normalize,
             module.normalization,
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
     if isinstance(module, LayoutTransform):
         module.irreps = co3.Irreps(module.irreps)
@@ -370,7 +366,7 @@ def cartesian_modules(module):
         module.eqx_ace = IctdUuuFullyConnectedSymmetricContraction(
             [ace.tp for ace in module.aces],
             [coef.linear for coef in module.coefs],
-            backend="cuda" if module.use_eqx else "torch",
+            backend=eqx_backend("product"),
         )
     if isinstance(module, BilinearMoEACE) and module.use_eqx:
         coef = module.coefs[1]
@@ -394,7 +390,7 @@ def cartesian_modules(module):
             internal_weights=False,
             shared_weights=True,
             output_basis="cartesian",
-            backend="cuda" if acceleration_enabled("eqx", kernel="conv") else "torch",
+            backend=eqx_backend("conv"),
         )
     for name, value in list(vars(module).items()):
         if isinstance(value, o3.Irreps):
