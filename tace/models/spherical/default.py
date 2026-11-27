@@ -24,6 +24,7 @@ DEFAULT_MODEL_CONFIG = {
     "parity": None,
     "num_channel": 64,
     "num_layers": 2,
+    "loop": None,
     "max_neighbors": None,
     "mlp_type": "mlp_v1",
     "target_property": ["energy", "forces"],
@@ -325,6 +326,27 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
                 raise TypeError(
                     f"{key} must be a scalar or a list of per-layer values."
                 )
+
+    loop = cfg["loop"]
+    if loop is not None:
+        from .inter import interaction_aliases
+        from .prod import product_aliases
+
+        if (
+            not isinstance(loop, list)
+            or len(loop) != cfg["num_layers"]
+            or any(type(group) is not int or group < 0 for group in loop)
+        ):
+            raise ValueError("loop must contain one nonnegative integer per layer.")
+        for name, kinds, aliases in (
+            ("interaction", atomic_basis["type"], interaction_aliases),
+            ("product", product_basis["type"], product_aliases),
+        ):
+            seen = {}
+            for group, kind in zip(loop, kinds, strict=True):
+                kind = aliases.get(kind, kind)
+                if seen.setdefault(group, kind) != kind:
+                    raise ValueError(f"loop group {group} mixes {name} types.")
 
     components = product_basis["return_components"]
     if components is not None:

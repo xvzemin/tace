@@ -727,6 +727,14 @@ def switch_e3nn_weight_layout(
 ) -> torch.nn.Module:
 
     assert target in {"toggle", "flat", "matrix"}
+    if any(
+        getattr(module, "loop_weight_layout", False)
+        and (target == "toggle" or module.use_matrix_weight != (target == "matrix"))
+        for module in model.modules()
+    ):
+        raise ValueError(
+            "Set TACE_USE_MATRIX_WEIGHT before binding shared loop parameters."
+        )
 
     def is_supported_module(m: torch.nn.Module) -> bool:
         return (

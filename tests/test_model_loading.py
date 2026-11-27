@@ -1380,7 +1380,7 @@ def test_ejn_export_elements(double_precision):
     torch.testing.assert_close(new_basis.lengthscale[1], basis.lengthscale[2])
 
 
-def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
+def evaluate(model, fidelity=0, numbers=(1, 1, 8), **inputs):
     return model(
         {
             "positions": torch.tensor(
@@ -1400,8 +1400,221 @@ def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
                 [[0.1, 0.2, 0.3], [0.3, -0.1, 0.2], [-0.1, 0.1, 0.2]],
                 device=DEVICE,
             ),
+            **inputs,
         }
     )
+
+
+@pytest.mark.parametrize(
+    "kind,cartesian",
+    [
+        ("cgtp", False),
+        ("nonlinear_cgtp", True),
+        ("mace", False),
+        ("tace", False),
+        ("uv_o2_mag", False),
+        ("w6j_mag", False),
+    ],
+)
+def test_message_passing_loop(kind, cartesian, double_precision, tmp_path, monkeypatch):
+    from tace.models import CartesianTACE
+    from tace.models.spherical.edge import ElementEdgeEmbedding
+
+    magnetic = kind in ("uv_o2_mag", "w6j_mag")
+    cfg = deepcopy(
+        make_model("uv_o2_mag" if magnetic else "cgtp").readout_fn.model_config
+    )
+    cfg["num_layers"] = 3
+    cfg["atomic_basis"]["type"] = kind if magnetic else "cgtp"
+    inputs = {}
+    if kind == "uv_o2_mag":
+        cfg["universal_embedding"]["electric_field"]["enable"] = True
+        inputs["electric_field"] = torch.tensor([[0.3, -0.2, 0.1]], device=DEVICE)
+    if magnetic:
+        cfg["target_property"] = [
+            *cfg["target_property"],
+            "noncollinear_magnetic_forces",
+        ]
+    if kind == "cgtp":
+        cfg["atomic_basis"]["scatter_norm"] = "density"
+        monkeypatch.setenv("TACE_MEMORY_FIRST", "0")
+    cfg["product_basis"]["type"] = "cgtp" if magnetic else kind
+    cls = CartesianTACE if cartesian else SphericalTACE
+    independent = TensorModel(cls(**cfg).to(DEVICE))
+    cfg["loop"] = [3, 9, 3]
+    tied = TensorModel(cls(**cfg).to(DEVICE))
+    rep = tied.readout_fn.representation
+    assert len(list(tied.parameters())) < len(list(independent.parameters()))
+    heads = list(tied.readout_fn.energy_readouts)
+    seen = set()
+    for block in (rep.node_embedding, rep.edge_embedding, *heads):
+        params = {id(p) for p in block.parameters()}
+        assert params.isdisjoint(seen)
+        seen.update(params)
+    assert seen.isdisjoint(id(p) for p in rep.interactions.parameters())
+    assert seen.isdisjoint(id(p) for p in rep.products.parameters())
+    assert (
+        rep.edge_updates[0].source_embedding.weight
+        is rep.edge_updates[2].source_embedding.weight
+    )
+    assert (
+        rep.edge_updates[1].source_embedding.weight
+        is not rep.edge_updates[2].source_embedding.weight
+    )
+    if kind == "uv_o2_mag":
+        first = rep.node_updates[0].source_embedding
+        last = rep.node_updates[2].source_embedding
+        assert all(
+            a is b for a, b in zip(first.parameters(), last.parameters(), strict=True)
+        )
+        first = rep.uee_embeddings[0].uee["electric_field"]
+        last = rep.uee_embeddings[2].uee["electric_field"]
+        assert all(
+            a is b for a, b in zip(first.parameters(), last.parameters(), strict=True)
+        )
+
+    if kind == "cgtp":
+        a, b = rep.interactions[0], rep.interactions[2]
+        small = ElementEdgeEmbedding.path_keys(a.rejector)
+        large = {
+            key: i for i, key in enumerate(ElementEdgeEmbedding.path_keys(b.rejector))
+        }
+        columns = [large[k] for k in small]
+        assert columns != list(range(len(columns)))
+        torch.testing.assert_close(
+            a.edge_info.mlp[-1].weight, b.edge_info.mlp[-1].weight[:, columns]
+        )
+
+    def effective(name):
+        parent, _, attr = name.rpartition(".")
+        return getattr(tied.get_submodule(parent), attr)
+
+    with torch.no_grad():
+        for name, p in independent.named_parameters():
+            p.copy_(effective(name))
+    independent.train()
+    tied.train()
+    a, b = evaluate(independent, **inputs), evaluate(tied, **inputs)
+    for key in cfg["target_property"]:
+        torch.testing.assert_close(a[key], b[key])
+    for out in (a, b):
+        loss = out["energy"].sum() + out["forces"].square().mean()
+        if magnetic:
+            loss = loss + out["noncollinear_magnetic_forces"].square().mean()
+        loss.backward()
+    pairs = [
+        (effective(name), p.grad)
+        for name, p in independent.named_parameters()
+        if p.grad is not None
+    ]
+    trainable = [p for p in tied.parameters() if p.requires_grad]
+    expected = torch.autograd.grad(
+        [v for v, _ in pairs], trainable, [g for _, g in pairs], allow_unused=True
+    )
+    for param, grad in zip(trainable, expected):
+        torch.testing.assert_close(param.grad, grad)
+    if kind == "cgtp":
+        from tace.lightning.optimizer import get_optimizer_param_groups
+
+        groups = get_optimizer_param_groups(tied, 0.01, use_muon=True)
+        optimized = [id(p) for g in groups for p in g["params"]]
+        assert len(optimized) == len(set(optimized)) == len(trainable)
+        path = tmp_path / "loop.pt"
+        torch.optim.Adam(tied.parameters(), lr=1e-3).step()
+        after_step = evaluate(tied)["energy"]
+        export_tace(tied, str(path))
+        restored = load_tace(str(path), device=str(DEVICE), dtype="float64")
+        torch.testing.assert_close(evaluate(restored)["energy"], after_step)
+        updates = restored.readout_fn.representation.edge_updates
+        assert updates[0].target_embedding.weight is updates[2].target_embedding.weight
+        with pytest.raises(ValueError, match="before binding"):
+            switch_e3nn_weight_layout(restored)
+
+
+def test_loop_path_union(double_precision):
+    from tace.models.spherical.loop import Slot, tie
+
+    a, b = torch.nn.Linear(4, 2, bias=False), torch.nn.Linear(4, 2, bias=False)
+    tie(
+        [
+            Slot(a, "weight", 1, 1, (("p", 2), ("q", 2))),
+            Slot(b, "weight", 1, 1, (("q", 2), ("r", 2))),
+        ],
+        "test",
+    )
+    master = a.parametrizations.weight.original
+    assert master is b.parametrizations.weight.original
+    assert master.shape == (2, 6)
+    torch.testing.assert_close(a.weight[:, 2:], b.weight[:, :2])
+    (a.weight.sum() + 2 * b.weight.sum()).backward()
+    torch.testing.assert_close(
+        master.grad, master.new_tensor([[1, 1, 3, 3, 2, 2]]).expand_as(master)
+    )
+    x = torch.randn(3, 4)
+    exported = torch.export.export(a, (x,), strict=True).module()
+    torch.testing.assert_close(exported(x), a(x))
+
+
+def test_loop_config():
+    from tace.models.spherical.default import check_model_config
+    from tace.models.spherical.loop import layer_groups, share_layers
+
+    original = make_model().readout_fn
+    cfg = deepcopy(original.model_config)
+    for invalid in (True, [0], [False, 1], [0, -1]):
+        with pytest.raises(ValueError, match="loop"):
+            check_model_config(dict(cfg, loop=invalid))
+    for block, kind in (("atomic_basis", "uv_o2"), ("product_basis", "mace")):
+        mixed = deepcopy(cfg)
+        mixed[block]["type"] = ["cgtp", kind]
+        with pytest.raises(ValueError, match="mixes"):
+            check_model_config(dict(mixed, loop=[0, 0]))
+        check_model_config(dict(mixed, loop=[0, 1]))
+
+    unique = SphericalTACE(**dict(cfg, loop=[0, 1]))
+    assert not hasattr(unique.representation, "loop_aliases")
+    unique.load_state_dict(original.state_dict(), strict=True)
+    rep = unique.representation
+    share_layers(rep, list(layer_groups(rep, [0, 0], [0, 1])))
+    assert (
+        rep.edge_updates[0].source_embedding.weight
+        is rep.edge_updates[1].source_embedding.weight
+    )
+    assert set(rep.products[0].parameters()).isdisjoint(rep.products[1].parameters())
+
+
+def test_loop_checkpoint_layout_and_ema(double_precision, tmp_path):
+    model = make_model("cgtp")
+    cfg = deepcopy(model.readout_fn.model_config)
+    layers = {
+        name: layer
+        for name, layer in model.readout_fn.named_modules()
+        if hasattr(layer, "use_matrix_weight")
+    }
+    cfg["loop"] = [0] * cfg["num_layers"]
+    # Simulate a checkpoint from the opposite matrix-weight setting.
+    cfg["_loop_matrix_modules"] = {
+        name for name, layer in layers.items() if not layer.use_matrix_weight
+    }
+    model.readout_fn = SphericalTACE(**cfg).to(DEVICE)
+    path = tmp_path / "loop.ckpt"
+    save_checkpoint(model, path)
+    state = torch.load(path, weights_only=False)
+    shadows = [p.detach().clone() + 0.01 for p in model.parameters()]
+    state["ema_state_dict"] = {"shadow_params": shadows}
+    torch.save(state, path)
+    restored = load_tace(path, device=DEVICE, use_ema=True)
+    names = dict(restored.named_parameters(remove_duplicate=False))
+    by_id = {id(p): a for p, a in zip(model.parameters(), shadows, strict=True)}
+    for name, param in model.named_parameters(remove_duplicate=False):
+        torch.testing.assert_close(names[name], by_id[id(param)])
+    for paths in restored.readout_fn.representation.loop_aliases:
+        assert (
+            len(
+                {id(restored.readout_fn.representation.get_parameter(k)) for k in paths}
+            )
+            == 1
+        )
 
 
 @pytest.mark.parametrize("interaction", ["cgtp", "o2_cgtp", "co3", "nonlinear_ictd"])

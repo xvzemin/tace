@@ -313,6 +313,10 @@ class MaceACE(Product):
             self.irreps_coefs_out,
             tensors,
         )
+        self.coupling_blocks = tuple(
+            (self.irreps_coefs_out[output].ir, degree, tensor.shape[-1])
+            for output, degree, tensor in tensors
+        )
         self.weight = torch.nn.Parameter(
             torch.cat(weights, dim=1)
             if weights

@@ -158,6 +158,23 @@ class DensityScatterNorm(ScatterNorm):
         self.alpha = torch.nn.Parameter(torch.tensor(avg_num_neighbors**0.5))
         self.beta = torch.nn.Parameter(torch.tensor(0.0))
 
+    def denominator(
+        self,
+        edge_feats: torch.Tensor | IndexedFeatures,
+        edge_index: torch.Tensor,
+        edge_cutoff: torch.Tensor | None,
+        num_nodes: int,
+        edge_pairs: EdgePairs | None = None,
+    ) -> torch.Tensor:
+        """Return the learned normalization factor for each receiver."""
+        density = torch.tanh(self.edge_density(edge_feats) ** 2)
+        if edge_pairs is not None:
+            density = edge_pairs.expand(density)
+        if edge_cutoff is not None and self.apply_cutoff:
+            density = density * edge_cutoff
+        density = scatter_sum(density, edge_index[1], dim=0, dim_size=num_nodes)
+        return density * self.beta + self.alpha
+
     def forward(
         self,
         node_feats: torch.Tensor,
@@ -167,15 +184,10 @@ class DensityScatterNorm(ScatterNorm):
         num_nodes: int,
         edge_pairs: EdgePairs | None = None,
     ) -> torch.Tensor:
-        density = torch.tanh(self.edge_density(edge_feats) ** 2)
-        if edge_pairs is not None:
-            density = edge_pairs.expand(density)
-        if edge_cutoff is not None and self.apply_cutoff:
-            density = density * edge_cutoff
-        density = scatter_sum(density, edge_index[1], dim=0, dim_size=num_nodes)
-        density = density[: node_feats.size(0)]
-        density = density * self.beta + self.alpha
-        return node_feats / density
+        density = self.denominator(
+            edge_feats, edge_index, edge_cutoff, num_nodes, edge_pairs
+        )
+        return node_feats / density[: node_feats.size(0)]
 
 
 class NoCutoffDensityScatterNorm(DensityScatterNorm):

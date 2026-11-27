@@ -5,8 +5,6 @@
 
 from copy import deepcopy
 
-import torch
-
 from ..spherical.node import SphericalTensorNodeEmbedding
 from ..spherical.tace import SphericalTACE
 from .layers import cartesian_modules
@@ -42,6 +40,8 @@ class CartesianTACE(SphericalTACE):
             else ("nonlinear_cgtp" if kinds == "nonlinear_ictd" else kinds)
         )
         super().__init__(**kwargs)
+
+    def _configure_storage(self):
         cartesian_modules(self)
         representation = self.representation
         if isinstance(representation.node_embedding, SphericalTensorNodeEmbedding):
@@ -66,6 +66,3 @@ class CartesianTACE(SphericalTACE):
             if isinstance(kinds, list)
             else ("nonlinear_ictd" if kinds == "nonlinear_cgtp" else kinds)
         )
-        from tace.utils.precision import configure_model_precision
-
-        configure_model_precision(self, torch.get_default_dtype())

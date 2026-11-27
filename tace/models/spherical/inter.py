@@ -56,7 +56,9 @@ class O3CgtpInteraction(Interaction):
     def _setup_additional_modules(self) -> None:
         pass
 
-    def _radial_projection(self, edge_feats, element=None, edge_pairs=None):
+    def _radial_projection(
+        self, edge_feats, element=None, edge_pairs=None, radial_hidden=None
+    ):
         if self.radial_widths is not None:
             radial, projection, radial_network = self.edge_info.stream(
                 edge_feats,
@@ -65,7 +67,11 @@ class O3CgtpInteraction(Interaction):
             )
             bias = None
         else:
-            radial, layers = convolution_radial(self.edge_info, edge_feats)
+            radial, layers = (
+                convolution_radial(self.edge_info, edge_feats)
+                if radial_hidden is None
+                else (radial_hidden, self.edge_info.mlp[-1:])
+            )
             last = layers[-1]
             projection, bias = last.get_weight(), last.bias
             radial_network = (
@@ -96,8 +102,12 @@ class O3CgtpInteraction(Interaction):
                 radial = torch.cat((radial, torch.ones_like(radial[:, :1])), dim=-1)
         return radial, projection, radial_network
 
-    def _conv_weights(self, edge_feats, element, edge_pairs=None):
-        weights = self.edge_info(edge_feats)
+    def _conv_weights(self, edge_feats, element, edge_pairs=None, radial_hidden=None):
+        weights = (
+            self.edge_info(edge_feats)
+            if radial_hidden is None
+            else self.edge_info.mlp[-1](radial_hidden)
+        )
         if element is not None:
             table, endpoints = element
             if edge_pairs is not None and isinstance(table, tuple):
@@ -241,6 +251,7 @@ class O3CgtpInteraction(Interaction):
         graph: Union[Graph, None] = None,
         element=None,
         edge_pairs=None,
+        radial_hidden=None,
     ) -> torch.Tensor:
         # ML-IAP gathers from owned and ghost atoms, but pair_i only indexes
         # owned receivers. Other convolution providers keep their own contract.
@@ -253,7 +264,7 @@ class O3CgtpInteraction(Interaction):
         )
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(
-                edge_feats, element, edge_pairs
+                edge_feats, element, edge_pairs, radial_hidden
             )
             # Mixed-precision geometry already produced the spherical harmonics
             # before the interaction. The native vector kernel requires like dtypes.
@@ -280,7 +291,9 @@ class O3CgtpInteraction(Interaction):
                 else edge_pairs,
                 **receiver,
             )
-        conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
+        conv_weights = self._conv_weights(
+            edge_feats, element, edge_pairs, radial_hidden
+        )
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
         return self.rejector(
@@ -308,6 +321,8 @@ class O3CgtpInteraction(Interaction):
         message_cutoff: torch.Tensor | None = None,
         element: tuple[torch.Tensor, torch.Tensor | None] | None = None,
         edge_pairs=None,
+        density_denominator: torch.Tensor | None = None,
+        radial_hidden: torch.Tensor | None = None,
     ):
 
         lmp_data = graph.lmp_data
@@ -363,6 +378,8 @@ class O3CgtpInteraction(Interaction):
         )
         if element is not None:
             message_inputs["element"] = element
+        if radial_hidden is not None:
+            message_inputs["radial_hidden"] = radial_hidden
         if isinstance(self.scatter_norm, CutoffScatterNorm):
             if message_cutoff is None:
                 message_cutoff = self.scatter_norm.edge_weights(
@@ -393,14 +410,17 @@ class O3CgtpInteraction(Interaction):
             )
         )
 
-        m_i = self.scatter_norm(
-            m_i,
-            edge_feats,
-            edge_index,
-            edge_cutoff,
-            num_receivers,
-            edge_pairs=edge_pairs,
-        )
+        if density_denominator is None:
+            m_i = self.scatter_norm(
+                m_i,
+                edge_feats,
+                edge_index,
+                edge_cutoff,
+                num_receivers,
+                edge_pairs=edge_pairs,
+            )
+        else:
+            m_i = m_i / density_denominator[: m_i.size(0)]
 
         m_i = self.linear_nonlinearity(self.nonlinearity(m_i))
 
@@ -484,10 +504,11 @@ class O2CgtpInteraction(O3CgtpInteraction):
         graph: Union[Graph, None] = None,
         element=None,
         edge_pairs=None,
+        radial_hidden=None,
     ) -> torch.Tensor:
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(
-                edge_feats, element, edge_pairs
+                edge_feats, element, edge_pairs, radial_hidden
             )
             return self.rejector.forward_stream(
                 node_feats,
@@ -502,7 +523,9 @@ class O2CgtpInteraction(O3CgtpInteraction):
                 if element is not None and isinstance(element[0], tuple)
                 else edge_pairs,
             )
-        conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
+        conv_weights = self._conv_weights(
+            edge_feats, element, edge_pairs, radial_hidden
+        )
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
         return self.rejector(

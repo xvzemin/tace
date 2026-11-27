@@ -451,7 +451,7 @@ class LightningWrapperModel(L.LightningModule):
         statistics = checkpoint["hyper_parameters"]["statistics"]
         with torch_default_dtype(model_dtype):
             model = create_model(
-                saved_radial_config(cfg["model"]["config"], checkpoint["state_dict"]),
+                saved_model_config(cfg["model"]["config"], checkpoint["state_dict"]),
                 statistics,
                 target_property,
                 embedding_property,
@@ -462,24 +462,31 @@ class LightningWrapperModel(L.LightningModule):
             for k, v in checkpoint["state_dict"].items()
             if k.startswith("model.")
         }
-        # === EMA ===
-        if bool(use_ema) and "ema_state_dict" in checkpoint:
-            ema_params = checkpoint["ema_state_dict"]["shadow_params"]
-            for idx, (name, _) in enumerate(model.named_parameters()):
-                state_dict[name] = ema_params[idx]
-
         _load_model_state_dict(
             model,
             state_dict,
             strict=strict,
             rebuild_constants=model_dtype != checkpoint_dtype,
+            ema_params=checkpoint.get("ema_state_dict", {}).get("shadow_params")
+            if use_ema
+            else None,
         )
 
         return configure_model_precision(model, model_dtype, device=map_location)
 
 
-def saved_radial_config(config, state):
-    """Restore the selector and spectral cutoff of a pre-SPB state dictionary."""
+def saved_model_config(config, state):
+    """Restore the stored linear layout and radial basis before binding parameters."""
+    loop = config.get("loop")
+    if loop and len(set(loop)) < len(loop):
+        matrices = set()
+        for name in state:
+            _, sep, path = name.partition("readout_fn.")
+            if sep:
+                for suffix in (".weight.0", ".weight.parametrizations.0.original"):
+                    if path.endswith(suffix):
+                        matrices.add(path.removesuffix(suffix))
+        config = {**config, "_loop_matrix_modules": matrices}
     radial = config.get("radial_basis", {})
     if radial.get("radial_basis") != "physical_basis":
         return config
@@ -518,6 +525,7 @@ def _load_model_state_dict(
     state_dict: Dict[str, torch.Tensor],
     strict: bool,
     rebuild_constants: bool,
+    ema_params: list[torch.Tensor] | None = None,
 ) -> None:
     """Load model state, rebuilding angular coupling constants when changing dtype."""
     from tace.models.linear import switch_e3nn_weight_layout
@@ -529,8 +537,20 @@ def _load_model_state_dict(
                 switch_e3nn_weight_layout(module, "matrix")
             elif prefix + "weight" in state_dict:
                 switch_e3nn_weight_layout(module, "flat")
-    if rebuild_constants:
+    if rebuild_constants or ema_params is not None:
         state_dict = copy.copy(state_dict)
+    if ema_params is not None:
+        aliases = {
+            name: id(p) for name, p in model.named_parameters(remove_duplicate=False)
+        }
+        if len(aliases) != len(set(aliases.values())):
+            # The checkpoint orders shadows by unique parameters, not layer aliases.
+            ids = dict.fromkeys(aliases[name] for name in state_dict if name in aliases)
+        else:
+            ids = dict.fromkeys(aliases.values())
+        shadows = dict(zip(ids, ema_params, strict=True))
+        state_dict.update((name, shadows[key]) for name, key in aliases.items())
+    if rebuild_constants:
         for name, value in model.named_buffers(remove_duplicate=False):
             # Only angular constants are independent of the saved model state.
             # Reference energies, scales and other persistent buffers must be loaded.
@@ -650,7 +670,7 @@ def load_tace(
         state_dict = model["state_dict"]
         with torch_default_dtype(target_dtype):
             model = create_model(
-                model_config=saved_radial_config(model["cfg"], state_dict),
+                model_config=saved_model_config(model["cfg"], state_dict),
                 statistics=model["statistics"],
                 target_property=model["target_property"],
                 embedding_property=model["embedding_property"],

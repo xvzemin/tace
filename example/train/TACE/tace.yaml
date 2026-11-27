@@ -393,6 +393,7 @@ model:
     Lmax: 2 # Truncation for node, 2 is recommended.
     lmax: 3 # Truncation for edge, 3 is recommended.
     num_layers: 3 # 2 for correlation >=3, can be higher when correlation=2
+    loop: null # One group ID per layer, e.g. [0, 1, 0].
     num_channel: 48 # multiplicity per irrep; larger widths increase compute and memory
     parity: null # null: natural + target/embedding irreps; false: natural only; true: all reachable O(3) parity
     mlp_type: mlp_v2 # [mlp_v1, mlp_v2]; shared by all scalar MLPs in the model

@@ -78,8 +78,10 @@ class SphericalTACE(torch.nn.Module):
         atomic_numbers=None,
         mlp_type: str = "mlp_v1",
         compile_backend: str = "inductor",
+        loop: list[int] | None = None,
         **kwargs,
     ):
+        _loop_matrix_modules = kwargs.pop("_loop_matrix_modules", None)
         cfg = {
             k: v
             for k, v in locals().items()
@@ -351,7 +353,28 @@ class SphericalTACE(torch.nn.Module):
 
         from tace.utils.precision import configure_model_precision
 
+        tied = cfg["loop"] is not None and len(set(cfg["loop"])) < self.num_layers
+        if tied:
+            from .loop import layer_groups, share_layers
+
+            if _loop_matrix_modules is not None:
+                from ..linear import switch_e3nn_weight_layout
+
+                for name, layer in self.named_modules():
+                    if hasattr(layer, "use_matrix_weight"):
+                        matrix = name in _loop_matrix_modules
+                        if matrix != layer.use_matrix_weight:
+                            switch_e3nn_weight_layout(
+                                layer, "matrix" if matrix else "flat"
+                            )
+            groups = list(layer_groups(self.representation, cfg["loop"], cfg["loop"]))
+        self._configure_storage()
+        if tied:
+            share_layers(self.representation, groups)
         configure_model_precision(self, torch.get_default_dtype())
+
+    def _configure_storage(self):
+        """Finalize the native operators for this tensor representation."""
 
     def readout_fn(
         self,

@@ -196,6 +196,11 @@ def plan(model, *, task=None, backend=None, regional_only=False):
         if task in {"inference", "training"}
         else ()
     )
+    if hasattr(rep, "loop_update_sources"):
+        reason = "Keep the shared message-passing parameters on the host model."
+        if task in {"joint_training", "lammps"}:
+            raise ValueError(f"No specialized {task} schedule for loop models.")
+        return ExecutionPlan(task, backend, "regional", heads, reason)
     if customized_codegen(model) or customized_message_codegen(rep):
         reason = "Preserve customized execution on an e3nn generated module or its message owner."
         if task in {"joint_training", "lammps"} or getattr(

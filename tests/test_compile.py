@@ -596,8 +596,9 @@ def test_export_node_energy_allows_one_or_more_structures():
         torch.testing.assert_close(exported(energy, batch, ptr), expected)
 
 
+@pytest.mark.parametrize("loop", [None, [0, 0]])
 def test_fixed_frozen_graph_export_preserves_values_and_rejects_new_shapes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, loop
 ):
     from tace.models.adapter import TensorModel
     from tace.models.compile import aot
@@ -610,7 +611,8 @@ def test_fixed_frozen_graph_export_preserves_values_and_rejects_new_shapes(
         Lmax=1,
         lmax=1,
         mmax=1,
-        num_layers=1,
+        num_layers=len(loop) if loop else 1,
+        loop=loop,
         num_channel=2,
         target_property=["energy", "forces"],
         statistics=[

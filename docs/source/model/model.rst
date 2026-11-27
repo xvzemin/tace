@@ -21,6 +21,28 @@ model objects; new code uses the names above.
    prod.rst
    cartesian.rst
 
+Message-passing weight sharing
+------------------------------
+
+``model.config.loop`` accepts one nonnegative group ID per layer, or ``null``
+(independent layers). For example, ``[0, 1, 0, 1]`` ties layers 1 and 3,
+and layers 2 and 4. IDs need not be consecutive. Each group shares its
+interaction, product, edge and node updates, and any per-layer equivariant
+feature injection. Initial node and edge embeddings, the final norm and
+all readouts are outside the loop.
+Group members must have matching operator types and compatible parameter
+layouts. CGTP weights are shared by coupling path, including intermediate
+ACE paths, not by position in a flattened vector. Each layer evaluates only
+its own paths. The hidden features, gates and messages are updated at
+every layer even when their parameters are shared.
+
+Within one forward pass, repeated element-only updates and learned density
+denominators are evaluated once per group. With ``TACE_MEMORY_FIRST=0``,
+CGTP layers using a single radial MLP also reuse its hidden features for
+unchanged edge inputs. The default memory-first mode retains streamed
+radial execution. Foundation's specialized joint-training and LAMMPS
+schedules do not support loop models.
+
 Legacy model building blocks
 ----------------------------
 

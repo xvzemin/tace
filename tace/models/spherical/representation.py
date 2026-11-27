@@ -14,7 +14,12 @@ from equivariantx.nn import indexed_rows
 from equivariantx.utils import EdgePairs
 
 from ...dataset.quantity import PROPERTIES
-from ...utils.env import acceleration_enabled, eqx_backend, get_tace_use_dens
+from ...utils.env import (
+    acceleration_enabled,
+    eqx_backend,
+    get_tace_use_dens,
+    memory_first,
+)
 from ..layer_norm import get_normalization_layer, residual_update_count
 from ..linear import e3nnLinear
 from ..radial import RadialBasis
@@ -541,6 +546,10 @@ class NodeRepresentation(torch.nn.Module):
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
+        if hasattr(self, "loop_aliases"):
+            from .loop import restore_aliases
+
+            restore_aliases(self)
         self.model_dtype = next(self.node_embedding.parameters()).dtype
         return self
 
@@ -747,26 +756,38 @@ class NodeRepresentation(torch.nn.Module):
 
         # === representation Learning ===
         prev_feats = []
+        update_sources = getattr(self, "loop_update_sources", None)
+        edge_cache, magnetic_cache, density_cache, radial_cache = {}, {}, {}, {}
+        reuse_radial = update_sources is not None and not memory_first()
         for idx, (edge_update, inter, prod) in enumerate(
             zip(self.edge_updates, self.interactions, self.products)
         ):
             node_types = node_type
             local_node_type = node_type
-            this_edge_feats = edge_update(
-                node_feats,
-                node_types,
-                edge_feats,
-                data["edge_index"],
-                edge_cutoff,
+            edge_source, node_source, density_source, radial_source = (
+                (-1, -1, -1, -1) if update_sources is None else update_sources[idx]
             )
-            magnetic_node_info = (
-                self.node_updates[idx](
-                    magnetic_radial_basis,
+            if edge_source >= 0 and edge_source < idx:
+                this_edge_feats = edge_cache[edge_source]
+            else:
+                this_edge_feats = edge_update(
+                    node_feats,
                     node_types,
+                    edge_feats,
+                    data["edge_index"],
+                    edge_cutoff,
                 )
-                if self.node_updates is not None
-                else None
-            )
+                if edge_source >= 0:
+                    edge_cache[idx] = this_edge_feats
+            magnetic_node_info = None
+            if node_source >= 0 and node_source < idx:
+                magnetic_node_info = magnetic_cache[node_source]
+            elif self.node_updates is not None:
+                magnetic_node_info = self.node_updates[idx](
+                    magnetic_radial_basis, node_types
+                )
+                if node_source >= 0:
+                    magnetic_cache[idx] = magnetic_node_info
             if graph.lmp and idx > 0:
                 local_node_type = node_type_local
             interaction_inputs = {}
@@ -790,6 +811,22 @@ class NodeRepresentation(torch.nn.Module):
                     if indexed_types is not None and self.indexed_element_layers[idx]
                     else endpoint_types,
                 )
+            if density_source >= 0:
+                if density_source == idx:
+                    density_cache[idx] = inter.scatter_norm.denominator(
+                        this_edge_feats,
+                        data["edge_index"],
+                        edge_cutoff,
+                        node_type_local.size(0),
+                        pairs,
+                    )
+                interaction_inputs["density_denominator"] = density_cache[
+                    density_source
+                ]
+            if reuse_radial and radial_source >= 0:
+                if radial_source == idx:
+                    radial_cache[idx] = inter.edge_info.mlp[:-1](this_edge_feats)
+                interaction_inputs["radial_hidden"] = radial_cache[radial_source]
             node_feats, sc = inter(
                 node_feats,
                 node_types,

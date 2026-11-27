@@ -4,6 +4,7 @@
 ################################################################################
 
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from fnmatch import fnmatchcase
 
@@ -157,6 +158,15 @@ NO_MUON_NAMES = (
 )
 
 
+def parameter_path(name: str) -> str:
+    """Return the logical name of a parametrized weight or bias."""
+    if "parametrizations." in name:
+        return re.sub(
+            r"(^|\.)parametrizations\.([^.]+)\.original(?=\.|$)", r"\1\2", name
+        )
+    return name
+
+
 def linear_parameter_roles(module: torch.nn.Module) -> dict[str, str]:
     """Describe independent channel matrices without changing their storage."""
     roles = {"bias": "adam", "lora_A.*": "adam", "lora_B.*": "adam"}
@@ -175,7 +185,15 @@ def linear_parameter_roles(module: torch.nn.Module) -> dict[str, str]:
     for index, (param, shape) in enumerate(zip(weight, shapes)):
         if len(shape) != 2 or tuple(param.shape) != prefix + shape:
             raise ValueError("Linear weights must retain their declared channel axes.")
-        roles[f"weight.{index}"] = "batched_matrix" if prefix else "matrix"
+        parametrizations = getattr(weight, "parametrizations", {})
+        key = str(index)
+        if (
+            key in parametrizations
+            and parametrizations[key].original.ndim != len(prefix) + 2
+        ):
+            roles[f"weight.{index}"] = "packed"
+        else:
+            roles[f"weight.{index}"] = "batched_matrix" if prefix else "matrix"
     return roles
 
 
@@ -306,14 +324,17 @@ def get_weight_decay_exclusions(
             excluded_ids.update(
                 id(param)
                 for name, param in module.named_parameters(remove_duplicate=False)
-                if any(fnmatchcase(name, pattern) for pattern in patterns)
+                if any(
+                    fnmatchcase(parameter_path(name), pattern) for pattern in patterns
+                )
             )
             break
     excluded_ids.update(
         id(param)
         for name, param in aliases
         if any(
-            fnmatchcase(name, pattern) or fnmatchcase(f".{name}", pattern)
+            fnmatchcase(parameter_path(name), pattern)
+            or fnmatchcase(f".{parameter_path(name)}", pattern)
             for pattern in NO_WEIGHT_DECAY_NAMES
         )
     )
@@ -379,11 +400,16 @@ def get_parameter_roles(
                 continue
             full_name = f"{prefix}.{name}" if prefix else name
             roles[full_name].update(
-                role for pattern, role in selected.items() if fnmatchcase(name, pattern)
+                role
+                for pattern, role in selected.items()
+                if fnmatchcase(parameter_path(name), pattern)
             )
     resolved = {}
     for name, matches in roles.items():
-        if any(fnmatchcase(f".{name}", pattern) for pattern in NO_MUON_NAMES):
+        if any(
+            fnmatchcase(f".{parameter_path(name)}", pattern)
+            for pattern in NO_MUON_NAMES
+        ):
             matches.add("adam")
         if "adam" in matches:
             resolved[name] = "adam"
