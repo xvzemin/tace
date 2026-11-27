@@ -18,6 +18,165 @@ from equivariantx.ops.common.radial import (
 
 
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("cartesian", [False, True])
+@pytest.mark.parametrize("vectors", [False, True])
+def test_bipartite_grouped_radial(backend, cartesian, vectors, double_precision):
+    from equivariantx import co3
+    from equivariantx.nn import GroupedRadialMLP
+    from equivariantx.tests.conv.testing import layout
+
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    args = (
+        "2x0e",
+        "0e+1o",
+        "2x0e+2x1o",
+        [(0, 0, 0, "uvu", True), (0, 1, 1, "uvu", True)],
+    )
+    options = dict(internal_weights=False, shared_weights=False)
+    tp = (
+        co3.TensorProduct(*args, **options, backend="torch")
+        if cartesian
+        else o3.TensorProduct(*args, **options)
+    ).to(device)
+    cls = (
+        eqx_conv.CartesianTensorProductConv
+        if cartesian
+        else eqx_conv.O3TensorProductConv
+    )
+    conv = cls(tp, backend=backend, radial_mode="full").to(device)
+    net = GroupedRadialMLP(
+        (1, 1),
+        [
+            torch.nn.Sequential(
+                torch.nn.Linear(3, 4), torch.nn.SiLU(), torch.nn.Linear(4, 2)
+            )
+            for _ in range(2)
+        ],
+        ((0, 2), (1, 2)),
+        context_features=2,
+    ).to(device)
+    index = torch.tensor([[6, 2, 6, 5, 1, 0], [1, 0, 1, 2, 0, 2]], device=device)
+    src, dst = index
+
+    def rand(*shape):
+        return torch.randn(shape, device=device, requires_grad=True)
+
+    x, edge, send, recv, direction = (
+        rand(8, 2),
+        rand(6, 2),
+        rand(8, 1),
+        rand(8, 1),
+        rand(6, 3),
+    )
+    attrs = (
+        torch.cat(
+            [
+                co3.CartesianHarmonics(l, True, "component", backend="torch").to(
+                    device
+                )(direction)
+                for l in (0, 1)
+            ],
+            dim=1,
+        )
+        if cartesian
+        else o3.spherical_harmonics([0, 1], direction, True, "component")
+    )
+    if not vectors:
+        attrs = attrs.detach().requires_grad_()
+    proj = rand(4, tp.weight_numel)
+    out = conv(
+        x,
+        None if vectors else attrs,
+        ((edge, "edge"), (send, "source"), (recv, "target")),
+        proj,
+        index,
+        num_nodes=4,
+        radial_network=net,
+        vectors=direction if vectors else None,
+    )
+    # Independent dense MLPs gather from the original eight-row tables.
+    ctx = torch.cat((send[src], recv[dst]), 1)
+    hidden = torch.cat(
+        [
+            branch(torch.cat((edge[:, i : i + 1], ctx), 1))
+            for i, branch in enumerate(net.branches)
+        ],
+        1,
+    )
+    msg = tp(x[src], attrs, hidden @ proj)
+    expected = x.new_zeros(4, conv.output_dim).index_add(
+        0, dst, msg if cartesian else layout(msg, tp.irreps_out)
+    )
+    torch.testing.assert_close(out, expected, atol=1e-11, rtol=1e-11)
+    inputs = (
+        recv,
+        send,
+        x,
+        edge,
+        proj,
+        direction if vectors else attrs,
+        *net.parameters(),
+    )
+    for _ in range(2):
+        seed = torch.randn_like(out)
+        grads = [
+            torch.autograd.grad((v.sin() * seed).sum(), inputs, create_graph=True)
+            for v in (out, expected)
+        ]
+        torch.testing.assert_close(*grads, atol=1e-9, rtol=1e-9)
+        assert not grads[0][0][4:].count_nonzero()
+        out, expected = [torch.cat([g.flatten() for g in group]) for group in grads]
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+def test_indexed_radial_mixed_gradients(backend, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    tp = o3.TensorProduct(
+        "2x0e",
+        "1x0e",
+        "2x0e",
+        [(0, 0, 0, "uvu", True)],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    conv = eqx_conv.O3TensorProductConv(tp, backend=backend, radial_mode="full").to(
+        device
+    )
+    hidden = torch.nn.Sequential(torch.nn.Linear(6, 5), torch.nn.SiLU()).to(device)
+    rows = torch.tensor([3, 0, 3, 2, 1, 3, 0], device=device)
+    other = torch.tensor([1, 0, 0, 1, 0, 0, 1], device=device)
+    edge_index = torch.stack((rows % 3, (rows + 1) % 3))
+
+    def rand(*shape):
+        return torch.randn(*shape, device=device, requires_grad=True)
+
+    nodes, sh, edge, a, b, weight = (
+        rand(*s) for s in [(3, 2), (7, 1), (7, 2), (4, 2), (2, 2), (5, tp.weight_numel)]
+    )
+    inputs = (nodes, sh, edge, a, b, weight, *hidden.parameters())
+    bound = eqx_conv.indexed_radial(edge, hidden, ((a, rows), (b, other)))
+    dense = torch.cat((edge, a[rows], b[other]), -1)
+    torch.testing.assert_close(bound.forward(edge), hidden(dense))
+    torch.testing.assert_close(
+        bound.narrow_edges(2, 5).forward(edge[2:5]), hidden(dense[2:5])
+    )
+
+    def probe(y):
+        f = torch.autograd.grad(y.sin().sum(), edge, create_graph=True)[0]
+        return y, f, torch.autograd.grad(f.square().sum() + y.square().sum(), inputs)
+
+    actual = conv(nodes, sh, edge, weight, edge_index, radial_network=bound)
+    expected = conv(nodes, sh, hidden(dense), weight, edge_index)
+    torch.testing.assert_close(probe(actual), probe(expected))
+    with pytest.raises(ValueError, match="one int64 row"):
+        eqx_conv.indexed_radial(edge, hidden, ((a, rows[:-1]),))
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("second_width", [2, 3])
 def test_grouped_radial_program(backend, second_width, double_precision, monkeypatch):
     from equivariantx.nn import GroupedRadialMLP

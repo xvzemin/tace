@@ -38,6 +38,963 @@ from tace.models.compile.aot import (
 from tace.models.compile.compile import compiled_call, trace_and_compile, trace_to_fx
 from tace.models.compile.wrapper import CompileTensorModel, FlatTorchModel
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+from tace.models.spherical.tace import sum_node_energy
+
+
+@pytest.mark.parametrize("sample_index,selected", [(":", (0, 1, 2)), ("1::2", (1, 3))])
+def test_export_sample_reads_only_requested_batch(
+    tmp_path, monkeypatch, sample_index, selected
+):
+    from itertools import accumulate
+
+    import ase.io
+    from ase import Atoms
+
+    from tace.dataset.element import TorchElement
+    from tace.scripts.export_eval import _build_sample_data
+
+    frames = [
+        Atoms("H" * (i + 2), positions=[(i, j * 0.5, 0) for j in range(i + 2)])
+        for i in range(6)
+    ]
+    path = tmp_path / "sample.extxyz"
+    ase.io.write(path, frames)
+    iread = ase.io.iread
+    consumed = []
+
+    def bounded_iread(path, *, index):
+        # Ask the reader itself for a bounded default selection: some ASE
+        # formats look for the last frame before yielding an open-ended slice.
+        if sample_index == ":":
+            assert index == slice(0, len(selected))
+        for atoms in iread(path, index=index):
+            assert len(consumed) < len(selected), "read past the requested batch"
+            consumed.append(len(atoms))
+            yield atoms
+
+    monkeypatch.setattr(ase.io, "iread", bounded_iread)
+    model = Mock()
+    model.get_target_property.return_value = ["energy"]
+    model.get_embedding_property.return_value = []
+    model.get_torch_element.return_value = TorchElement([1])
+    model.get_cutoff.return_value = 0.75
+    model.get_max_neighbors.return_value = None
+    data = _build_sample_data(
+        model, str(path), sample_index, len(selected), "ase", "cpu"
+    )
+    counts = [len(frames[i]) for i in selected]
+    assert consumed == counts
+    assert data["ptr"].tolist() == list(accumulate(counts, initial=0))
+    assert data["batch"].tolist() == [i for i, n in enumerate(counts) for _ in range(n)]
+    expected = torch.cat([torch.from_numpy(frames[i].positions) for i in selected])
+    torch.testing.assert_close(data["positions"], expected)
+
+
+@pytest.fixture
+def periodic_les_model(request):
+    les = pytest.importorskip("les")
+    if les.__version__ != "0.2.0":
+        pytest.skip("Frozen LES graph inference targets LES 0.2.0")
+    from tace.models.adapter import TensorModel
+    from tace.models.cartesian.tace import CartesianTACE
+    from tace.models.spherical.tace import SphericalTACE
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        cutoff=3.5,
+        num_layers=1,
+        num_channel=3,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=3.0, atomic_energy={1: 0.0})
+        ],
+        target_property=["energy", "forces", "stress"],
+    )
+    config["radial_basis"].update(hidden=[4], num_radial_basis=3)
+    config["readout_emlp"].update(hidden=[4])
+    config["scale_shift"]["enable"] = False
+    config["long_range"]["les"]["enable"] = True
+    config["long_range"]["les"]["les_arguments"].update(is_periodic=True, N_max=3)
+    cls = SphericalTACE
+    if getattr(request, "param", None) == "cartesian":
+        cls = CartesianTACE
+        config["num_layers"] = 2  # Non-scalar Cartesian descriptors in the first layer.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(41)
+        return TensorModel(cls(**config)).eval()
+
+
+@pytest.mark.parametrize(
+    "periodic_les_model", ["spherical", "cartesian"], indirect=True
+)
+def test_periodic_les_frozen_graph_boundaries(
+    periodic_les_model, tmp_path, monkeypatch
+):
+    import ase.io
+    from ase import Atoms
+
+    from tace.models.cartesian.tace import CartesianTACE
+    from tace.models.compile import aot
+    from tace.models.spherical.les import is_periodic_charge_only_les
+    from tace.scripts.export_eval import _build_sample_data
+
+    native = periodic_les_model
+    readout = native.readout_fn
+    wrapped = aot._frozen_graph_model(native)
+    frame = synthetic_graph_sample(wrapped)
+    frame["atomic_numbers"] = readout.atomic_numbers[frame["node_type"]]
+    native(dict(frame))  # Warming normal e3nn ScriptMethod caches is harmless.
+    assert is_periodic_charge_only_les(readout.les)
+    if type(readout) is CartesianTACE:
+        with pytest.raises(ValueError, match="not joint training"):
+            aot.as_joint_export_model(native, frame)
+    with pytest.raises(ValueError, match="does not support LES"):
+        aot.as_compile_tensor_model(native)
+    with pytest.raises(ValueError, match="does not support LES"):
+        aot.export_lammps_aotinductor(native, tmp_path / "lammps.pt2")
+    for obj, key, value in [
+        (readout.les.les, "is_periodic", None),
+        (readout.les.les.ewald, "is_periodic", False),
+        (readout.les.les, "compute_bec", True),
+        (readout.les.les, "use_fixed_atomic_charges", True),
+        (readout.les, "_solve", lambda **kwargs: {}),
+        (readout.representation, "use_magnetic_interaction", True),
+        (readout, "embedding_property", ["electric_field"]),
+        (readout, "readout_fn", lambda *args, **kwargs: {}),
+        (native, "first_derivative_fn", lambda *args, **kwargs: {}),
+    ]:
+        with monkeypatch.context() as patch:
+            patch.setattr(obj, key, value, raising=False)
+            with pytest.raises(ValueError, match="charge-only"):
+                aot._frozen_graph_model(native)
+    with readout.representation.register_forward_hook(lambda *_: None):
+        with pytest.raises(ValueError, match="charge-only"):
+            aot._frozen_graph_model(native)
+    for pbc, cell in [
+        (None, frame["lattice"]),
+        (~frame["pbc"], frame["lattice"]),
+        (frame["pbc"] & frame["pbc"].new_tensor([True, False, True]), frame["lattice"]),
+        (frame["pbc"][:, :2], frame["lattice"]),
+        (frame["pbc"], -frame["lattice"]),
+        (frame["pbc"], frame["lattice"] * torch.nan),
+        (frame["pbc"], frame["lattice"] * 0),
+    ]:
+        with pytest.raises(ValueError, match="fully periodic"):
+            aot.export_aotinductor(
+                native, tmp_path / "bad.pt2", frame | {"pbc": pbc, "lattice": cell}
+            )
+    for name in ("electric_field", "initial_noncollinear_magmoms"):
+        with pytest.raises(ValueError, match="fields or spin"):
+            aot.export_aotinductor(
+                native, tmp_path / "bad.pt2", frame | {name: torch.zeros(1, 3)}
+            )
+    path = tmp_path / "field.extxyz"
+    ase.io.write(
+        path,
+        Atoms(
+            "H2",
+            positions=[[0, 0, 0], [1, 0, 0]],
+            cell=[3] * 3,
+            pbc=True,
+            info={"electric_field": [0.1, 0, 0]},
+        ),
+    )
+    with pytest.raises(ValueError, match="fields or spin"):
+        _build_sample_data(native, str(path), ":", 1, "ase", "cpu")
+
+    # The CLI's frozen-load exception must not disable compiled ordinary
+    # models, or make an LES host eligible for live compilation after loading.
+    from tace.models.adapter import TensorModel
+
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    cfg = deepcopy(readout.model_config)
+    args = (readout.statistics, native.get_target_property(), [])
+    token = compile_wrapper._loading_frozen_graph.set(True)
+    try:
+        assert type(create_model(cfg, *args)) is TensorModel
+        ordinary = deepcopy(cfg)
+        ordinary["long_range"]["les"]["enable"] = False
+        assert isinstance(create_model(ordinary, *args), CompileTensorModel)
+    finally:
+        compile_wrapper._loading_frozen_graph.reset(token)
+    with pytest.raises(RuntimeError) as exc:
+        create_model(cfg, *args)
+    assert "does not support LES" in str(exc.value.__cause__)
+
+
+@pytest.fixture
+def periodic_les_frames():
+    from ase import Atoms
+
+    return [
+        Atoms(
+            "H" * n,
+            scaled_positions=[
+                [0.12 + i * 0.36, (i % 2) * 0.2, 0.1 * i] for i in range(n)
+            ],
+            cell=[[4.2 + 0.2 * n, 0, 0], [0.3 * n, 5, 0], [0.1, 0.2, 4.5]],
+            pbc=True,
+        )
+        for n in (2, 3, 4)
+    ]
+
+
+@pytest.mark.parametrize(
+    "periodic_les_model", ["spherical", "cartesian"], indirect=True
+)
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA AOTInductor"
+            ),
+        ),
+    ],
+)
+def test_periodic_les_cli_dynamic_package_without_solver(
+    periodic_les_model, periodic_les_frames, tmp_path, device
+):
+    import ase.io
+
+    from tace.lightning import export_tace
+    from tace.models.compile.aot import _frozen_graph_model
+    from tace.scripts.export_eval import _build_sample_data
+
+    native = periodic_les_model
+    frames = periodic_les_frames
+    keys = ("energy", "node_energy", "forces", "stress")
+    cases = []
+    wrapped = _frozen_graph_model(native)
+    input_keys = graph_aoti_input_keys(wrapped)
+    for counts in (frames[1:2], frames[:2], frames):
+        xyz = tmp_path / "graph.extxyz"
+        ase.io.write(xyz, counts)
+        d = _build_sample_data(native, str(xyz), ":", len(counts), "ase", "cpu")
+        gold = native(dict(d))
+        ensure_sample_inputs(d, input_keys, wrapped)
+        cases.append((d, {k: gold[k].detach() for k in keys}))
+    assert (
+        len(
+            {
+                (d["positions"].size(0), d["edge_index"].size(1), d["lattice"].size(0))
+                for d, _ in cases
+            }
+        )
+        == 3
+    )
+    assert any(
+        abs(float(y["energy"].sum() - y["node_energy"].sum())) > 1e-14 for _, y in cases
+    )
+    torch.save(cases, tmp_path / "ref.pt")
+    export_tace(native, str(tmp_path / "fixture.pt"))
+    env = dict(os.environ, OMP_NUM_THREADS="2", TORCHINDUCTOR_COMPILE_THREADS="2")
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tace.scripts.export_eval",
+            "-m",
+            str(tmp_path / "fixture.pt"),
+            "--backend",
+            "aoti",
+            "--device",
+            device,
+            "-o",
+            str(tmp_path / "model.pt2"),
+        ],
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json, sys
+sys.modules.update(tace=None, les=None)
+import torch
+import equivariantx  # Register generic operators, without either host package.
+from torch._inductor import aoti_load_package
+runner = aoti_load_package(sys.argv[1])
+metadata = runner.get_metadata()
+in_keys, out_keys = (json.loads(metadata["tace_" + side + "_keys"]) for side in ("input", "output"))
+assert metadata["tace_periodic_les"] == "charge_only_v1"
+for d, expected in torch.load(sys.argv[2], weights_only=True):
+    actual = dict(zip(out_keys, runner(*(d[k].to(sys.argv[3]) for k in in_keys)), strict=True))
+    for key, value in expected.items():
+        torch.testing.assert_close(actual[key].cpu(), value, rtol=1e-4, atol=3e-6)
+""",
+            str(tmp_path / "model.pt2"),
+            str(tmp_path / "ref.pt"),
+            device,
+        ],
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys, torch
+sys.modules['les'] = None
+from tace.lightning import load_tace
+device = sys.argv[3]
+model = load_tace(sys.argv[1], device=device)
+assert model.metadata["tace_periodic_les"] == "charge_only_v1"
+for d, gold in torch.load(sys.argv[2], weights_only=True):
+    d = {k: v.to(device) if torch.is_tensor(v) else v for k,v in d.items()}
+    out = model(d)
+    for k, v in gold.items():
+        torch.testing.assert_close(out[k].cpu(), v, rtol=1e-4, atol=3e-6)
+# Device-side asserts poison the CUDA context; only check synchronous rejection here.
+bad = [{"electric_field": torch.zeros(1, 3)}, {"pbc": d["pbc"][:,:1]}]
+if device == "cpu":
+    bad.extend([{"pbc": ~d["pbc"]}, {"pbc": d["pbc"] & d["pbc"].new_tensor([True, False, True])},
+                {"lattice": -d["lattice"]}])
+for invalid in bad:
+    try:
+        model(d | invalid)
+    except ValueError:
+        continue
+    raise AssertionError("accepted invalid frozen LES inputs")
+""",
+            str(tmp_path / "model.pt2"),
+            str(tmp_path / "ref.pt"),
+            device,
+        ],
+        env=env,
+        check=True,
+    )
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA AOTInductor"
+            ),
+        ),
+    ],
+)
+def test_periodic_les_joint_package_updates_all_live_state(
+    periodic_les_model, periodic_les_frames, tmp_path, dynamic, device, monkeypatch
+):
+    """Full E/F/S mixed derivatives, including the charge head and trainable loss."""
+    import ase.io
+
+    from equivariantx_foundation.targets import aoti
+    from tace.scripts.export_eval import _build_sample_data
+    from tace.utils.loss.uncertainty import UncertaintyLoss
+
+    model = periodic_les_model.to(device).train()
+    objective = (
+        UncertaintyLoss(
+            ["energy", "forces", "stress"],
+            ["mae_energy_per_atom", "l2mae_forces", "mae_voigt_stress"],
+            [1.0, 2.0, 3.0],
+        )
+        .to(device)
+        .train()
+    )
+    reference, reference_loss = deepcopy(model), deepcopy(objective)
+    batches = []
+    for structures in (
+        periodic_les_frames[:2],
+        periodic_les_frames[1:] if dynamic else periodic_les_frames[:2],
+    ):
+        xyz = tmp_path / "cells.xyz"
+        ase.io.write(xyz, structures, format="extxyz")
+        batch = _build_sample_data(model, str(xyz), ":", 2, "ase", "cpu")
+        n = batch["positions"].size(0)
+        batch = {
+            k: batch[k]
+            for k in (
+                "positions",
+                "atomic_numbers",
+                "edge_index",
+                "edge_shifts",
+                "lattice",
+                "pbc",
+                "batch",
+                "ptr",
+            )
+        }
+        batch["entropy"] = torch.ones(2, dtype=torch.float64)
+        for key, shape in (("energy", (2,)), ("forces", (n, 3)), ("stress", (2, 3, 3))):
+            batch[key] = (
+                torch.arange(torch.Size(shape).numel(), dtype=torch.float64).reshape(
+                    shape
+                )
+                * 0.003
+                + 0.12
+            )
+            batch[key + "_weight"] = batch["entropy"].clone()
+        if not batches:
+            # Only force/stress derivatives train the charge head on this step.
+            batch["energy_weight"].zero_()
+        batches.append({k: v.to(device) for k, v in batch.items()})
+    path = tmp_path / "joint.pt2"
+    if device == "cpu":
+        with pytest.raises(RuntimeError, match="requires an NVIDIA CUDA device"):
+            aoti.export_training(
+                model, objective, batches[0], path, dynamic_shapes=dynamic
+            )
+        return
+    aoti.export_training(model, objective, batches[0], path, dynamic_shapes=dynamic)
+    step = aoti.load_training(path)
+    prepared, params, buffers = aoti.training_inputs(model, objective, batches[-1])
+    for module in (model, model.readout_fn.les, model.readout_fn.les.les.ewald):
+        with module.register_forward_pre_hook(lambda *_: None):
+            with pytest.raises(ValueError, match="charge-only"):
+                aoti.validate_training_model(step, model, objective, prepared)
+    original_autograd_threading = torch.autograd.is_multithreading_enabled()
+    aoti.validate_training_model(step, model, objective, prepared)
+    assert torch.autograd.is_multithreading_enabled() == original_autograd_threading
+    _, ref_params, _ = aoti.training_inputs(reference, reference_loss, batches[-1])
+    optim = torch.optim.AdamW(params.values(), lr=0.001, eps=1e-5)
+    ref_optim = torch.optim.AdamW(ref_params.values(), lr=0.001, eps=1e-5)
+    for batch in batches:
+        data = aoti.training_batch(model, objective, batch)
+        pred, loss, grads = step(data, params, buffers)
+        expected = reference(batch)
+        target = reference_loss(expected, data)
+        ref_optim.zero_grad(set_to_none=True)
+        target.backward()
+        torch.testing.assert_close(loss, target, rtol=1e-4, atol=5e-6)
+        for k in ("energy", "node_energy", "forces", "stress"):
+            torch.testing.assert_close(pred[k], expected[k], rtol=1e-4, atol=3e-6)
+        assert grads.keys() == ref_params.keys() == params.keys()
+        assert any(
+            g is not None and g.abs().max() > 0
+            for k, g in grads.items()
+            if "latent_charges_readouts" in k
+        )
+        assert any(
+            g is not None and g.abs().max() > 0
+            for k, g in grads.items()
+            if k.startswith("loss_fn.")
+        )
+        optim.zero_grad(set_to_none=True)
+        for k, p in params.items():
+            grad = ref_params[k].grad
+            torch.testing.assert_close(grads[k], grad, rtol=1e-3, atol=3e-6)
+            p.grad = grads[k]
+        if dynamic and batch is batches[0]:
+            # The raw training ABI must retain the physical input contract and
+            # all gradients without importing TACE or the optional solver.
+            inputs = tmp_path / "standalone.pt"
+            gold = (
+                {k: expected[k].detach() for k in pred},
+                target.detach(),
+                {k: p.grad for k, p in ref_params.items()},
+            )
+            torch.save(((data, params, buffers), gold), inputs)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    """
+import sys, torch
+sys.modules["tace"] = sys.modules["les"] = None
+from equivariantx_foundation.targets.aoti import load_training
+args, expected = torch.load(sys.argv[2], weights_only=True)
+step = load_training(sys.argv[1])
+torch.testing.assert_close(step(*args), expected, rtol=1e-3, atol=5e-6)
+""",
+                    str(path),
+                    str(inputs),
+                ],
+                check=True,
+            )
+        optim.step()
+        ref_optim.step()
+        for k, p in params.items():
+            torch.testing.assert_close(p, ref_params[k], rtol=1e-4, atol=3e-6)
+    with pytest.raises(ValueError, match="electric_field"):
+        step(data | {"electric_field": torch.ones(2, 3)}, params, buffers)
+    if device == "cpu":
+        with pytest.raises(RuntimeError, match="fully periodic"):
+            step(data | {"pbc": ~data["pbc"]}, params, buffers)
+    elif dynamic:
+        # An async CUDA assertion poisons its context. Exercise the checked
+        # standalone loader in separate processes, with neither host installed.
+        for bad in ("pbc", "lattice"):
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    """
+import sys, torch
+sys.modules["tace"] = sys.modules["les"] = None
+from equivariantx_foundation.targets.aoti import load_training
+(d,p,b), _ = torch.load(sys.argv[2],weights_only=True)
+k=sys.argv[3]
+d[k] = ~d[k] if k=="pbc" else -d[k]
+load_training(sys.argv[1])(d,p,b)
+torch.cuda.synchronize()
+""",
+                    str(path),
+                    str(inputs),
+                    bad,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            assert proc.returncode != 0 and "finite positive volume" in proc.stderr
+    with pytest.raises(ValueError, match="fully periodic"):
+        aoti.export_training(
+            model,
+            objective,
+            batch | {"lattice": -batch["lattice"]},
+            tmp_path / "bad.pt2",
+        )
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.distributed, "is_initialized", lambda: True)
+        patch.setattr(torch.distributed, "get_world_size", lambda: 2)
+        with pytest.raises(ValueError, match="single-rank"):
+            step(data, params, buffers)
+        with pytest.raises(ValueError, match="single-rank"):
+            aoti.export_training(model, objective, batch, tmp_path / "bad.pt2")
+
+
+def test_export_node_energy_allows_one_or_more_structures():
+    class Readout(torch.nn.Module):
+        def forward(self, energy, batch, ptr):
+            return sum_node_energy(energy, batch, ptr.size(0) - 1)
+
+    def example(counts):
+        counts = torch.tensor(counts)
+        ptr = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+        batch = torch.repeat_interleave(torch.arange(len(counts)), counts)
+        energy = torch.arange(len(batch), dtype=torch.float64) - 0.75
+        return energy, batch, ptr
+
+    n = torch.export.Dim("nodes", min=2, max=24)
+    p = torch.export.Dim("ptr_length", min=2, max=5)
+    # Use the same size-oblivious policy as TACE artifact export: without it
+    # even torch.zeros(ptr.size(0) - 1) may guard that its size exceeds one.
+    with size_oblivious_export():
+        exported = torch.export.export(
+            Readout(),
+            example([2, 3]),
+            strict=True,
+            dynamic_shapes=({0: n}, {0: n}, {0: p}),
+        ).module()
+    for counts in ([5], [2, 3], [3, 1, 2]):
+        energy, batch, ptr = example(counts)
+        expected = torch.stack([part.sum() for part in energy.split(counts)])
+        torch.testing.assert_close(exported(energy, batch, ptr), expected)
+
+
+def test_fixed_frozen_graph_export_preserves_values_and_rejects_new_shapes(
+    tmp_path, monkeypatch
+):
+    from tace.models.adapter import TensorModel
+    from tace.models.compile import aot
+    from tace.models.spherical.tace import SphericalTACE
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config["scale_shift"]["enable"] = False
+    config.update(
+        cutoff=3.0,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        num_layers=1,
+        num_channel=2,
+        target_property=["energy", "forces"],
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: -1.0})
+        ],
+    )
+    native = TensorModel(SphericalTACE(**config)).eval()
+    observed = {}
+
+    def inspect(program, *, package_path, inductor_configs):
+        assert not program.range_constraints
+        observed["runner"] = AOTICompiledTensorModel(
+            program.module(), inductor_configs["aot_inductor.metadata"], "cpu"
+        )
+        return package_path
+
+    monkeypatch.setattr(aot, "compile_and_package", inspect)
+    monkeypatch.setattr(aot, "embed_custom_ops_libs", lambda *_: None)
+    monkeypatch.setattr(aot, "ensure_cxx_compiler", lambda: None)
+    path = tmp_path / "fixed.pt2"
+    with pytest.raises(ValueError, match="sample_data"):
+        aot.export_aotinductor(native, path, fixed_shapes=True)
+    sample = synthetic_graph_sample(aot.as_compile_tensor_model(native))
+    shifts = sample["edge_shifts"].to(torch.float32)
+    unused = torch.zeros(2, 3, 3, dtype=torch.float32).transpose(1, 2)
+    sample.update(edge_shifts=shifts, direct_hessian=unused)
+    wrapped = aot.as_compile_tensor_model(native)
+    keys = aot.graph_aoti_input_keys(wrapped)
+    prepared = dict(sample)
+    aot.ensure_sample_inputs(prepared, keys, wrapped)
+    assert prepared["direct_hessian"] is unused
+    assert aot.canonicalize_inputs(sample, keys, 0)["direct_hessian"] is unused
+    torch.testing.assert_close(prepared["edge_shifts"], shifts.long())
+    assert sample["edge_shifts"] is shifts
+    aot.export_aotinductor(native, path, sample_data=sample, fixed_shapes=True)
+    for shift in (0.0, 0.15):
+        frame = sample | {"positions": sample["positions"].clone()}
+        frame["positions"][0, 0] += shift
+        if shift:
+            frame["positions"] = torch._neg_view(frame["positions"])
+            assert not aot.canonicalize_inputs(frame, ("positions",), 0)[
+                "positions"
+            ].is_neg()
+        expected, actual = native(frame), observed["runner"](frame)
+        for key in config["target_property"]:
+            torch.testing.assert_close(actual[key], expected[key], rtol=1e-4, atol=1e-5)
+    with pytest.raises(ValueError, match="Fixed AOTI input 'edge_index'"):
+        observed["runner"](sample | {"edge_index": sample["edge_index"][:, :-2]})
+
+
+@pytest.mark.parametrize("target", ["graph", "lammps"])
+def test_compiled_element_inputs(target):
+    from tace.models.compile import aot
+
+    metadata = {
+        "tace_input_keys": '["node_type"]',
+        "tace_output_keys": '["energy", "node_energy", "edge_forces"]',
+        "tace_target_property": '["energy"]',
+        "tace_embedding_property": "[]",
+        "tace_atomic_numbers": "[1, 8, 26]",
+        "tace_cutoff": "6.0",
+        "tace_max_neighbors": "null",
+        "tace_fidelity_idx": "0",
+        "tace_dtype": "float32",
+    }
+    wrapper = (
+        aot.AOTICompiledTensorModel
+        if target == "graph"
+        else aot.AOTICompiledLammpsModel
+    )
+    model = wrapper(lambda indices: (indices, indices, indices), metadata, "cpu")
+    for numbers, expected in [([26, 1, 8], [2, 0, 1]), ([8, 8], [1, 1]), ([], [])]:
+        for key, values in [("atomic_numbers", numbers), ("node_type", expected)]:
+            data = {key: torch.tensor(values, dtype=torch.int64)}
+            out = model(data)
+            assert (out["energy"] if target == "graph" else out[0]).tolist() == expected
+            assert set(data) == {key}
+    for z in (-1, 27):
+        with pytest.raises((IndexError, RuntimeError)):
+            model({"atomic_numbers": torch.tensor([z])})
+    with pytest.raises(RuntimeError, match="not supported"):
+        model({"atomic_numbers": torch.tensor([2])})
+    for idx in (-1, 3):
+        with pytest.raises(RuntimeError, match="outside"):
+            model({"node_type": torch.tensor([idx])})
+    with pytest.raises(TypeError, match="one-dimensional"):
+        model({"node_type": torch.zeros(1, 1, dtype=torch.int64)})
+
+
+@pytest.mark.parametrize("n,guard", [(2, "Eq"), (3, "Ne")])
+def test_frozen_graph_rejects_python_branch_on_independent_axes(tmp_path, n, guard):
+    from tace.models.adapter import TensorModel
+    from tace.models.compile import aot
+    from tace.models.spherical.tace import SphericalTACE
+
+    class DimerReadout(SphericalTACE):
+        def readout_fn(self, data, graph, from_representation, edge_feats):
+            out = super().readout_fn(data, graph, from_representation, edge_feats)
+            if data["positions"].shape[0] == data["edge_index"].shape[1]:
+                out["node_energy"] = out["node_energy"] + 2.0
+                out["energy"] = out["energy"] + 2.0 * data["ptr"].diff()
+            return out
+
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config["scale_shift"]["enable"] = False
+    config.update(
+        cutoff=3.0,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        num_layers=1,
+        num_channel=2,
+        target_property=["energy"],
+        statistics=[
+            dict(atomic_numbers=[1], avg_num_neighbors=2.0, atomic_energy={1: 0.0})
+        ],
+    )
+    model = TensorModel(DimerReadout(**config)).eval()
+    # A real isolated dimer or triangle with all reciprocal edges: N=E or N!=E.
+    edges = (~torch.eye(n, dtype=torch.bool)).nonzero().T.contiguous()
+    data = {
+        "positions": torch.eye(3, dtype=torch.float64)[:n],
+        "node_type": torch.zeros(n, dtype=torch.long),
+        "edge_index": edges,
+        "edge_shifts": torch.zeros(edges.shape[1], 3, dtype=torch.long),
+        "lattice": torch.eye(3, dtype=torch.float64).unsqueeze(0) * 16,
+        "pbc": torch.zeros(1, 3, dtype=torch.bool),
+        "batch": torch.zeros(n, dtype=torch.long),
+        "ptr": torch.tensor([0, n]),
+        "fidelity_idx": torch.zeros(1, dtype=torch.long),
+    }
+    path = tmp_path / "unsafe.pt2"
+    with pytest.raises(ValueError, match=rf"{guard}\(.*independent.*fixed_shapes"):
+        aot.export_aotinductor(model, path, sample_data=data)
+    assert not path.exists()
+
+
+def test_frozen_trace_accepts_shared_derived_and_disjoint_input_axes():
+    def readout(nodes, labels, groups, ptr, edges):
+        if nodes.size(0) != labels.size(0) or ptr.size(0) != groups.size(0) + 1:
+            return nodes - 1
+        if nodes.size(0) == edges.size(0):
+            return nodes - 2
+        return nodes + 3
+
+    n = torch.export.Dim("nodes", min=2, max=6)
+    g = torch.export.Dim("groups", min=1, max=3)
+    e = torch.export.Dim("edges", min=8, max=14)
+    specs = ({0: n}, {0: n}, {0: g}, {0: g + 1}, {0: e})
+    examples = tuple(torch.zeros(k) for k in (5, 5, 3, 4, 9))
+    with size_oblivious_export():
+        traced = trace_to_fx(readout, examples, dynamic_shapes=specs)
+    for counts in ((5, 5, 3, 4, 9), (2, 2, 1, 2, 14)):
+        args = tuple(torch.randn(k) for k in counts)
+        torch.testing.assert_close(traced(*args), readout(*args))
+
+
+@pytest.mark.parametrize("exported_op", [False, True])
+def test_lammps_exchange_packs_rows_and_gradients(exported_op):
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from tace.models.lammps import GhostExchange, use_lammps_mliap_data
+
+    for n in (4, 0):
+        # The last two rows are ghost copies of the same owner.
+        owner = torch.tensor([0, 1, 0, 0][:n], dtype=torch.long)
+        calls = []
+
+        class Exchange:
+            def check(self, x, out, width):
+                assert x.is_contiguous() and not x.is_neg() and out.is_contiguous()
+                assert width == 6 and x.shape == out.shape == (n, width)
+
+            def forward_exchange(self, x, out, width):
+                self.check(x, out, width)
+                calls.append("forward")
+                out.copy_(x[owner])
+
+            def reverse_exchange(self, x, out, width):
+                self.check(x, out, width)
+                calls.append("reverse")
+                out.zero_().index_add_(0, owner, x)
+
+        exchange = Exchange()
+        x = torch.arange(6 * n, dtype=torch.float64).reshape(n, 3, 2)
+        x = x.transpose(1, 2).requires_grad_()
+        with use_lammps_mliap_data(exchange):
+            op = torch.ops.tace.lammps_forward_exchange.default
+            y = op(x) if exported_op else GhostExchange.apply(x, exchange)
+            torch.testing.assert_close(y, x[owner])
+            assert y.is_contiguous()
+            negative = torch._neg_view(torch.arange(6 * n).to(x).reshape_as(x))
+            for grad in (x.new_ones(()).expand_as(y), x.detach(), negative):
+                (dx,) = torch.autograd.grad(y, x, grad, retain_graph=True)
+                torch.testing.assert_close(
+                    dx, torch.zeros_like(x).index_add_(0, owner, grad)
+                )
+            z = op(negative) if exported_op else GhostExchange.apply(negative, exchange)
+            torch.testing.assert_close(z, negative[owner])
+            assert calls == ["forward", "reverse", "reverse", "reverse", "forward"]
+        if exported_op:
+            with FakeTensorMode() as mode:
+                fake = mode.from_tensor(x)
+                for fn in (op, torch.ops.tace.lammps_reverse_exchange.default):
+                    assert fn(fake).stride() == y.stride()
+
+    if exported_op:
+        singleton = torch.empty_strided((3, 1), (1, 11))
+        exchange = Mock()
+        with use_lammps_mliap_data(exchange):
+            for fn in (op, torch.ops.tace.lammps_reverse_exchange.default):
+                actual = fn(singleton)
+                with FakeTensorMode() as mode:
+                    assert fn(mode.from_tensor(singleton)).stride() == actual.stride()
+
+
+def test_lammps_aoti_dynamic_receiver_rows(tmp_path, monkeypatch):
+    from tace.models.adapter import TensorModel
+    from tace.models.compile import aot
+    from tace.models.compile.wrapper import FlatLammpsModel
+    from tace.models.lammps import use_lammps_mliap_data
+    from tace.models.spherical.tace import SphericalTACE
+    from tace.utils.env import ACCELERATION_ENV
+
+    for name in ACCELERATION_ENV.values():
+        monkeypatch.setenv(name, "0")
+    cfg = deepcopy(DEFAULT_MODEL_CONFIG)
+    cfg.update(
+        cutoff=2.5,
+        Lmax=1,
+        lmax=1,
+        mmax=1,
+        num_layers=2,
+        num_channel=2,
+        statistics=[
+            dict(
+                atomic_numbers=[1, 2],
+                avg_num_neighbors=4.0,
+                atomic_energy={1: 0.0, 2: 0.0},
+            )
+        ],
+    )
+    cfg["radial_basis"].update(num_radial_basis=4, hidden=[4])
+    cfg["product_basis"]["correlation"] = 1
+    cfg["scale_shift"]["enable"] = False
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(31)
+        native = TensorModel(SphericalTACE(**cfg)).eval().requires_grad_(False)
+
+    # This baseline uses all source rows as destinations before truncating
+    # ghosts; the package should instead allocate only the real receiver rows.
+    padded = deepcopy(native)
+    for layer in padded.readout_fn.representation.interactions:
+        assert layer.rejector.supports_receiver_count
+        layer.rejector.supports_receiver_count = False
+    padded = FlatLammpsModel(
+        aot.as_compile_tensor_model(padded), aot.LAMMPS_AOTI_INPUT_KEYS
+    )
+
+    class Exchange:
+        def __init__(self, owner):
+            self.owner, self.calls = owner, []
+            self.nlocal = int(owner.max()) + 1
+
+        def forward_exchange(self, features, out, width):
+            self.calls.append(("forward", width))
+            out.copy_(features[self.owner])
+
+        def reverse_exchange(self, grad, out, width):
+            self.calls.append(("reverse", width))
+            assert grad[self.nlocal :].abs().max() > 1e-10
+            out.zero_().index_add_(0, self.owner, grad)
+
+    def ring(n, *, two_shells=True):
+        # Reciprocal edges across a periodic boundary reference image atoms,
+        # including multiple edges with the same ghost owner.
+        offsets = torch.tensor([-2, 1, -1, 2] if two_shells else [1, -1])
+        target = torch.arange(n).repeat_interleave(len(offsets))
+        j = target + offsets.repeat(n)
+        source, image = j % n, j // n
+        image_rows, ghost = torch.unique(j[image != 0], return_inverse=True)
+        owner = torch.cat((torch.arange(n), image_rows % n))
+        local_src = source.clone()
+        local_src[image != 0] = n + ghost
+        types = torch.arange(n) % 2
+        x = torch.arange(n, dtype=torch.float64)
+        spacing = 1.0 if two_shells else 1.5
+        pos = torch.stack((x * spacing, x.cos() * 0.20, x.sin() * 0.17), dim=-1)
+        lattice = torch.diag(x.new_tensor([n * spacing, 5, 5])).unsqueeze(0)
+        shifts = torch.zeros((len(j), 3), dtype=torch.long)
+        shifts[:, 0] = -image
+        common = dict(
+            batch=torch.zeros(n, dtype=torch.long),
+            ptr=torch.tensor([0, n]),
+            fidelity_idx=torch.tensor([0]),
+        )
+        periodic = dict(
+            **common,
+            positions=pos,
+            node_type=types,
+            edge_index=torch.stack((source, target)),
+            edge_shifts=shifts,
+            lattice=lattice,
+            pbc=torch.tensor([[True, False, False]]),
+        )
+        rank = dict(
+            **common,
+            node_type=types[owner],
+            edge_index=torch.stack((local_src, target)),
+            edge_vector=pos[target] - pos[source] + shifts.double() @ lattice[0],
+        )
+        return periodic, rank, Exchange(owner)
+
+    # Trace at one shape and load a real native CPU artifact for both calls.
+    _, sample, _ = ring(4)
+    package = aot.export_lammps_aotinductor(native, tmp_path / "owners.pt2", sample)
+    runner = aot.load_lammps_aotinductor(package, "cpu")
+    for n, two_shells in ((3, True), (7, False)):
+        periodic, rank, exchange = ring(n, two_shells=two_shells)
+        with use_lammps_mliap_data(exchange):
+            energy, nodes, pair = runner(rank)
+            assert [name for name, _ in exchange.calls] == ["forward", "reverse"]
+            expected = padded(*(rank[key] for key in aot.LAMMPS_AOTI_INPUT_KEYS))
+        torch.testing.assert_close(
+            (energy, nodes, pair), expected, atol=2e-6, rtol=1e-5
+        )
+        # Independent periodic graph: no ghost exchange, derivatives are with
+        # respect to the real coordinates, not ML-IAP pair displacements.
+        reference = native(periodic)
+        source, target = periodic["edge_index"]
+        force = torch.zeros_like(periodic["positions"]).index_add_(0, source, pair)
+        force.index_add_(0, target, pair, alpha=-1)
+        torch.testing.assert_close(energy, reference["energy"][0], atol=2e-6, rtol=1e-5)
+        torch.testing.assert_close(
+            nodes, reference["node_energy"], atol=2e-6, rtol=1e-5
+        )
+        torch.testing.assert_close(force, reference["forces"], atol=2e-6, rtol=1e-5)
+        assert pair.abs().max() > 1e-6
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AOTInductor")
+def test_single_structure_reference_energy_aoti(tmp_path):
+    from tace.models.compile.compile import inductor_options
+
+    class Readout(torch.nn.Module):
+        def forward(self, base, basis, weight, scalar, types, heads, batch):
+            nodes = torch.arange(types.numel(), device=types.device)
+            ref = base.T[types][nodes, heads[batch]]
+            learned = (basis * weight).sum(
+                -1
+            ).double() / 11**0.5 + scalar.double() * 0.25
+            return (
+                sum_node_energy(ref, batch, 1),
+                sum_node_energy(learned, batch, 1),
+                ref + learned,
+            )
+
+    x = torch.randn(16, 11, dtype=torch.float32, device="cuda")
+    zeros = torch.zeros(16, dtype=torch.long, device="cuda")
+    args = (
+        x.new_tensor([[-3409.0]], dtype=torch.float64),
+        x,
+        x.new_ones(11),
+        x[:, 0].contiguous(),
+        zeros,
+        zeros[:1].clone(),
+        zeros.clone(),
+    )
+    model = Readout()
+    export = torch.export.export(model, args)
+    package = torch._inductor.aoti_compile_and_package(
+        export,
+        package_path=str(tmp_path / "energy.pt2"),
+        inductor_configs=inductor_options(),
+    )
+    result = torch._inductor.aoti_load_package(package)(*args)
+    torch.testing.assert_close(tuple(result), model(*args))
+    torch.testing.assert_close(result[0], args[0].reshape(1) * len(x))
+    # With two structures, atoms need not be ordered by graph.
+    groups = torch.arange(16, device="cuda") % 2
+    torch.testing.assert_close(
+        sum_node_energy(result[2], groups, 2),
+        torch.stack([result[2][groups == i].sum() for i in range(2)]),
+    )
 
 
 @pytest.mark.parametrize("backend", ["gloo", "nccl"])
@@ -56,21 +1013,21 @@ def test_manual_gradient_sync_preserves_dtype_and_views(monkeypatch, backend):
         parameter.grad = torch.full((3, 2), float(i + 1), dtype=parameter.dtype).T
     gradients = [parameter.grad for parameter in model]
     seen = []
+    waited = []
 
     def reduce(flat, op, async_op):
         assert async_op
-        expected = (
+        assert op == (
             torch.distributed.ReduceOp.SUM
             if backend == "gloo"
             else torch.distributed.ReduceOp.AVG
         )
-        assert op == expected
         seen.append(flat.dtype)
 
-        # Complete the simulated collective only when its work is awaited.
+        # The peer has identical local values and gradient availability.
         def wait():
-            flat.add_(2)
-            if backend == "gloo":
+            waited.append(flat.dtype)
+            if op == torch.distributed.ReduceOp.SUM:
                 flat.mul_(2)
 
         return SimpleNamespace(wait=wait)
@@ -78,14 +1035,123 @@ def test_manual_gradient_sync_preserves_dtype_and_views(monkeypatch, backend):
     monkeypatch.setattr(torch.distributed, "get_backend", lambda: backend)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
     monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
-    SimpleDDPStrategy.post_backward(SimpleNamespace(model=model), None)
-    assert seen == [torch.float32, torch.float64]
+    strategy = SimpleDDPStrategy()
+    strategy.model = model
+    strategy.post_backward(None)
+    assert seen == waited == [torch.float32, torch.float64]
     for i, parameter in enumerate(model[:2]):
         assert parameter.grad is gradients[i]
         torch.testing.assert_close(
-            parameter.grad, torch.full_like(parameter.grad, i + 3)
+            parameter.grad, torch.full_like(parameter.grad, i + 1)
         )
     assert model[2].grad is None
+
+
+def _simple_ddp_worker(rank, rendezvous):
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    import torch.distributed as dist
+    from lightning.fabric.plugins.environments import LightningEnvironment
+
+    from tace.utils.strategy import SimpleDDPStrategy
+
+    dist.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        env = LightningEnvironment()
+        env.set_world_size(2)
+        env.set_global_rank(rank)
+        strategy = SimpleDDPStrategy(
+            cluster_environment=env, parallel_devices=[torch.device("cpu")] * 2
+        )
+        model = torch.nn.Module()
+        for i, name in enumerate(("a", "b", "unused")):
+            model.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    torch.full((2, 3), i + rank + 1.0, dtype=torch.float32)
+                ),
+            )
+        model.loss_weight = torch.nn.Parameter(
+            torch.tensor(1.0 + rank, dtype=torch.float64)
+        )
+        model.register_buffer("persistent_stat", torch.tensor(11 + rank))
+        strategy.model = model
+        strategy.configure_ddp()
+        assert strategy.model is model
+        assert model.a.eq(1).all() and model.b.eq(2).all() and model.unused.eq(3).all()
+        assert model.loss_weight.item() == 1 and model.persistent_stat.item() == 11
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.1, weight_decay=0.1)
+
+        # Opposite ranks use different weights of identical shape. The old
+        # local-only buckets silently averaged a's gradient with b's.
+        local = model.b if rank else model.a
+        other = model.a if rank else model.b
+        view = torch.zeros(3, 2, dtype=local.dtype).T
+        local.grad = view
+        with patch.object(dist, "all_reduce", wraps=dist.all_reduce) as collect:
+            with strategy.block_backward_sync():
+                first = ((1 + 2 * rank) * local.sum() + model.loss_weight) / 2
+                first.backward()
+                strategy.post_backward(first)
+                assert not collect.called
+                assert other.grad is None and local.grad is view
+            second = (
+                (5 + 2 * rank) * local.sum() + (3 + 2 * rank) * model.loss_weight
+            ) / 2
+            second.backward()
+            strategy.post_backward(second)
+            assert collect.call_count == 2  # one data + presence bucket per dtype
+        assert local.grad is view and not view.is_contiguous()
+        torch.testing.assert_close(model.a.grad, torch.full_like(model.a, 1.5))
+        torch.testing.assert_close(model.b.grad, torch.full_like(model.b, 2.5))
+        torch.testing.assert_close(
+            model.loss_weight.grad, torch.full_like(model.loss_weight, 2.5)
+        )
+        assert model.unused.grad is None
+        optimizer.step()
+        assert model.unused not in optimizer.state
+        after = [p.detach().clone() for p in (model.a, model.b, model.unused)]
+        for weight in model.parameters():
+            root = weight.detach().clone()
+            dist.broadcast(root, src=0)
+            torch.testing.assert_close(weight, root, rtol=0, atol=0)
+
+        # Now rank 1 has no model gradients at all. Global absence must
+        # restore None even for formerly active parameters (no AdamW decay).
+        optimizer.zero_grad(set_to_none=True)
+        loss = torch.zeros((), requires_grad=True) if rank else 4 * model.loss_weight
+        loss.backward()
+        strategy.post_backward(loss)
+        assert model.a.grad is model.b.grad is model.unused.grad is None
+        torch.testing.assert_close(
+            model.loss_weight.grad, torch.full_like(model.loss_weight, 2)
+        )
+        optimizer.step()
+        for p, expected in zip((model.a, model.b, model.unused), after, strict=True):
+            torch.testing.assert_close(p, expected, rtol=0, atol=0)
+        optimizer.zero_grad(set_to_none=True)
+        strategy.post_backward(torch.zeros(()))
+        assert all(p.grad is None for p in model.parameters())
+    finally:
+        dist.destroy_process_group()
+
+
+def test_simple_ddp_gloo_state_unused_and_accumulation(tmp_path):
+    if not (torch.distributed.is_available() and torch.distributed.is_gloo_available()):
+        pytest.skip("requires Gloo")
+    torch.multiprocessing.spawn(
+        _simple_ddp_worker,
+        args=((tmp_path / "gloo").as_uri(),),
+        nprocs=2,
+        join=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -231,6 +1297,31 @@ def test_joint_training_gradients(monkeypatch, backend, device, dtype, uncertain
     for actual, expected in zip(parameters, expected_parameters):
         torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
 
+    if backend == "eager" and dtype == torch.float32:
+        from tace.utils.loss.registry import LOSS_FN
+
+        # Replace one registered function after a joint program is cached.
+        name = "mae_energy_per_atom"
+        native = LOSS_FN[name]
+        monkeypatch.setitem(
+            LOSS_FN, name, lambda *args, **kw: scale * native(*args, **kw)
+        )
+        for scale in (2.0, 5.0):
+            expected = loss_fn(TensorModel.forward(model, dict(data)), data)
+            _, actual = model.forward_loss(data, loss_fn)
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            for a, b in zip(
+                torch.autograd.grad(expected, parameters, allow_unused=True),
+                torch.autograd.grad(actual, parameters, allow_unused=True),
+                strict=True,
+            ):
+                torch.testing.assert_close(a, b, atol=0, rtol=0)
+        assert len(model._compiled_cache) == 1
+        with pytest.raises(ValueError, match="built-in loss"):
+            joint.JointTraining(model, loss_fn, data)
+        with pytest.raises(ValueError, match="built-in loss"):
+            joint.joint_training(model, loss_fn, data, return_gradients=True)
+
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_joint_loss_aliases_and_scaling(device):
@@ -290,6 +1381,96 @@ def test_joint_artifact_metadata():
     settings.options.parent = settings
     with pytest.raises(ValueError, match="Cyclic"):
         module_context(module)
+
+
+def test_joint_cache_separates_broadcast_and_dynamic_reciprocal_rows(monkeypatch):
+    from tace.models.compile import joint
+    from tace.utils.loss.normal import NormalLoss
+
+    model = torch.nn.Linear(2, 1)
+    model._compiled_cache = {}
+    objective = NormalLoss(["energy"], ["mse_energy"], [1.0])
+    monkeypatch.setattr(joint, "supports_joint_loss", lambda *args: True)
+    # Cache dispatch only. One representative row is a static dimension;
+    # two or more rows belong to the same dynamic program.
+    monkeypatch.setattr(joint, "JointTraining", lambda *a: Mock(return_value=object()))
+    data = dict(positions=torch.zeros(2, 3), ptr=torch.tensor([0, 2]))
+    runs = [
+        joint.joint_training(
+            model,
+            objective,
+            dict(
+                data,
+                edge_index=torch.zeros(2, 2 * n, dtype=torch.long),
+                edge_pair_rows=torch.arange(n),
+            ),
+        )
+        for n in (1, 2, 3, 1)
+    ]
+    assert runs[0] is runs[-1] and runs[1] is runs[2] and runs[0] is not runs[1]
+    objective.eval()
+    joint.joint_training(
+        model,
+        objective,
+        dict(
+            data,
+            edge_index=torch.zeros(2, 2, dtype=torch.long),
+            edge_pair_rows=torch.arange(1),
+        ),
+    )
+    assert len(model._compiled_cache) == 3
+
+
+def test_joint_artifact_fixed_and_dynamic_shapes(tmp_path, monkeypatch):
+    import inspect
+    from types import SimpleNamespace
+
+    from tace.models.compile import joint
+    from tace.models.compile.artifact import JointArtifactCache
+    from tace.utils.loss.normal import NormalLoss
+
+    if "dynamic_shapes" not in inspect.signature(
+        torch.compile
+    ).parameters or not hasattr(torch._inductor, "CompiledArtifact"):
+        pytest.skip("Joint training artifact cache unavailable")
+    model = SimpleNamespace(readout_fn=SimpleNamespace(), shape_padding=False)
+    objective = NormalLoss(["energy"], ["mse_energy"], [1.0])
+
+    class Loss(torch.nn.Linear):
+        def forward(self, edge_index, positions):
+            prediction = super().forward(positions).sum() / positions.shape[0]
+            return prediction.square(), (prediction,)
+
+    module = Loss(3, 1)
+    module.model = torch.nn.Identity()
+    module.model.output_keys = ("energy",)
+    monkeypatch.setattr(joint, "TrainingLoss", lambda *args: module)
+    monkeypatch.setattr(JointArtifactCache, "load", lambda self: module)
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(tmp_path))
+
+    def batch(n, e):
+        return {
+            "positions": torch.ones(n, 3),
+            "edge_index": torch.zeros(2, e, dtype=torch.long),
+        }
+
+    def key(n, e, fixed):
+        return joint.JointTraining(
+            model, objective, batch(n, e), _fixed_shapes=fixed
+        ).artifact_info["key"]
+
+    dynamic = key(4, 6, False)
+    assert key(5, 8, False) == dynamic
+    assert len({dynamic, key(4, 6, True), key(5, 6, True), key(4, 8, True)}) == 4
+    model.readout_fn.compile_backend = "eager"
+    fixed = joint.JointTraining(model, objective, batch(4, 6), _fixed_shapes=True)
+    out, loss = fixed(batch(4, 6))
+    value, (pred,) = module(**batch(4, 6))
+    torch.testing.assert_close(out["energy"], pred)
+    torch.testing.assert_close(loss, value)
+    for shape in ((5, 6), (4, 8)):
+        with pytest.raises(ValueError, match="input shape changed"):
+            fixed(batch(*shape))
 
 
 def test_joint_artifact_contract(tmp_path, monkeypatch):
@@ -662,6 +1843,21 @@ def test_compiled_training_and_export(tmp_path, dtype, backend):
         torch.testing.assert_close(
             actual[key], expected[key], atol=tolerance, rtol=tolerance
         )
+    if backend == "native" and dtype == torch.float32 and torch.cuda.device_count() > 1:
+        current = torch.cuda.current_device()
+        other = torch.device("cuda", (current + 1) % torch.cuda.device_count())
+        second = load_aotinductor(path, other)
+        assert second.compile_device == other
+        relocated = second({key: value.to(other) for key, value in sample.items()})
+        for key in targets:
+            assert relocated[key].device == other
+            torch.testing.assert_close(
+                relocated[key].cpu(),
+                expected[key].cpu(),
+                atol=tolerance,
+                rtol=tolerance,
+            )
+        assert torch.cuda.current_device() == current
     # Loading must restore registrations without constructing the original model.
     case = tmp_path / "case.pt"
     torch.save(
@@ -1209,11 +2405,12 @@ def test_compile_direct_hessian(dtype, interaction_type):
     flat_model = FlatTorchModel(model, keys, outputs)
     inputs = tuple(sample[key] for key in keys)
     with size_oblivious_export():
-        traced = trace_to_fx(flat_model, inputs)
+        dynamic_shapes = graph_dynamic_shapes(keys, num_graphs=2)
+        traced = trace_to_fx(flat_model, inputs, dynamic_shapes=dynamic_shapes)
         exported = torch.export.export(
             traced,
             inputs,
-            dynamic_shapes=graph_dynamic_shapes(keys, num_graphs=2),
+            dynamic_shapes=dynamic_shapes,
             strict=False,
             prefer_deferred_runtime_asserts_over_guards=True,
         )

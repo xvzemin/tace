@@ -2,7 +2,9 @@
 
 import torch
 
-DEFAULT_BACKEND = "cuda" if torch.cuda.is_available() else "torch"
+DEFAULT_BACKEND = (
+    "cuda" if torch.version.cuda and torch.cuda.is_available() else "torch"
+)
 
 # Keep the ordinary forward program independent of the optimized adjoints.
 TORCH_REFERENCE = False
@@ -159,6 +161,8 @@ SYMMETRIC_PROJECTION_MAX_ENTRIES = 1 << 18
 SYMMETRIC_MONOMIAL_WORKSPACE = 64 << 20
 TORCH_ACE_CHANNEL_POLYNOMIAL = True
 ACE_POLYNOMIAL_WORKSPACE = 12 << 20
+# Bound eager shared powers and their packed coefficient readout.
+ACE_SHARED_POWER_WORKSPACE = 128 << 20
 ACE_ELEMENT_BLOCK = 16
 # Pack independent coefficient tables together during Torch graph capture.
 TORCH_ACE_PACK_TABLES = True

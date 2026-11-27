@@ -7,6 +7,7 @@ from e3nn import o3
 
 from ...ops import config, resolve_backend
 from ...ops.common.convolution import edge_indices
+from ...ops.common.o3 import validate_projection_workspace
 from ...ops.common.radial import cast_radial, radial_features
 from ...ops.common.torch.tensor_product import TensorProduct as GroupedTensorProduct
 from ...ops.common.torch.tensor_product import instruction_groups
@@ -39,6 +40,11 @@ class O3TensorProductConv(torch.nn.Module):
         ``"last"`` keeps hidden MLP activations and fuses the final projection.
         ``"full"`` includes the complete radial network in the convolution
         program and recomputes its activations during differentiation.
+    projection_workspace_bytes : int, optional
+        Limit the native CUDA final-projection scratch per call, including
+        adjoints. This is a tile budget (at least one edge), not total memory.
+        None retains the default projection policy. Direct weights, full
+        radial programs and the PyTorch provider do not use this workspace.
 
     Examples
     --------
@@ -60,6 +66,7 @@ class O3TensorProductConv(torch.nn.Module):
     """
 
     batch_paths = False
+    projection_workspace_bytes = None
     angular_groups = ()
 
     def __init__(
@@ -71,6 +78,7 @@ class O3TensorProductConv(torch.nn.Module):
         normalize=True,
         batch_paths=False,
         radial_mode="last",
+        projection_workspace_bytes=None,
     ):
         backend = resolve_backend(backend)
         super().__init__()
@@ -82,6 +90,9 @@ class O3TensorProductConv(torch.nn.Module):
         if radial_mode not in ("last", "full"):
             raise ValueError("radial_mode must be last or full.")
         self.radial_mode = radial_mode
+        self.projection_workspace_bytes = validate_projection_workspace(
+            projection_workspace_bytes
+        )
         self.batch_paths = batch_paths
         if normalization not in ("component", "integral", "norm"):
             raise ValueError("normalization must be integral, component or norm.")
@@ -213,6 +224,7 @@ class O3TensorProductConv(torch.nn.Module):
         amplitudes=None,
         radial_network=None,
         edge_pairs=None,
+        projection_workspace_bytes=None,
     ):
         """Evaluate the indexed convolution.
 
@@ -227,6 +239,8 @@ class O3TensorProductConv(torch.nn.Module):
             With an empty projection, these are path weights directly.
             With ``radial_network``, a tuple of ``(tensor, kind)`` partitions
             may use ``kind="edge"``, ``"source"`` or ``"target"``.
+            A target table may include extra rows (e.g. halo atoms); only its
+            first ``num_nodes`` rows are used by the convolution.
         projection : torch.Tensor
             Shared weights, shape ``(radial_dim, weight_numel)``. Shape
             ``(0, weight_numel)`` selects directly supplied path weights.
@@ -236,6 +250,9 @@ class O3TensorProductConv(torch.nn.Module):
             None evaluates a row-wise tensor product without graph reduction.
         num_nodes : int, optional
             Number of target nodes. Defaults to the number of source nodes.
+            For a bipartite graph, source indices address rows of ``features``
+            independently of this count. Target indices must be in
+            ``[0, num_nodes)``; targets without incoming edges get zero.
         vectors : torch.Tensor, optional
             Edge vectors, shape ``(edges, 3)``. When supplied, replace
             ``edge_attrs`` with spherical harmonics, and contract
@@ -254,12 +271,19 @@ class O3TensorProductConv(torch.nn.Module):
             and a constant input channel when no network is supplied.
         edge_pairs : equivariantx.conv.EdgePairs, optional
             Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
+        projection_workspace_bytes : int, optional
+            Override the instance's final-projection tile budget for this call.
 
         Returns
         -------
         torch.Tensor
             Target features, shape ``(num_nodes, irreps_out.dim)``.
         """
+        budget = validate_projection_workspace(
+            self.projection_workspace_bytes
+            if projection_workspace_bytes is None
+            else projection_workspace_bytes
+        )
         pair_index = None
         if edge_pairs is not None:
             if edge_index is None:
@@ -425,6 +449,7 @@ class O3TensorProductConv(torch.nn.Module):
                 amplitudes,
                 radial_network,
                 pair_index,
+                budget,
             )
         return torch_kernel.evaluate(
             self,

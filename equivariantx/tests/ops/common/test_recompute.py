@@ -11,13 +11,16 @@ from equivariantx.ops.compiler import compile_and_package
 def test_replay_tf32_cache():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")
-    from equivariantx.ops.common.recompute import Replay
+    from equivariantx.ops.common.cuda.graph import retain_constants
 
     previous = torch.backends.cuda.matmul.allow_tf32
     program = Replay(lambda values, create_graph: (values[0] @ values[1],))
     x = torch.randn(64, 64, device="cuda", dtype=torch.float32)
     y = torch.randn_like(x)
     try:
+        with retain_constants({}):
+            torch.testing.assert_close(program(x, y)[0], x @ y)
+        assert not program.graphs
         for enabled in (False, True, False):
             torch.backends.cuda.matmul.allow_tf32 = enabled
             torch.testing.assert_close(program(x, y)[0], x @ y)

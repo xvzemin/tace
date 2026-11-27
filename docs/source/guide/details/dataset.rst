@@ -22,7 +22,8 @@ ASE detects file formats automatically.
      test_files: [test.xyz]
 
 Each source may instead be a mapping with ``path`` and ``fidelity_idx``.
-Fidelity indices follow ``model.config.fidelity``. Missing structure metadata
+Fidelity indices follow ``model.config.fidelity``. A single fidelity mapping
+defines one head, just like a list containing that mapping. Missing structure metadata
 uses the source fidelity; conflicting metadata raises an error. Without a source
 fidelity, unmarked structures use head 0.
 

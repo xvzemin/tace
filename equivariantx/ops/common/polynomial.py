@@ -4,9 +4,14 @@ from collections import Counter, defaultdict
 from functools import lru_cache
 
 import torch
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ...utils.autograd import nested_forward_ad, torch_gradient_mask
-from ...utils.metadata import compact_metadata, parse_metadata
+from ...utils.metadata import (
+    compact_metadata,
+    independent_channel_groups,
+    parse_metadata,
+)
 from ...utils.scalar import ScalarProgram
 from .. import config
 from ..precision import validate_uniform
@@ -179,12 +184,70 @@ def evaluate_linear(contract, metadata, program, node_type, operands):
     return outputs
 
 
+def eager_kernel(kind, node_type, operands):
+    """Select a native eager contraction outside Torch dispatch transforms."""
+    return (
+        kind in ("ace", "channel")
+        and operands[0].is_cuda
+        and not torch.compiler.is_compiling()
+        and not torch.jit.is_tracing()
+        and not torch._C._are_functorch_transforms_active()
+        and not torch._C._dispatch_tls_is_dispatch_key_included(
+            torch._C.DispatchKey.Python
+        )
+        and not torch._C._is_torch_function_mode_enabled()
+        and (node_type is None or type(node_type) is torch.Tensor)
+        and all(type(x) in (torch.Tensor, torch.nn.Parameter) for x in operands)
+    )
+
+
+def run_eager_kernel(kind, metadata, program, node_type, operands):
+    from .. import get_kernel
+
+    if kind == "channel":
+        return tuple(
+            get_kernel("local_channel_product", "cuda")(metadata, program, operands)
+        )
+    return tuple(
+        get_kernel("ace_contract", "cuda")(metadata, program, node_type, operands)
+    )
+
+
+@lru_cache(maxsize=128)
+@torch.compiler.assume_constant_result
+def joint_channel_program(metadata, program, dtype):
+    """The CUDA program has one writer for every requested output coordinate."""
+    if independent_channel_groups(metadata) is None:
+        return False
+    # This is cached static code generation, not a kernel build or launch.
+    from .cuda.channel_product import joint_product_source
+
+    return joint_product_source(metadata, program, dtype) is not None
+
+
+def native_joint_channel(metadata, program, operands):
+    x = operands[0]
+    return (
+        x.is_cuda
+        and torch.version.hip is None
+        and x.dtype in (torch.float32, torch.float64)
+        and joint_channel_program(metadata, program, x.dtype)
+        and all(
+            statically_known_true(t.shape[0] == 0)
+            or statically_known_true(t.shape[0] == x.shape[0])
+            for t in operands
+        )
+    )
+
+
 @torch.compiler.allow_in_graph
 class NativePolynomial(torch.autograd.Function):
     """Native primal/adjoints with analytic Torch JVPs and batching rules."""
 
     @staticmethod
     def forward(kind, metadata, program, node_type, *operands):
+        if eager_kernel(kind, node_type, operands):
+            return run_eager_kernel(kind, metadata, program, node_type, operands)
         if not operands[0].is_cuda:
             return tuple(
                 value.view_as(value)
@@ -212,6 +275,7 @@ class NativePolynomial(torch.autograd.Function):
         ) and not (
             (kind == "symmetric" and wide_symmetric(metadata, operands[0].shape[-1]))
             or (kind == "ace" and wide_ace(metadata, node_type.shape[0]))
+            or (kind == "channel" and native_joint_channel(metadata, program, operands))
         ):
             return tuple(
                 value.view_as(value)
@@ -298,6 +362,12 @@ def native_polynomial(kind, metadata, program, node_type, *operands):
     validate_uniform(operands)
     metadata = metadata if kind == "bilinear" else compact_metadata(metadata)
     program = compact_metadata(program)
+    if (
+        (not torch.is_grad_enabled() or not any(x.requires_grad for x in operands))
+        and torch.autograd.forward_ad._current_level < 0
+        and eager_kernel(kind, node_type, operands)
+    ):
+        return run_eager_kernel(kind, metadata, program, node_type, operands)
     if nested_forward_ad():
         return tuple(evaluate_polynomial(kind, metadata, program, node_type, operands))
     return NativePolynomial.apply(kind, metadata, program, node_type, *operands)

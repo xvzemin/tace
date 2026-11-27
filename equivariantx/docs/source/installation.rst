@@ -3,21 +3,16 @@
 Installation
 ============
 
-Install EQX from source without installing TACE:
+EQX and EquivariantX Foundation are included in the TACE distribution:
 
 .. code-block:: bash
 
    git clone https://github.com/xvzemin/tace.git
-   pip install ./tace/equivariantx
+   pip install ./tace
 
 Requires Python >= 3.10, PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
-For fused CUDA operators:
-
-.. code-block:: bash
-
-   pip install './tace/equivariantx[cuda]'
-
-A CUDA toolkit is required; set ``CUDA_HOME`` if it is not detected.
+Fused CUDA operators require a compatible CUDA toolkit and C++ compiler.
+Set ``CUDA_HOME`` if it is not detected.
 Kernels compile on first use and are cached. PyTorch operators do not require
 the CUDA build dependencies.
 

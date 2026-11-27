@@ -15,6 +15,7 @@ def evaluate(
     amplitudes,
     radial_network,
     pair_index=None,
+    projection_workspace_bytes=None,
 ):
     """Evaluate validated convolution operands."""
     indexed = edge_index is not None
@@ -48,4 +49,7 @@ def evaluate(
         operands,
         batch_paths=module.batch_paths,
         pair_index=pair_index,
+        projection_workspace_bytes=projection_workspace_bytes
+        if projection.numel()
+        else None,
     )[0]

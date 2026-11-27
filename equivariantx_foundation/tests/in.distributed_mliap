@@ -1,0 +1,20 @@
+units metal
+atom_style atomic
+boundary p p p
+newton on
+processors ${nranks} 1 1
+lattice bcc 2.87
+region box block 0 4 0 3 0 3
+create_box 1 box
+create_atoms 1 box
+mass 1 55.845
+region atorigin sphere 0 0 0 0.1 units box
+group moved region atorigin
+displace_atoms moved move 0.085 -0.05 0.025 units box
+pair_style mliap unified ${model} 0
+pair_coeff * * Fe
+neighbor 1.0 bin
+thermo_style custom step atoms pe fmax
+thermo_modify format float %.16g
+run 0
+write_dump all custom ${forces} id type x y z fx fy fz modify sort id format float %.16g

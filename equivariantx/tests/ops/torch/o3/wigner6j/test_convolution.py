@@ -12,6 +12,45 @@ from equivariantx.tests.o3.wigner6j.testing import (
 )
 
 
+def test_large_standard_cpu_no_cuda_setup(monkeypatch):
+    import sys
+
+    from equivariantx.o3.wigner6j import Wigner6jTensorProductConv
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        torch.cuda, "_lazy_init", lambda: pytest.fail("unexpected CUDA initialization")
+    )
+    monkeypatch.setitem(sys.modules, "equivariantx.ops.common.cuda.runtime", None)
+    monkeypatch.setitem(
+        sys.modules, "equivariantx.ops.cuda.o3.wigner6j.convolution", None
+    )
+    op = Wigner6jTensorProductConv(
+        "2x1o",
+        "1o",
+        "1e",
+        "2x1e",
+        "2x1e",
+        [(0, 0, 0, "uvu", True)],
+        [(0, 0, 0, "uvu", True)] * 32,
+        shared_weights=False,
+        internal_weights=False,
+        backend="torch",
+        recouple=False,
+    ).double()
+    assert not hasattr(op, "standard12") and not hasattr(op, "standard123")
+    assert not any(name.startswith("standard") for name in op.state_dict())
+    vals = [
+        torch.randn(n, w, dtype=torch.float64)
+        for n, w in ((3, 6), (7, 3), (3, 3), (7, 2), (7, 64))
+    ]
+    edges = torch.randint(3, (2, 7))
+    args = (*vals[:3], edges, *vals[3:])
+    torch.testing.assert_close(
+        op(*args), op.forward_reference(*args), rtol=5e-10, atol=3e-10
+    )
+
+
 @pytest.mark.parametrize("adjoint", [False, True])
 @pytest.mark.parametrize("recouple", [False, True])
 def test_fifth_derivatives_and_transforms(monkeypatch, recouple, adjoint):

@@ -158,15 +158,16 @@ def from_record(
     neighborhood=None,
     **kwargs,
 ):
-    """Build one graph; ``neighborhood`` optionally supplies precomputed edges."""
+    """Build one graph with an optional neighbor builder or precomputed edges."""
     if "dtype" in kwargs:
         raise TypeError(
             "Graph data always use float64; set the model dtype separately."
         )
     record = record_from_atoms(record)
     numbers, positions, lattice, pbc, periodic_cell = record_geometry(record)
-    if neighborhood is None:
-        neighborhood = get_neighborhood(
+    if neighborhood is None or callable(neighborhood):
+        builder = get_neighborhood if neighborhood is None else neighborhood
+        neighborhood = builder(
             positions=positions,
             cutoff=cutoff,
             pbc=pbc,

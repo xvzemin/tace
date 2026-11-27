@@ -47,6 +47,10 @@ def test_repeated_irreps(backend, convolution, double_precision):
         )
     )
     index = torch.tensor([[0, 1, 1, 2, 2], [1, 0, 2, 1, 0]], device=device)
+    torch.testing.assert_close(
+        module.combine_weights(*values[3:]),
+        module.combine_weights(*values[3:], backend="torch"),
+    )
     arguments = (*values[:3], index, *values[3:]) if convolution else values
     actual, expected = module(*arguments), module.forward_reference(*arguments)
     for _ in range(3):

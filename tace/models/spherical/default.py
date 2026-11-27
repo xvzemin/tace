@@ -260,11 +260,10 @@ def check_model_config(cfg: dict[str, Any]) -> dict[str, Any]:
         statistics
     )
 
-    fidelity = cfg["fidelity"]
-    if isinstance(fidelity, Mapping):
-        fidelity = [fidelity]
+    if isinstance(cfg["fidelity"], Mapping):
+        cfg["fidelity"] = [cfg["fidelity"]]
     magnetic_scales = []
-    for idx, fidelity_config in enumerate(fidelity):
+    for idx, fidelity_config in enumerate(cfg["fidelity"]):
         magnetic_scale = fidelity_config.get("magnetic_scale")
         if magnetic_scale is None:
             stats = statistics[idx] if idx < len(statistics) else {}

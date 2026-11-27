@@ -6,6 +6,9 @@
 import inspect
 import logging
 from contextlib import nullcontext
+from dataclasses import dataclass
+from functools import cache
+from importlib import import_module
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -15,6 +18,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from tace.dataset.quantity import PROPERTIES
 from tace.utils.loss.common import prepare_tensor_loss_counts
 from tace.utils.loss.normal import NormalLoss
+from tace.utils.loss.registry import LOSS_FN, LOSS_MODULES
 from tace.utils.loss.uncertainty import UncertaintyLoss
 
 from .compile import (
@@ -26,6 +30,32 @@ from .compile import (
     replace_sym_numel,
     strip_saved_tensor_detach,
 )
+
+
+@cache
+def _builtin_loss_functions():
+    functions = {}
+    for name in LOSS_MODULES:
+        module = import_module(f"tace.utils.loss.{name}")
+        functions.update(
+            (key, fn)
+            for key, fn in vars(module).items()
+            if getattr(fn, "__module__", None) == module.__name__
+            and hasattr(fn, "__wrapped__")
+        )
+    return functions
+
+
+def _cacheable_loss(loss_fn):
+    if type(loss_fn) not in (NormalLoss, UncertaintyLoss):
+        return False
+    native = _builtin_loss_functions()
+    for name in loss_fn.loss_function_name:
+        if not loss_fn.training:
+            name = name.replace("_dens_", "_")
+        if name not in native or LOSS_FN.get(name) is not native[name]:
+            return False
+    return True
 
 
 def supports_joint_loss(model, loss_fn):
@@ -91,6 +121,18 @@ class TrainingLoss(torch.nn.Module):
         return self.loss_fn(predictions, data), tuple(predictions.values())
 
 
+@dataclass(frozen=True)
+class JointTrainingTrace:
+    graph: torch.fx.GraphModule
+    args: tuple
+    batch_keys: tuple
+    parameters: tuple
+    buffers: tuple
+    gradients: tuple
+    predictions: tuple
+    dynamic_axes: dict[str, dict[int, str]]
+
+
 class JointTraining:
     """Compile a training loss and its first parameter derivatives.
 
@@ -104,7 +146,16 @@ class JointTraining:
         Prepared graph and labels. Structure count is static per program.
     """
 
-    def __init__(self, model, loss_fn, data):
+    def __init__(
+        self,
+        model,
+        loss_fn,
+        data,
+        *,
+        _trace_only=False,
+        _fixed_shapes=False,
+        _max_edges=None,
+    ):
         from torch._decomp import get_decompositions
         from torch.fx.experimental.dynamic_spec import (
             ParamsSpec,
@@ -113,6 +164,10 @@ class JointTraining:
             TensorSpec,
         )
 
+        if not _trace_only and not _cacheable_loss(loss_fn):
+            raise ValueError(
+                "Compiled joint training requires unchanged built-in loss functions"
+            )
         self.keys = tuple(
             sorted(
                 key for key, value in data.items() if isinstance(value, torch.Tensor)
@@ -161,7 +216,7 @@ class JointTraining:
             else None
         )
         edges = (
-            ShapeVar("edges", min=2, optimization_hint=num_edges)
+            ShapeVar("edges", min=2, max=_max_edges, optimization_hint=num_edges)
             if num_edges > 1
             else None
         )
@@ -177,7 +232,15 @@ class JointTraining:
         node_fields.update(
             key for key, spec in PROPERTIES.items() if spec["scope"] == "per-atom"
         )
-        edge_fields = {"edge_index": 1, "edge_shifts": 0, "edge_pair_inverse": 0}
+        edge_fields = {
+            "edge_index": 1,
+            "edge_shifts": 0,
+            "edge_vector": 0,
+            "edge_pair_inverse": 0,
+        }
+        edge_fields.update(
+            (key, 0) for key, spec in PROPERTIES.items() if spec["scope"] == "per-edge"
+        )
         bond_rows = None
         if "edge_pair_rows" in data and data["edge_pair_rows"].numel() > 1:
             bond_rows = ShapeVar(
@@ -215,6 +278,9 @@ class JointTraining:
             if value is not None
         }
         for key in self.keys:
+            if _fixed_shapes:
+                specs.append(None)
+                continue
             dims = [None] * data[key].ndim
             if key in node_fields:
                 dims[0] = nodes
@@ -240,7 +306,7 @@ class JointTraining:
                 inplace_buffers=True,
                 keep_static_cubin_raw=True,
             )
-            if backend == "inductor"
+            if backend == "inductor" and not _trace_only
             else None
         )
         runtime_values = tuple(
@@ -258,7 +324,7 @@ class JointTraining:
                 dynamic_axes=dynamic_axes,
                 options=compile_options,
             )
-            if backend == "inductor"
+            if backend == "inductor" and not _trace_only
             else None
         )
         self.artifact_info = cache.info if cache is not None else {"status": "disabled"}
@@ -280,7 +346,9 @@ class JointTraining:
                     tracing_mode="fake",
                     _allow_non_fake_inputs=True,
                     _error_on_data_dependent_ops=True,
-                    dynamic_shapes=ShapesSpec(ParamsSpec({"*args": specs})),
+                    dynamic_shapes=None
+                    if _fixed_shapes
+                    else ShapesSpec(ParamsSpec({"*args": specs})),
                 )(
                     *[data[key].detach().contiguous().clone() for key in self.keys],
                     *state,
@@ -291,6 +359,18 @@ class JointTraining:
             remove_full_slice_scatter(graph)
             graph.graph.eliminate_dead_code()
             graph.recompile()
+            if _trace_only:
+                self.trace = JointTrainingTrace(
+                    graph,
+                    runtime_values,
+                    self.keys,
+                    self.parameter_names,
+                    self.buffer_names,
+                    tuple(self.parameter_names[i] for i in trainable),
+                    tuple(self.module.model.output_keys),
+                    dynamic_axes,
+                )
+                return
             constants = ()
             if cache is not None:
                 try:
@@ -328,8 +408,10 @@ class JointTraining:
                 self.run = torch.compile(
                     graph,
                     fullgraph=True,
-                    dynamic=None,
-                    dynamic_shapes=ShapesSpec(
+                    dynamic=False if _fixed_shapes else None,
+                    dynamic_shapes=None
+                    if _fixed_shapes
+                    else ShapesSpec(
                         {
                             node.name: spec
                             for node, spec in zip(placeholders, specs)
@@ -339,8 +421,19 @@ class JointTraining:
                     backend=backend,
                 )
 
+            compiled = self.run
             if cache is not None:
-                self.run = cache.save(self.run, output_schema, constants)
+                self.run = cache.save(compiled, output_schema, constants)
+            # Artifact wrappers already enforce all static dimensions.
+            if _fixed_shapes and self.run is compiled:
+                shapes = tuple(data[key].shape for key in self.keys)
+
+                def run_fixed(*args):
+                    if any(arg.shape != shape for arg, shape in zip(args, shapes)):
+                        raise ValueError("Fixed joint training input shape changed")
+                    return compiled(*args)
+
+                self.run = run_fixed
 
     def __call__(self, data, *, return_gradients=False):
         state = model_state_values(self.module, self.parameter_names, self.buffer_names)
@@ -358,12 +451,8 @@ class JointTraining:
         return outputs, loss
 
 
-def joint_training(model, loss_fn, data, *, return_gradients=False):
-    if not supports_joint_loss(model, loss_fn):
-        raise ValueError(
-            "Compiled training requires PyTorch with explicit dynamic shapes, "
-            "NormalLoss or UncertaintyLoss, trainable parameters and no autocast."
-        )
+def prepare_joint_labels(loss_fn, data):
+    """Prepare the same loss-count tensors for native and packaged joint programs."""
     properties = (
         loss_fn.loss_property
         if isinstance(loss_fn, UncertaintyLoss)
@@ -380,10 +469,62 @@ def joint_training(model, loss_fn, data, *, return_gradients=False):
             )
         ]
     )
-    data = prepare_tensor_loss_counts(data, properties)
+    return prepare_tensor_loss_counts(data, properties)
+
+
+def trace_joint_training(model, loss_fn, data, *, fixed_shapes=False, max_edges=None):
+    """Trace the explicit loss, predictions and parameter derivatives without compiling.
+
+    All parameters and buffers are positional inputs, in the same order as
+    regular joint training. The caller supplies a prepared, labeled batch.
+    Set ``fixed_shapes=True`` when the consumer accepts only this batch layout.
+    """
+    if (
+        not model.training
+        or not loss_fn.training
+        or not supports_joint_loss(model, loss_fn)
+    ):
+        raise ValueError(
+            "Expected a training-mode compile adapter and a supported joint loss"
+        )
+    # CUDA autograd can interleave independent LES/stress derivative branches
+    # differently on repeated traces. Keep the materialized graph (and its
+    # strict ownership fingerprint) deterministic, without changing execution.
+    with (
+        torch.autograd.set_multithreading_enabled(False)
+        if getattr(model, "_joint_serial_trace", False)
+        else nullcontext()
+    ):
+        return JointTraining(
+            model,
+            loss_fn,
+            data,
+            _trace_only=True,
+            _fixed_shapes=fixed_shapes,
+            _max_edges=max_edges,
+        ).trace
+
+
+def joint_training(model, loss_fn, data, *, return_gradients=False):
+    if not _cacheable_loss(loss_fn):
+        if return_gradients:
+            raise ValueError(
+                "Compiled joint training requires unchanged built-in loss functions"
+            )
+        from tace.models.adapter import TensorModel
+
+        output = TensorModel.forward(model, data)
+        return output, loss_fn(output, data)
+    if not supports_joint_loss(model, loss_fn):
+        raise ValueError(
+            "Compiled training requires PyTorch with explicit dynamic shapes, "
+            "NormalLoss or UncertaintyLoss, trainable parameters and no autocast."
+        )
+    data = prepare_joint_labels(loss_fn, data)
     key = (
         "joint",
         id(loss_fn),
+        loss_fn.training,
         tuple(loss_fn.loss_property),
         tuple(loss_fn.loss_function_name),
         repr(loss_fn.loss_function_kwargs),
@@ -392,6 +533,7 @@ def joint_training(model, loss_fn, data, *, return_gradients=False):
         data["ptr"].numel(),
         min(data["positions"].shape[0], 2),
         min(data["edge_index"].shape[1], 2),
+        min(data["edge_pair_rows"].numel(), 2) if "edge_pair_rows" in data else None,
         min(data["direct_hessian_edge_pairs"].numel(), 2)
         if "direct_hessian_edge_pairs" in data
         else None,

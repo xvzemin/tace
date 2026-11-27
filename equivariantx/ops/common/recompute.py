@@ -9,6 +9,8 @@ from weakref import WeakValueDictionary
 import torch
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
+from .cuda.graph import CAPTURE_CONSTANTS, retain_constants
+
 PROGRAMS = WeakValueDictionary()
 IDENTIFIERS = count()
 NAMESPACE = uuid4().hex
@@ -99,6 +101,7 @@ class Replay:
             not self.capture
             or not inputs[0].is_cuda
             or inputs[0].numel() < 4096
+            or CAPTURE_CONSTANTS.get() is not None
             or torch.cuda.is_current_stream_capturing()
         ):
             values = tuple(x.detach().requires_grad_(x.requires_grad) for x in inputs)
@@ -120,18 +123,22 @@ class Replay:
                 )
                 capture_stream = torch.cuda.Stream(device=device)
                 capture_stream.wait_stream(stream)
-                with torch.cuda.stream(capture_stream):
+                constants = {}
+                with torch.cuda.stream(capture_stream), retain_constants(constants):
                     for _ in range(2):
                         run(values)
                 stream.wait_stream(capture_stream)
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, stream=capture_stream):
+                with (
+                    retain_constants(constants),
+                    torch.cuda.graph(graph, stream=capture_stream),
+                ):
                     result = run(values)
-                self.graphs[key] = graph, values, result
+                self.graphs[key] = graph, values, result, constants
                 # Dynamic graph sizes must not accumulate unbounded workspaces.
                 if len(self.graphs) > 2:
                     self.graphs.popitem(last=False)
-            graph, values, result = self.graphs[key]
+            graph, values, result, _ = self.graphs[key]
             self.graphs.move_to_end(key)
             for dst, src in zip(values, inputs):
                 dst.detach().copy_(src)

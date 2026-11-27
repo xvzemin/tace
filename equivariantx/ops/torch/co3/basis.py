@@ -42,6 +42,18 @@ def rank_two(features):
     return ((value + value.transpose(-1, -2)) * 0.5 - diagonal).flatten(-2)
 
 
+def rank_two_layout(features, sections):
+    """Torch decomposition of a mixed-layout rank-two projection."""
+    pieces, end = [], 0
+    for start, stop in zip(sections[::2], sections[1::2], strict=True):
+        pieces.append(features[..., end:start])
+        values = features[..., start:stop].unflatten(-1, ((stop - start) // 9, 9))
+        pieces.append(rank_two(values).flatten(-2))
+        end = stop
+    pieces.append(features[..., end:])
+    return torch.cat(pieces, dim=-1)
+
+
 class RankTwo(torch.autograd.Function):
     """Self-adjoint linear projection without saved activation tensors."""
 

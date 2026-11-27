@@ -1,5 +1,8 @@
 """Native symmetric contractions with recursively differentiated programs."""
 
+import torch
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
+
 from ....common.ace import ace_inputs, contract
 from ....common.symmetric import symmetric_contract, symmetric_inputs, symmetric_result
 
@@ -15,6 +18,23 @@ def uuu(module, features, weight, node_type):
 
 def linear(module, features, weight, node_type, stage):
     """Apply the native element-dependent coefficient contraction."""
+    linear_map = module.coefficient_maps[stage]
+    if (
+        linear_map is not None
+        and not torch.compiler.is_compiling()
+        and get_proxy_mode() is None
+    ):
+        from ....common.linear import contract as element_contract
+
+        return element_contract(
+            linear_map.metadata,
+            2,
+            node_type,
+            features,
+            weight.unsqueeze(1),
+            features.new_empty((0, module.contraction_dim)),
+            indexed=True,
+        )
     operands = [
         features,
         features.new_ones((features.shape[0], 1)),

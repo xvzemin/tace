@@ -240,12 +240,8 @@ class UvO2TensorProduct(torch.nn.Module):
         self.irreps_out = o3.Irreps(irreps_out)
         self.local_frame_in = o2.LocalFrame(self.irreps_in)
         self.local_frame_out = o2.LocalFrame(self.irreps_out, reverse=True)
-        self.reshape_in = LayoutTransform(
-            self.irreps_in, layout_out="flatten_ir_mul"
-        )
-        self.reshape_out = LayoutTransform(
-            self.irreps_out, layout_out="flatten_ir_mul"
-        )
+        self.reshape_in = LayoutTransform(self.irreps_in, layout_out="flatten_ir_mul")
+        self.reshape_out = LayoutTransform(self.irreps_out, layout_out="flatten_ir_mul")
         local_irreps_in = self.local_frame_in.irreps_out
         local_irreps_out = self.local_frame_out.irreps_out
         hidden_irreps = local_irreps_out.filter(
@@ -328,6 +324,8 @@ class O3CartesianTensorProductConv(torch.nn.Module):
     is Cartesian and must be projected after the subsequent channel linear.
     """
 
+    supports_receiver_count = True
+
     def __init__(self, irreps_in1, irreps_in2, irreps_out, l1l2=None):
         super().__init__()
         self.irreps_in1 = o3.Irreps(irreps_in1)
@@ -367,18 +365,24 @@ class O3CartesianTensorProductConv(torch.nn.Module):
             compact_output=True,
         )
 
-    def forward(self, x, y, w, edge_index):
+    def forward(self, x, y, w, edge_index, num_nodes=None):
         """Convert nodes, contract gathered features, and sum raw edge tensors."""
         if acceleration_enabled("eqx", kernel="conv"):
             return self.forward_stream(
-                x, y, w, w.new_empty((0, self.weight_numel)), edge_index, None
+                x,
+                y,
+                w,
+                w.new_empty((0, self.weight_numel)),
+                edge_index,
+                None,
+                num_nodes=num_nodes,
             )
         x = self.to_cartesian(x)
         output = scatter_sum(
             self.tp(x[edge_index[0]], y, w),
             edge_index[1],
             dim=0,
-            dim_size=x.size(0),
+            dim_size=x.size(0) if num_nodes is None else num_nodes,
         )
         return output.index_select(-1, self.eqx_tp.output_pack_index)
 
@@ -393,6 +397,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
         edge_vector=None,
         radial_network=None,
         edge_pairs=None,
+        num_nodes=None,
     ):
         """Contract Cartesian edge tensors and reduce directly to nodes."""
         if edge_cutoff is not None and edge_vector is None:
@@ -403,6 +408,7 @@ class O3CartesianTensorProductConv(torch.nn.Module):
             radial,
             projection,
             edge_index,
+            num_nodes=num_nodes,
             vectors=edge_vector,
             amplitudes=edge_cutoff,
             radial_network=radial_network,
@@ -411,6 +417,8 @@ class O3CartesianTensorProductConv(torch.nn.Module):
 
 
 class O3TensorProductConv(torch.nn.Module):
+    supports_receiver_count = True
+
     def __init__(
         self,
         irreps_in1: o3.Irreps,
@@ -549,16 +557,28 @@ class O3TensorProductConv(torch.nn.Module):
         y: torch.Tensor,
         w: torch.Tensor,
         edge_index: torch.Tensor,
+        *,
+        num_nodes: int | None = None,
     ) -> torch.Tensor:
 
         if self.use_eqx:
             return self.forward_stream(
-                x, y, w, w.new_empty((0, self.weight_numel)), edge_index, None
+                x,
+                y,
+                w,
+                w.new_empty((0, self.weight_numel)),
+                edge_index,
+                None,
+                num_nodes=num_nodes,
             )
         if hasattr(self, "fused_tp"):
-            return self.fused_tp(x, y, w, edge_index)
+            result = self.fused_tp(x, y, w, edge_index)
+            return result if num_nodes is None else result[:num_nodes]
         return scatter_sum(
-            self.tp(x[edge_index[0]], y, w), edge_index[1], dim=0, dim_size=x.size(0)
+            self.tp(x[edge_index[0]], y, w),
+            edge_index[1],
+            dim=0,
+            dim_size=x.size(0) if num_nodes is None else num_nodes,
         )
 
     def forward_stream(
@@ -572,6 +592,8 @@ class O3TensorProductConv(torch.nn.Module):
         edge_vector=None,
         radial_network=None,
         edge_pairs=None,
+        *,
+        num_nodes=None,
     ):
         """Stream radial projection and optional preceding MLP with the CGTP."""
         if edge_cutoff is not None and edge_vector is None:
@@ -582,6 +604,7 @@ class O3TensorProductConv(torch.nn.Module):
             radial,
             projection,
             edge_index,
+            num_nodes=num_nodes,
             vectors=edge_vector,
             amplitudes=edge_cutoff,
             radial_network=radial_network,
@@ -633,6 +656,13 @@ class O2TensorProductConv(torch.nn.Module):
             persistent=False,
         )
 
+    @staticmethod
+    def _receiver_rows(node_feats, graph):
+        # Lightweight non-LAMMPS callers may provide geometry only.
+        if getattr(graph, "lmp_data", None) is not None:
+            return graph.lmp_natoms[0]
+        return node_feats.size(0)
+
     def forward(self, node_feats, conv_weights, edge_index, wigner, wigner_inv, graph):
         # Match the clamped direction normalization of the harmonic basis.
         harmonic_scale = (graph.edge_length / graph.edge_length.clamp_min(1e-12)).pow(
@@ -644,6 +674,7 @@ class O2TensorProductConv(torch.nn.Module):
             edge_index,
             weight=conv_weights,
             harmonic_scale=harmonic_scale,
+            num_nodes=self._receiver_rows(node_feats, graph),
             vectors=graph.edge_vector,
         )
         return self.reshape_out(message)
@@ -674,7 +705,7 @@ class O2TensorProductConv(torch.nn.Module):
             wigner,
             harmonic_scale,
             edge_index,
-            node_feats.size(0),
+            self._receiver_rows(node_feats, graph),
             vectors=graph.edge_vector,
             radial_network=radial_network,
             edge_pairs=edge_pairs,
@@ -694,6 +725,8 @@ class UuO2TensorProductConv(torch.nn.Module):
     mmax : int
         Maximum retained local order.
     """
+
+    supports_receiver_count = True
 
     def __init__(self, irreps_in, irreps_out, *, num_channel, mmax):
         super().__init__()
@@ -739,7 +772,15 @@ class UuO2TensorProductConv(torch.nn.Module):
         return repr_without(self, "reshape_in", "reshape_out")
 
     def forward(
-        self, node_feats, conv_weights, edge_index, wigner, wigner_inv, edge_cutoff
+        self,
+        node_feats,
+        conv_weights,
+        edge_index,
+        wigner,
+        wigner_inv,
+        edge_cutoff,
+        *,
+        num_nodes=None,
     ):
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
@@ -748,7 +789,10 @@ class UuO2TensorProductConv(torch.nn.Module):
         message = self.linear(message, conv_weights)
         message = self.local_frame_out.to_global(message, wigner_inv) * edge_cutoff
         message = scatter_sum(
-            message, edge_index[1], dim=0, dim_size=node_feats.size(0)
+            message,
+            edge_index[1],
+            dim=0,
+            dim_size=node_feats.size(0) if num_nodes is None else num_nodes,
         )
         return self.reshape_out.inverse(message)
 
@@ -764,6 +808,7 @@ class UuO2TensorProductConv(torch.nn.Module):
         *,
         radial_network=None,
         edge_pairs=None,
+        num_nodes=None,
     ):
         """Fuse rotations, local paths, radial projection, and gather/scatter."""
         vectors = graph.edge_vector if graph is not None else None
@@ -802,7 +847,7 @@ class UuO2TensorProductConv(torch.nn.Module):
             wigner,
             edge_cutoff,
             edge_index,
-            node_feats.size(0),
+            node_feats.size(0) if num_nodes is None else num_nodes,
             vectors=vectors,
             radial_network=radial_network,
             edge_pairs=edge_pairs,

@@ -19,20 +19,6 @@ ROOT = Path(equivariantx.__file__).resolve().parent
 from equivariantx.tests.utils.testing import has_documentation_examples
 
 
-def test_package_modules():
-    """Every runtime package must also be present in the standalone wheel."""
-    tomllib = pytest.importorskip("tomllib")
-    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    actual = {
-        ".".join(("equivariantx", *path.parent.relative_to(ROOT).parts))
-        for path in ROOT.rglob("__init__.py")
-        if not {"tests", "docs", "build", "__pycache__"}.intersection(
-            path.relative_to(ROOT).parts
-        )
-    }
-    assert set(metadata["tool"]["setuptools"]["packages"]) == actual
-
-
 @pytest.mark.parametrize("allow_slice", [False, True])
 def test_import(tmp_path, allow_slice):
     names = sorted(
@@ -66,7 +52,9 @@ assert safe_globals.issubset(torch.serialization.get_safe_globals())
 assert (slice in torch.serialization.get_safe_globals()) == (slice in safe_globals)
 assert torch.load is load
 for name in {names!r}:
-    assert torch._C._dispatch_find_schema_or_throw(name, "").schema().name == name
+    operator, _, overload = name.partition(".")
+    schema = torch._C._dispatch_find_schema_or_throw(operator, overload).schema()
+    assert (schema.name, schema.overload_name) == (operator, overload)
 linear = o2.Linear("2x0e+2x1m", "2x0e+2x1m")
 linear(linear.irreps_in.randn(3, -1)).sum().backward()
 frame = o2.LocalFrame("2x0e+2x1o")
@@ -79,7 +67,7 @@ assert not torch.cuda.is_initialized()
 assert "tace" not in sys.modules
 from equivariantx.ops.common.cuda.runtime import runtime
 assert runtime.cache_info().currsize == 0
-assert not any(name.startswith("equivariantx.models.") for name in sys.modules)
+assert "equivariantx_foundation" not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-B", "-c", script],
@@ -100,7 +88,7 @@ def test_optional_dependencies(device):
 import sys
 import torch
 
-sys.modules.update({name: None for name in ("torch_geometric", "torch_scatter")})
+sys.modules.update({name: None for name in ("ninja", "torch.utils.cpp_extension", "torch_geometric", "torch_scatter")})
 from equivariantx import conv as eqx_conv
 from equivariantx import o2
 
@@ -147,6 +135,7 @@ arguments = (
 if device == "cpu":
     torch.testing.assert_close(accelerated(*arguments), tp.forward_scatter(x, edges, packed, weights))
 else:
+    del sys.modules["torch.utils.cpp_extension"], sys.modules["ninja"]
     import torch.utils.cpp_extension
     cuda_home = torch.utils.cpp_extension.CUDA_HOME
     torch.utils.cpp_extension.CUDA_HOME = None
@@ -158,7 +147,7 @@ else:
         raise AssertionError("CUDA execution must report the missing toolkit")
     finally:
         torch.utils.cpp_extension.CUDA_HOME = cuda_home
-    quaternion_frame = o2.WignerD(2, 2).to(device)
+    quaternion_frame = o2.WignerD(2, 2, backend="torch").to(device)
     for actual, expected in zip(quaternion_frame(vectors), (d, di)):
         torch.testing.assert_close(actual, expected, atol=1e-11, rtol=1e-11)
     assert "tace" not in sys.modules

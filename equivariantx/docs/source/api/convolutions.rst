@@ -11,6 +11,8 @@ precision autocast are unsupported. Geometry may remain FP64 with FP32 features.
 For CGTP and UV-O(2), ``radial_mode="full"`` includes the radial network in
 the convolution schedule. Use ``radial_mode="last"`` to keep its hidden
 features and fuse only the output projection.
+For O(3) CGTP, ``projection_workspace_bytes`` bounds the working space for
+the tiled output projection, not the peak memory of the complete model.
 
 ``EQX_USE_CUDA_GRAPH=1`` enables native convolution replay after warmup.
 Eligible local O(2) programs can reuse a capture across nearby node and edge
@@ -44,6 +46,8 @@ map can also reduce repeated table gradients by matrix multiplication.
 .. autofunction:: equivariantx.conv.indexed_weights
 
 .. autofunction:: equivariantx.conv.indexed_rows
+
+.. autofunction:: equivariantx.conv.indexed_radial
 
 .. autoclass:: equivariantx.conv.MultiCutoffRadial
    :members: convolution_weights

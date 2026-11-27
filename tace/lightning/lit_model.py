@@ -182,7 +182,8 @@ class LightningWrapperModel(L.LightningModule):
 
                 for p in self.parameters():
                     if p.grad is not None:
-                        p.grad.detach_()
+                        if p.grad.requires_grad:
+                            p.grad = p.grad.detach()
                         p.grad.zero_()
 
                 for p in self.parameters():
@@ -198,7 +199,7 @@ class LightningWrapperModel(L.LightningModule):
             f"{prefix}/loss",
             loss.detach(),
             prog_bar=(prefix == "train"),
-            batch_size=len(batch),
+            batch_size=batch["ptr"].numel() - 1,
             on_step=(prefix == "train"),
             on_epoch=True,
             logger=True,
@@ -236,6 +237,7 @@ class LightningWrapperModel(L.LightningModule):
             clip_gradient_norm(
                 (p for group in optimizer.param_groups for p in group["params"]),
                 gradient_clip_val,
+                return_norm=False,
             )
         else:
             super().configure_gradient_clipping(

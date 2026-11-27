@@ -28,15 +28,15 @@ To install the current source tree instead:
 
 .. code-block:: bash
 
-   pip install git+https://github.com/xvzemin/tace.git@main
+   git clone https://github.com/xvzemin/tace.git
+   cd tace
+   pip install .
 
-The core installation uses the standard e3nn implementation. Acceleration
-libraries and simulation interfaces are optional and can be installed
-independently as described below. When working from a source checkout, replace
+The current source distribution includes both EquivariantX and EquivariantX Foundation.
+Simulation interfaces may require additional packages. From a source checkout, replace
 ``tace[extra]`` with ``.[extra]`` in the commands.
 
-Core CPU inference does not require CUDA or a C++ compiler. On Windows and macOS,
-start with ``device="cpu"`` and leave the CUDA acceleration backends disabled.
+Core CPU inference does not require CUDA or a C++ compiler.
 EQX CUDA kernels require an NVIDIA GPU, the CUDA toolkit and a compatible
 C++ compiler (MSVC on Windows). They are not available on macOS.
 The LAMMPS interface additionally requires a CUDA Kokkos ML-IAP build; the
@@ -53,24 +53,23 @@ The cutoff-adapted ``ejn`` basis does not require this extra.
 EquivariantX (EQX)
 ------------------
 
-EquivariantX is currently bundled with TACE and does not require a separate
-installation for TACE users. Independent installation currently supports
-source builds only and does not require installing TACE. A standalone package
-release is planned once the library is fully mature. To install from source:
-
-.. code-block:: bash
-
-   git clone https://github.com/xvzemin/tace.git
-   pip install ./tace/equivariantx
-
-The library imports as ``eqx`` and depends on PyTorch >= 2.4 and e3nn >= 0.4.4,
-but not on TACE or PyG. Its scope covers native O(2)
-operators, e3nn-compatible O(3)/O(2) frame conversion, and fused CUDA
-convolutions. Install ``'./tace/equivariantx[cuda]'`` and provide a CUDA toolkit to
-use the fused backend. See :ref:`equivariantx-installation` and
+TACE includes ``equivariantx`` for spherical and Cartesian
+:math:`O(3)` and :math:`O(2)` operators. The default backend is CUDA when an
+NVIDIA CUDA device is available and PyTorch otherwise. Native CUDA kernels
+require a compatible CUDA toolkit and C++ compiler. CPU execution does not.
+See :ref:`equivariantx-installation` and
 :ref:`equivariantx-api-convolutions` for installation and operator parameters.
-When using e3nn 0.4.x with recent PyTorch, import ``eqx`` before ``e3nn.o3``
+When using e3nn 0.4.x with recent PyTorch, import ``equivariantx`` before ``e3nn.o3``
 so its packaged constants are loaded in the scoped compatibility context.
+
+EquivariantX Foundation
+-----------------------
+
+TACE also includes ``equivariantx_foundation``, the EQX extension for
+model-specific training and inference. Installation, imports and plan inspection
+do not require CUDA. Executing a Foundation plan requires an NVIDIA CUDA device.
+For other model families, install the corresponding host library.
+See :doc:`../guide/foundation_adapters`.
 
 
 OpenEquivariance (OEQ)

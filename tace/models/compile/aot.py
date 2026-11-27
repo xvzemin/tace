@@ -11,18 +11,21 @@ import zipfile
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Sequence, Set, Union
+from uuid import uuid4
 
 import torch
 
-from equivariantx.ops.compiler import compile_and_package
 from tace.dataset.element import TorchElement
 
 from ..utils import prepare_direct_hessian_inputs
 from .compile import inductor_options, trace_to_fx
 from .wrapper import (
+    _LES_FIELD_OR_SPIN_KEYS,
     CompileTensorModel,
     FlatLammpsModel,
     FlatTorchModel,
+    _GraphTensorModel,
+    _valid_periodic_les_cell,
 )
 
 TACE_AOTI_FORMAT = "tace_graph_v1"
@@ -51,6 +54,18 @@ LAMMPS_AOTI_INPUT_KEYS = (
 LAMMPS_AOTI_OUTPUT_KEYS = ("energy", "node_energy", "edge_forces")
 
 
+def _package_device(metadata, device):
+    compiled = torch.device(metadata.get("AOTI_DEVICE_KEY") or device or "cpu")
+    if device is None:
+        return compiled
+    requested = torch.device(device)
+    if compiled == requested or compiled.type == requested.type == "cuda":
+        return requested
+    raise RuntimeError(
+        f"TACE .pt2 was compiled for {compiled}, but device={requested} was requested."
+    )
+
+
 class AOTICompiledTensorModel(torch.nn.Module):
     def __init__(
         self,
@@ -61,6 +76,7 @@ class AOTICompiledTensorModel(torch.nn.Module):
         super().__init__()
         self.compiled_model = compiled_model
         self.metadata = metadata
+        self.periodic_les = metadata.get("tace_periodic_les") == "charge_only_v1"
         self.input_keys = tuple(metadata_json(metadata, "tace_input_keys"))
         self.output_keys = tuple(metadata_json(metadata, "tace_output_keys"))
         self.exported_target_property = list(
@@ -82,19 +98,26 @@ class AOTICompiledTensorModel(torch.nn.Module):
         self.max_neighbors = metadata_json(metadata, "tace_max_neighbors")
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
         self.model_dtype = dtype_from_name(metadata["tace_dtype"])
-        compile_device = metadata.get("AOTI_DEVICE_KEY") or device or "cpu"
-        self.compile_device = torch.device(compile_device)
-        self._check_device(device)
+        self.compile_device = _package_device(metadata, device)
+        self.elements = TorchElement(self.atomic_numbers, device=self.compile_device)
+        self.fixed_inputs = tuple(
+            (key, torch.Size(shape), dtype_from_name(dtype))
+            for key, shape, dtype in json.loads(metadata.get("tace_fixed_inputs", "[]"))
+        )
+        if self.fixed_inputs and self.compile_device == torch.device("cuda"):
+            self.compile_device = torch.device("cuda", torch.cuda.current_device())
 
     def forward(
         self, data: Dict[str, torch.Tensor]
     ) -> Dict[str, Union[torch.Tensor, None]]:
+        if self.periodic_les:
+            _validate_periodic_les_inputs(data)
         data = canonicalize_inputs(
             data,
             self.input_keys,
             self.fidelity_idx,
             self.direct_hessian_cutoff,
-            atomic_numbers=self.atomic_numbers,
+            elements=self.elements,
         )
         if self.direct_hessian_cutoff is not None and data["positions"].size(0) < 2:
             raise ValueError(
@@ -104,6 +127,22 @@ class AOTICompiledTensorModel(torch.nn.Module):
         missing = [key for key in self.input_keys if key not in data]
         if missing:
             raise KeyError(f"missing TACE graph .pt2 inputs: {missing}")
+        for key, shape, dtype in self.fixed_inputs:
+            value = data[key]
+            if (
+                value.shape != shape
+                or value.dtype != dtype
+                or value.device.type != self.compile_device.type
+                or (
+                    self.compile_device.index is not None
+                    and value.device != self.compile_device
+                )
+            ):
+                raise ValueError(
+                    f"Fixed AOTI input {key!r} requires shape {tuple(shape)}, "
+                    f"{dtype} on {self.compile_device}; received {tuple(value.shape)}, "
+                    f"{value.dtype} on {value.device}."
+                )
         outputs = self.compiled_model(*(data[key] for key in self.input_keys))
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
@@ -160,19 +199,6 @@ class AOTICompiledTensorModel(torch.nn.Module):
     def get_torch_element(self) -> TorchElement:
         return TorchElement(self.atomic_numbers)
 
-    def _check_device(self, device: Union[str, torch.device, None]) -> None:
-        if device is None:
-            return
-        requested = torch.device(device)
-        if self.compile_device == requested:
-            return
-        if self.compile_device.type == "cuda" and requested.type == "cuda":
-            return
-        raise RuntimeError(
-            f"TACE graph .pt2 was compiled for {self.compile_device}, "
-            f"but device={requested} was requested."
-        )
-
 
 class AOTICompiledLammpsModel(torch.nn.Module):
     def __init__(
@@ -192,15 +218,14 @@ class AOTICompiledLammpsModel(torch.nn.Module):
         self.cutoff = float(metadata["tace_cutoff"])
         self.fidelity_idx = int(metadata["tace_fidelity_idx"])
         self.model_dtype = dtype_from_name(metadata["tace_dtype"])
-        compile_device = metadata.get("AOTI_DEVICE_KEY") or device or "cpu"
-        self.compile_device = torch.device(compile_device)
-        self._check_device(device)
+        self.compile_device = _package_device(metadata, device)
+        self.elements = TorchElement(self.atomic_numbers, device=self.compile_device)
 
     def forward(
         self, data: Dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         data = canonicalize_inputs(
-            data, self.input_keys, self.fidelity_idx, atomic_numbers=self.atomic_numbers
+            data, self.input_keys, self.fidelity_idx, elements=self.elements
         )
         missing = [key for key in self.input_keys if key not in data]
         if missing:
@@ -216,29 +241,30 @@ class AOTICompiledLammpsModel(torch.nn.Module):
         result = dict(zip(self.output_keys, outputs))
         return result["energy"], result["node_energy"], result["edge_forces"]
 
-    def _check_device(self, device: Union[str, torch.device, None]) -> None:
-        if device is None:
-            return
-        requested = torch.device(device)
-        if self.compile_device == requested:
-            return
-        if self.compile_device.type == "cuda" and requested.type == "cuda":
-            return
-        raise RuntimeError(
-            f"TACE LAMMPS .pt2 was compiled for {self.compile_device}, "
-            f"but device={requested} was requested."
-        )
-
 
 def export_aotinductor(
     model: torch.nn.Module,
     output_path: Union[str, Path],
     sample_data: Union[Dict[str, torch.Tensor], None] = None,
+    *,
+    fixed_shapes: bool = False,
 ) -> str:
+    """Export a frozen graph with dynamic sizes or the exact sample input shapes.
+
+    Dynamic export rejects observed trace guards that specialize a relationship
+    between independent input sizes (such as the node and edge counts) unless
+    guaranteed by the declared ranges. This is not a general check of Python
+    control flow: custom readouts should express size-dependent math in tensors.
+
+    With ``fixed_shapes=True``, all tensor shapes, including the edge count
+    and any reciprocal-pair count, must match the supplied sample. Atom
+    types, coordinates, connectivity and other input values remain variable.
+    """
+    if fixed_shapes and sample_data is None:
+        raise ValueError("Fixed AOTI export requires sample_data.")
     logging.info("[AOTI 1/5] Preparing model and example inputs...")
     model.eval()
-    compile_model = as_compile_tensor_model(model)
-    CompileTensorModel._validate_compile_properties(compile_model.readout_fn)
+    compile_model = _frozen_graph_model(model)
     input_keys = graph_aoti_input_keys(compile_model)
     output_keys = compile_model._output_keys()
     if not output_keys:
@@ -248,6 +274,9 @@ def export_aotinductor(
         sample_data = synthetic_graph_sample(compile_model)
     else:
         sample_data = {key: value for key, value in sample_data.items()}
+    periodic_les = getattr(compile_model, "_periodic_les_graph", False)
+    if periodic_les:
+        _validate_periodic_les_inputs(sample_data, sample=True)
     ensure_sample_inputs(sample_data, input_keys, compile_model)
 
     flat_model = FlatTorchModel(compile_model, input_keys, output_keys)
@@ -255,17 +284,25 @@ def export_aotinductor(
     custom_ops_libs = custom_ops_libs_from_model(flat_model)
     inputs = tuple(sample_data[key] for key in input_keys)
     with size_oblivious_export():
+        dynamic_shapes = (
+            None
+            if fixed_shapes
+            else graph_dynamic_shapes(
+                input_keys, num_graphs=sample_data["ptr"].numel() - 1
+            )
+        )
         logging.info("[AOTI 2/5] Tracing the forward and derivative graph...")
         traced = trace_to_fx(
             flat_model,
             inputs,
             functionalize=compile_model.flags.compute_noncollinear_magnetic_forces,
+            fixed_shapes=fixed_shapes,
+            dynamic_shapes=dynamic_shapes,
         )
-        dynamic_shapes = graph_dynamic_shapes(
-            input_keys,
-            num_graphs=sample_data["ptr"].numel() - 1,
+        logging.info(
+            "[AOTI 3/5] Exporting the %s graph...",
+            "fixed-shape" if fixed_shapes else "dynamic",
         )
-        logging.info("[AOTI 3/5] Exporting the dynamic graph...")
         exported = torch.export.export(
             traced,
             inputs,
@@ -282,6 +319,15 @@ def export_aotinductor(
         output_keys,
         export_num_graphs=sample_data["ptr"].numel() - 1,
     )
+    if periodic_les:
+        metadata["tace_periodic_les"] = "charge_only_v1"
+    if fixed_shapes:
+        metadata["tace_fixed_inputs"] = json.dumps(
+            [
+                (key, list(value.shape), str(value.dtype).removeprefix("torch."))
+                for key, value in zip(input_keys, inputs, strict=True)
+            ]
+        )
     inductor_configs = {**inductor_options(), "aot_inductor.metadata": metadata}
     ensure_cxx_compiler()
     logging.info(
@@ -297,12 +343,24 @@ def export_aotinductor(
     return str(out_path)
 
 
+def _load_package(model_path, device, single_threaded):
+    import_custom_ops_libs(str(model_path))
+    options = {"run_single_threaded": True} if single_threaded else {}
+    if device is not None and torch.device(device).type == "cuda":
+        with torch.cuda.device(device):
+            return torch._inductor.aoti_load_package(
+                str(model_path), device_index=torch.cuda.current_device(), **options
+            )
+    return torch._inductor.aoti_load_package(str(model_path), **options)
+
+
 def load_aotinductor(
     model_path: Union[str, Path],
     device: Union[str, torch.device, None],
+    *,
+    single_threaded: bool = False,
 ) -> AOTICompiledTensorModel:
-    import_custom_ops_libs(str(model_path))
-    compiled_model = torch._inductor.aoti_load_package(str(model_path))
+    compiled_model = _load_package(model_path, device, single_threaded)
     metadata = dict(compiled_model.get_metadata())
     if metadata.get("tace_format") != TACE_AOTI_FORMAT:
         raise ValueError(
@@ -384,10 +442,7 @@ def load_lammps_aotinductor(
     *,
     single_threaded: bool = False,
 ) -> AOTICompiledLammpsModel:
-    import_custom_ops_libs(str(model_path))
-    compiled_model = torch._inductor.aoti_load_package(
-        str(model_path), run_single_threaded=single_threaded
-    )
+    compiled_model = _load_package(model_path, device, single_threaded)
     metadata = dict(compiled_model.get_metadata())
     if metadata.get("tace_format") != LAMMPS_AOTI_FORMAT:
         raise ValueError(
@@ -403,9 +458,135 @@ def as_compile_tensor_model(model: torch.nn.Module) -> CompileTensorModel:
     if hasattr(model, "readout_fn"):
         wrapped = CompileTensorModel(model.readout_fn)
         wrapped.reset_fidelity_idx(model.get_fidelity_idx())
-        wrapped.train(model.training)
+        # The readout is the caller's live module. Keep its individual
+        # training/eval modes (e.g. frozen statistics during fine-tuning).
+        wrapped.training = model.training
         return wrapped
     raise TypeError("TACE graph .pt2 export requires a TensorModel-like model.")
+
+
+def _frozen_graph_model(model):
+    """The live compiler and LAMMPS never receive the graph-only LES adapter."""
+    readout = getattr(model, "readout_fn", None)
+    if not hasattr(readout, "les"):
+        wrapped = as_compile_tensor_model(model)
+        CompileTensorModel._validate_compile_properties(wrapped.readout_fn)
+        return wrapped
+    return _periodic_les_graph_model(model)
+
+
+def as_joint_export_model(model, sample):
+    """Build the explicit-gradient export adapter, never a live-compile exception."""
+    if not hasattr(getattr(model, "readout_fn", None), "les"):
+        return as_compile_tensor_model(model)
+    wrapped = _periodic_les_graph_model(model, joint=True)
+    device = model.readout_fn.atomic_numbers.device.type
+    if device not in ("cpu", "cuda") or (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+    ):
+        raise ValueError(
+            "Periodic LES joint AOTI requires single-rank CPU or CUDA training."
+        )
+    _validate_periodic_les_inputs(sample, sample=True)
+    # Standalone loaders enforce these without importing TACE or the LES solver.
+    wrapped._joint_local_only = True
+    wrapped._joint_forbidden_inputs = _LES_FIELD_OR_SPIN_KEYS
+    if device == "cuda":
+        wrapped._joint_serial_trace = True
+        wrapped._joint_positive_periodic_cell = ("pbc", "lattice")
+    return wrapped
+
+
+def _periodic_les_graph_model(model, *, joint=False):
+    from ..adapter import TensorModel
+    from ..cartesian.tace import CartesianTACE
+    from ..spherical.les import is_periodic_charge_only_les
+    from ..spherical.tace import SphericalTACE
+
+    readout = model.readout_fn
+    if joint and type(readout) is CartesianTACE:
+        raise ValueError(
+            "Cartesian periodic LES is supported for frozen inference, not joint training."
+        )
+    if type(model) is not TensorModel or type(readout) not in (
+        SphericalTACE,
+        CartesianTACE,
+    ):
+        raise ValueError(
+            "LES graph export requires a standard spherical or Cartesian TACE and TensorModel adapter."
+        )
+    config = readout.model_config
+    targets = set(model.get_target_property())
+    if not (
+        not any(
+            m._forward_hooks
+            or m._forward_pre_hooks
+            or m._backward_hooks
+            or m._backward_pre_hooks
+            or m._compiled_call_impl is not None
+            for m in model.modules()
+        )
+        # These adapter methods are replaced by the export wrapper; don't
+        # silently export the stock derivatives of a customized live model.
+        and not {
+            "forward",
+            "prepare_property_data",
+            "prepare_graph",
+            "first_derivative_fn",
+            "second_derivative_fn",
+        }.intersection(vars(model))
+        and not {"forward", "readout_fn"}.intersection(vars(readout))
+        and is_periodic_charge_only_les(readout.les)
+        and "energy" in targets
+        and targets <= {"energy", "forces", "stress"}
+        and not model.get_embedding_property()
+        and not config.get("embedding_property")
+        and not any(
+            v.get("enable", False)
+            for v in config.get("universal_embedding", {}).values()
+        )
+        and not readout.representation.use_magnetic_interaction
+        and not model.lmp
+    ):
+        raise ValueError(
+            "LES graph export requires a field-free, nonmagnetic TACE with a fixed periodic LES 0.2.0 charge-only solver and energy/forces/stress targets."
+        )
+    wrapped = _GraphTensorModel(readout)
+    wrapped._periodic_les_graph = True
+    wrapped.reset_fidelity_idx(model.get_fidelity_idx())
+    # Share live state; preserve each child module's individual mode.
+    wrapped.training = model.training
+    return wrapped
+
+
+def _validate_periodic_les_inputs(data, *, sample=False):
+    if any(data.get(k) is not None for k in _LES_FIELD_OR_SPIN_KEYS):
+        raise ValueError(
+            "LES graph export does not accept external fields or spin inputs."
+        )
+    pbc, cell, ptr = (data.get(k) for k in ("pbc", "lattice", "ptr"))
+    msg = "LES requires fully periodic finite cells with positive volume"
+    if not (
+        torch.is_tensor(ptr)
+        and ptr.ndim == 1
+        and ptr.numel() >= 2
+        and torch.is_tensor(cell)
+        and cell.is_floating_point()
+        and cell.shape == (ptr.numel() - 1, 3, 3)
+        and torch.is_tensor(pbc)
+        and pbc.dtype == torch.bool
+        and pbc.device == cell.device
+        and pbc.shape == (ptr.numel() - 1, 3)
+    ):
+        raise ValueError(msg + "; expected boolean pbc[G,3] and lattice[G,3,3].")
+    valid = _valid_periodic_les_cell(pbc, cell.detach().to(torch.float64))
+    if sample or cell.device.type == "cpu":
+        if not bool(valid):
+            raise ValueError(msg)
+    else:
+        torch._assert_async(valid, msg)
 
 
 def synthetic_graph_sample(model: CompileTensorModel) -> Dict[str, torch.Tensor]:
@@ -504,14 +685,6 @@ def ensure_sample_inputs(
     model: CompileTensorModel,
 ) -> None:
     device = next(model.parameters()).device
-    dtype = torch.float64
-    for key, value in list(sample_data.items()):
-        if not isinstance(value, torch.Tensor):
-            continue
-        if torch.is_floating_point(value):
-            sample_data[key] = value.to(device=device, dtype=dtype)
-        else:
-            sample_data[key] = value.to(device=device)
     cutoff = (
         model.readout_fn.pair_representation.cutoff
         if "direct_hessian_edge_pairs" in input_keys
@@ -523,7 +696,8 @@ def ensure_sample_inputs(
             input_keys,
             model.get_fidelity_idx(),
             cutoff,
-            atomic_numbers=model.get_atomic_numbers(),
+            elements=TorchElement(model.get_atomic_numbers(), device=device),
+            device=device,
         )
     )
     missing = [key for key in input_keys if key not in sample_data]
@@ -587,7 +761,9 @@ def size_oblivious_export():
     return nullcontext()
 
 
-def lammps_dynamic_shapes(*, local_owners: bool = False) -> tuple[Dict[int, object], ...]:
+def lammps_dynamic_shapes(
+    *, local_owners: bool = False
+) -> tuple[Dict[int, object], ...]:
     num_edges = torch.export.Dim("num_edges", min=2)
     num_total = torch.export.Dim("num_total", min=2)
     num_local = torch.export.Dim("num_local", min=1)
@@ -669,17 +845,44 @@ def canonicalize_inputs(
     fidelity_idx: int,
     direct_hessian_cutoff=None,
     *,
-    atomic_numbers=None,
+    elements: TorchElement | None = None,
+    device: torch.device | None = None,
 ) -> Dict[str, torch.Tensor]:
     data = as_tensor_dict(data)
-    if "node_type" not in data and atomic_numbers is not None:
-        data["node_type"] = TorchElement(atomic_numbers).z2idx(data["atomic_numbers"])
     for key in input_keys:
         value = data.get(key)
-        if isinstance(value, torch.Tensor) and value.is_floating_point():
-            data[key] = value.to(torch.float64)
-    if "edge_shifts" in data:
-        data["edge_shifts"] = data["edge_shifts"].to(torch.int64)
+        if not torch.is_tensor(value):
+            continue
+        dtype = value.dtype
+        if key == "edge_shifts":
+            dtype = torch.int64
+        elif value.is_floating_point():
+            dtype = torch.float64
+        if dtype != value.dtype or device is not None:
+            data[key] = value.to(device=device, dtype=dtype)
+    if elements is not None:
+        if "node_type" in data:
+            indices = data["node_type"]
+            if indices.ndim != 1 or indices.dtype != torch.int64:
+                raise TypeError("node_type must be a one-dimensional int64 tensor.")
+            torch._assert_async(
+                ((indices >= 0) & (indices < len(elements))).all(),
+                "node_type is outside the model element table.",
+            )
+        else:
+            numbers = data["atomic_numbers"]
+            if numbers.ndim != 1 or numbers.dtype not in (torch.int32, torch.int64):
+                raise TypeError(
+                    "atomic_numbers must be a one-dimensional integer tensor."
+                )
+            if device is not None:
+                numbers = numbers.to(device=device)
+            indices = elements.lookup_table.index_select(0, numbers)
+            torch._assert_async(
+                (indices >= 0).all(),
+                "The structure contains an element not supported by this model.",
+            )
+            data["node_type"] = indices
     if "edge_pair_rows" in input_keys:
         from ..utils import prepare_edge_pairs
 
@@ -695,10 +898,11 @@ def canonicalize_inputs(
             dtype=torch.int64,
             device=data["ptr"].device,
         )
-    return {
-        key: value.contiguous() if torch.is_tensor(value) else value
-        for key, value in data.items()
-    }
+    for key in input_keys:
+        value = data.get(key)
+        if torch.is_tensor(value):
+            data[key] = value.resolve_conj().resolve_neg().contiguous()
+    return data
 
 
 def as_tensor_dict(data) -> Dict[str, torch.Tensor]:
@@ -716,6 +920,23 @@ def normalize_pt2_path(output_path: Union[str, Path]) -> str:
     if not output_path.endswith(".pt2"):
         output_path += ".pt2"
     return output_path
+
+
+def compile_and_package(exported, *, package_path, inductor_configs):
+    from torch._inductor import aoti_compile_and_package, config
+
+    options = dict(inductor_configs or {})
+    if hasattr(config.aot_inductor, "model_name_for_generated_files") and any(
+        isinstance(value := node.meta.get("val"), torch.Tensor) and value.is_cuda
+        for node in exported.graph.nodes
+        if node.op == "placeholder"
+    ):
+        options.setdefault(
+            "aot_inductor.model_name_for_generated_files", f"tace_{uuid4().hex}"
+        )
+    return aoti_compile_and_package(
+        exported, package_path=package_path, inductor_configs=options
+    )
 
 
 def custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
@@ -738,22 +959,10 @@ def custom_ops_libs_from_model(model: torch.nn.Module) -> Set[str]:
                 if isinstance(node.target, torch._ops.OpOverload):
                     if node.target.namespace == "eqx":
                         libs.add("equivariantx")
-                    elif node.target.namespace == "eqx_oam_l":
-                        libs.add("equivariantx.models.tace.tace_oam_l.radial")
-                    elif node.target.namespace == "eqx_oam_l_geometry":
-                        libs.add("equivariantx.models.tace.tace_oam_l.angular")
-                    elif node.target.namespace == "eqx_oam_l_product":
-                        libs.add("equivariantx.models.tace.tace_oam_l.product")
-                    elif node.target.namespace == "eqx_oam_l_conv":
-                        libs.add("equivariantx.models.tace.tace_oam_l.convolution")
-                    elif node.target.namespace == "eqx_oam_l_tangent":
-                        libs.add("equivariantx.models.tace.tace_oam_l.tangent")
-                    elif node.target.namespace == "eqx_tace_7m":
-                        libs.add("equivariantx.models.tace.tace_oam_7m.tangent")
-                    elif node.target.namespace == "eqx_tece_rra":
-                        libs.add("equivariantx.models.tace.tece_oam_rra.force")
-                    elif node.target.namespace == "eqx_oam_l_element":
-                        libs.add("equivariantx.models.tace.tace_oam_l.element_grouped")
+                    elif node.target.namespace.startswith("eqx_"):
+                        from equivariantx_foundation.registry import registration_module
+
+                        libs.add(registration_module(node.target))
     return libs
 
 

@@ -71,6 +71,33 @@ def test_o2_cgtp_stream_methods(method, monkeypatch, double_precision):
         torch.testing.assert_close(value, target, atol=2e-7, rtol=2e-8)
 
 
+def test_cartesian_stream_threshold_with_symbolic_edges():
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv, constrain_range
+
+    from tace.models.cartesian.local import use_streamed_convolution
+
+    shapes = ShapeEnv()
+    with FakeTensorMode(shape_env=shapes):
+        x = torch.empty(1, 64, device="cuda:0", dtype=torch.float32)
+        plan = object()
+        large = shapes.create_unbacked_symint()
+        constrain_range(large, min=8192)
+        for count, streamed in (
+            (8191, False),
+            (8192, True),
+            (shapes.create_unbacked_symint(), False),
+            (large, True),
+        ):
+            edges = torch.empty(2, count, device=x.device, dtype=torch.long)
+            constraints = len(shapes.guards), shapes.num_deferred_runtime_asserts
+            assert use_streamed_convolution(plan, x, edges) is streamed
+            assert constraints == (
+                len(shapes.guards),
+                shapes.num_deferred_runtime_asserts,
+            )
+
+
 @pytest.mark.parametrize("magnetic", [False, True])
 def test_cartesian_uv_reciprocal_weights(magnetic, double_precision):
     from tace.models.cartesian.local import RotationMatrices, UvConvolution
@@ -406,7 +433,7 @@ def test_luna_scatter(dtype):
 def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from equivariantx.models.tace.tece_oam_rra.interaction import stream
+    from equivariantx_foundation.models.tace.tece_oam_rra.interaction import stream
     from tace.models.spherical.tece_oam_rra import Convolution
 
     monkeypatch.setenv("TACE_USE_EQX", "1")
@@ -482,11 +509,15 @@ def test_tece_packed_frames(monkeypatch, mmax, edges, double_precision):
 
 
 def test_rra_order_linear_preserves_parameters_and_derivatives(double_precision):
-    from equivariantx.models.tace.tece_oam_rra.model import OrderLinear
+    from equivariantx_foundation.models.tace.tece_oam_rra.model import OrderLinear
+    from tace.lightning.optimizer import get_parameter_roles
 
-    ref = o2.Linear("3x0e+4x1m+2x2m", "2x0e+3x1m+4x2m", biases=True, backend="torch").double()
+    ref = o2.Linear(
+        "3x0e+4x1m+2x2m", "2x0e+3x1m+4x2m", biases=True, backend="torch"
+    ).double()
     lowered = OrderLinear(ref)
     assert lowered.weight is ref.weight and lowered.bias is ref.bias
+    assert get_parameter_roles(lowered) == get_parameter_roles(ref)
     x = torch.randn(7, ref.irreps_in.dim, dtype=torch.float64, requires_grad=True)
     variables = (x, ref.weight, ref.bias)
     projected = []
@@ -501,11 +532,11 @@ def test_rra_order_linear_preserves_parameters_and_derivatives(double_precision)
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_rra_indexed_frame_derivatives():
-    from equivariantx.models.tace.tece_oam_rra.model import (
+    from equivariantx.utils.outputs import EDGE, NODE
+    from equivariantx_foundation.models.tace.tece_oam_rra.model import (
         IndexedFrame,
         rotation_layout,
     )
-    from equivariantx.utils.outputs import EDGE, NODE
 
     rng = torch.Generator(device="cuda").manual_seed(972)
 
@@ -551,7 +582,7 @@ def test_rra_indexed_frame_derivatives():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_rra_edge_expansion_derivatives():
-    from equivariantx.models.tace.tece_oam_rra.model import edge_expansion
+    from equivariantx_foundation.models.tace.tece_oam_rra.model import edge_expansion
 
     channels = 4
     rows = (
@@ -727,14 +758,14 @@ def test_tece_state_dict(device, mmax, ece, gate_m0, double_precision):
 def test_tece_streaming_derivatives(monkeypatch, device, edges, use_bias):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    from equivariantx.models.tace.tece_oam_rra.interaction import stream
+    from equivariantx_foundation.models.tace.tece_oam_rra.interaction import stream
     from tace.models.spherical.tece_oam_rra import Convolution
 
     if edges == 1025 and device == "cuda":
         from functools import partial
 
         import equivariantx.ops.common.cuda.execution as convolution_execution
-        import equivariantx.ops.common.cuda.models.tace.attention as execution
+        import equivariantx_foundation.ops.cuda.tece_attention as execution
 
         monkeypatch.setattr(execution, "BACKWARD_TILE_SIZE", 256)
         monkeypatch.setattr(
@@ -881,7 +912,7 @@ def test_tece_native_variants(monkeypatch, ece, gate_m0, mmax, dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     import equivariantx.ops.common.recompute as recompute
-    from equivariantx.models.tace.tece_oam_rra.interaction import stream
+    from equivariantx_foundation.models.tace.tece_oam_rra.interaction import stream
     from tace.models.mlp import get_scaled_activation
     from tace.models.spherical.tece_oam_rra import Convolution
 
@@ -1497,9 +1528,7 @@ def test_magnetic_degree_independent_of_node_degree(
         assert torch.isfinite(output[name]).all()
     sum(output[name].square().sum() for name in config["target_property"]).backward()
     gradients = [
-        parameter.grad
-        for parameter in model.parameters()
-        if parameter.grad is not None
+        parameter.grad for parameter in model.parameters() if parameter.grad is not None
     ]
     assert gradients and all(torch.isfinite(gradient).all() for gradient in gradients)
 
@@ -1752,6 +1781,142 @@ def test_uu_o2_scatter_uses_only_source_features(monkeypatch):
     gradients = torch.autograd.grad(output.square().sum(), node_features)[0]
     assert gradients[0].abs().sum() > 0
     torch.testing.assert_close(gradients[1:], torch.zeros_like(gradients[1:]))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("method", ["native", "vectors", "packed"])
+def test_uu_o2_rank_local_receiver_rows(monkeypatch, double_precision, device, method):
+    from tace.models.spherical.inter import UuO2Interaction
+
+    _check_local_receiver_rows(monkeypatch, device, method, UuO2Interaction)
+
+
+@pytest.mark.parametrize(
+    "device,method",
+    [("cpu", "native"), ("cuda", "native"), ("cuda", "dense"), ("cuda", "packed")],
+)
+def test_uv_o2_rank_local_receiver_rows(monkeypatch, double_precision, device, method):
+    from tace.models.spherical.inter import UvO2Interaction
+
+    _check_local_receiver_rows(monkeypatch, device, method, UvO2Interaction)
+
+
+def _check_local_receiver_rows(monkeypatch, device, method, interaction):
+    """Only shrink destinations; keep ghost senders, rotations and their force VJPs."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    layer = interaction(
+        layer=1,
+        num_layers=3,
+        num_elements=2,
+        avg_num_neighbors=3,
+        mmax=1,
+        Lmax=1,
+        lmax=1,
+        correlation=[1] * 3,
+        num_channel=2,
+        edge_feats_channel=4,
+        num_radial_basis=4,
+        target_irreps=o3.Irreps("0e"),
+        radial_mlp=[4],
+        radial_bias=True,
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        scalar_act="silu",
+        tensor_act="sigmoid",
+        edge_ace_hidden=None,
+        edge_nonlinear="gate",
+    ).to(device)
+    basis = o2.WignerD(1, 1).to(device)
+    # Receiver 3 is isolated, senders 4 and 6 are ghosts, and sender 6 repeats.
+    edges = torch.tensor([[6, 4, 6, 1, 0, 1], [1, 0, 1, 2, 2, 0]], device=device)
+    nall = 7
+    x = torch.randn(nall, layer.irreps_in.dim, device=device, requires_grad=True)
+    pos = torch.randn(nall, 3, device=device, requires_grad=True)
+    radial = torch.randn(edges.size(1), 4, device=device, requires_grad=True)
+    variables = (x, pos, radial, *layer.edge_info.parameters())
+
+    def message(index, nlocal, mode, element=None):
+        monkeypatch.setenv("TACE_USE_EQX", "0" if mode == "native" else "1")
+        v = pos[index[0]] - pos[index[1]]
+        cutoff = (-v.square().sum(-1, keepdim=True) / 7).exp()
+        graph = types.SimpleNamespace(
+            edge_vector=None if mode == "packed" else v,
+            lmp_data=None if nlocal is None else object(),
+            lmp_natoms=(nlocal, nall - nlocal) if nlocal is not None else None,
+        )
+        if mode in ("native", "dense"):
+            w, inv = basis(v)
+        elif mode == "packed":
+            w, inv = basis.forward_packed(v), None
+        else:
+            w, inv = None, None
+        return layer._compute_messages(
+            x,
+            None,
+            None,
+            radial[: index.size(1)],
+            None,
+            index,
+            cutoff,
+            w,
+            inv,
+            graph=graph,
+            element=element,
+        )
+
+    for element in (
+        None,
+        (torch.randn(2, layer.rejector.weight_numel, device=device), edges % 2),
+    ):
+        expected = message(edges, None, "native", element)[:4]
+        compact = message(edges, 4, method, element)
+        torch.testing.assert_close(compact, expected, atol=1e-9, rtol=1e-9)
+        assert (
+            compact.untyped_storage().nbytes()
+            == compact.numel() * compact.element_size()
+        )
+        assert compact[3].count_nonzero() == 0
+        first = [
+            torch.autograd.grad(y.square().sum(), variables, create_graph=True)
+            for y in (compact, expected)
+        ]
+        torch.testing.assert_close(*first, atol=3e-8, rtol=3e-8)
+        assert first[0][0][6].abs().sum() > 0  # untouched ghost source AD
+        assert first[0][1][4:].abs().sum() > 0  # ghost-position force
+        second = [torch.autograd.grad(g[1].square().sum(), variables) for g in first]
+        torch.testing.assert_close(*second, atol=3e-7, rtol=3e-7)
+
+    for nlocal in (0, 4):
+        compact = message(edges[:, :0], nlocal, method)
+        expected = message(edges[:, :0], None, "native")[:nlocal]
+        torch.testing.assert_close(compact, expected)
+        for y in (compact, expected):
+            (force,) = torch.autograd.grad(
+                y.sum(), pos, allow_unused=True, materialize_grads=True
+            )
+            torch.testing.assert_close(force, torch.zeros_like(pos))
+
+    layer.rejector.supports_receiver_count = False
+    assert message(edges, 4, method).shape[0] == nall
+    if device == "cpu" and isinstance(layer.rejector, UvO2TensorProductConv):
+        layer.rejector.supports_receiver_count = True
+        original = layer._apply_rejector
+
+        # Custom/magnetic hooks need not accept num_nodes.
+        def original_signature(*args, radial_network, edge_pairs):
+            return original(*args, radial_network=radial_network, edge_pairs=edge_pairs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(layer, "_apply_rejector", original_signature)
+            assert message(edges, 4, method).shape[0] == nall
+
+        class ExternalConv(UvO2TensorProductConv):
+            pass
+
+        # Inheriting a provider does not opt its replacement into a new ABI.
+        layer.rejector.__class__ = ExternalConv
+        assert message(edges, 4, method).shape[0] == nall
 
 
 @pytest.mark.parametrize("linear_type", ["uv", "uu"])

@@ -44,6 +44,8 @@ class TorchElement:
     ----------
     zs : iterable of int
         Atomic numbers, sorted before assigning indices.
+    device : torch.device or str, optional
+        Device of the lookup table.
 
     Examples
     --------
@@ -52,14 +54,13 @@ class TorchElement:
     [1, 0]
     """
 
-    def __init__(self, zs: Iterable[int]):
-
+    def __init__(self, zs: Iterable[int], *, device=None):
         self.zs = sorted(zs)
         self.num_elements = len(self.zs)
-
-        self.lookup_table = torch.full((max(self.zs) + 1,), -1, dtype=torch.int64)
+        table = [-1] * (max(self.zs) + 1)
         for idx, z in enumerate(self.zs):
-            self.lookup_table[z] = idx
+            table[z] = idx
+        self.lookup_table = torch.tensor(table, dtype=torch.int64, device=device)
 
     def z2idx(self, z: Tensor) -> Tensor:
         return self.lookup_table.to(z.device)[z]

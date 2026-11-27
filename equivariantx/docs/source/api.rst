@@ -20,9 +20,3 @@ API Reference
    api/nn
    api/convolutions
    api/mbe
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Model adapters
-
-   api/models

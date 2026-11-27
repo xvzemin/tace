@@ -3,15 +3,18 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import sys
 from pathlib import Path
 
 import torch
 from ase import units
 from ase.calculators.calculator import Calculator, all_changes
 from ase.calculators.mixing import SumCalculator
-from torch_geometric.data import Batch
+from torch.nn.modules import module as module_hooks
+from torch_geometric.data import Batch, Data
 
 from tace.dataset.graph import from_record
+from tace.dataset.neighbour_list import VerletNeighborList
 from tace.dataset.quantity import (
     KEYS,
     PROPERTIES,
@@ -20,7 +23,78 @@ from tace.dataset.quantity import (
 )
 from tace.dataset.records import record_from_atoms
 from tace.lightning import load_tace
+from tace.models.adapter import TensorModel
 from tace.utils.env import DEVICE, enable_acceleration
+
+
+def _single_model_input(model, graph, device):
+    """Stage one stock graph without building PyG's unbatching metadata."""
+    # The two native entry points both consume dict(data.items()). Looking
+    # up the loaded AOTI type avoids importing the compiler for eager users.
+    aoti = sys.modules.get("tace.models.compile.aot")
+    if (
+        type(graph) is Data
+        and not {"__cat_dim__", "__inc__"}.intersection(vars(graph))
+        and type(model) in (TensorModel, getattr(aoti, "AOTICompiledTensorModel", None))
+        and device.type in ("cpu", "cuda")
+        and not {"forward", "prepare_property_data"}.intersection(vars(model))
+        and model._compiled_call_impl is None
+        and not (
+            model._forward_hooks
+            or model._forward_pre_hooks
+            or model._backward_hooks
+            or model._backward_pre_hooks
+            or module_hooks._global_forward_hooks
+            or module_hooks._global_forward_pre_hooks
+            or module_hooks._global_backward_hooks
+            or module_hooks._global_backward_pre_hooks
+        )
+    ):
+        fields = dict(graph.items())
+        n = fields.get("num_nodes")
+        if type(n) is int and all(
+            k == "num_nodes"
+            or (
+                type(t) is torch.Tensor
+                and t.layout == torch.strided
+                and not t.is_nested
+            )
+            for k, t in fields.items()
+        ):
+            for k, t in fields.items():
+                if k != "num_nodes":
+                    # Singleton PyG cat adds a leading dimension to scalars
+                    # and creates independent, contiguous storage even on CPU.
+                    fields[k] = (t[None] if t.ndim == 0 else t).to(
+                        device=device,
+                        non_blocking=True,
+                        copy=True,
+                        memory_format=torch.contiguous_format,
+                    )
+            fields["batch"] = torch.zeros(n, dtype=torch.long, device=device)
+            fields["ptr"] = torch.tensor([0, n], dtype=torch.long).to(
+                device, non_blocking=True
+            )
+            return fields
+    # Custom models and hooks can inspect num_graphs or call to_data_list().
+    return Batch.from_data_list([graph]).to(device)
+
+
+def _host_results(outputs, properties):
+    """Copy the calculator's requested tensors to CPU before exposing them to ASE."""
+    values = {key: outputs[key].detach() for key in properties}
+    if len(values) > 1:
+        device = next(iter(values.values())).device
+        if device.type == "cuda" and all(t.device == device for t in values.values()):
+            last = max(values, key=lambda key: values[key].numel())
+            for key, t in values.items():
+                if key != last:
+                    # Only scalar/small tensor copies may allocate pinned host memory.
+                    values[key] = t.to("cpu", non_blocking=t.numel() <= 9)
+            # This blocking copy fences earlier transfers on the same CUDA stream.
+            values[last] = values[last].cpu()
+            return values
+    return {key: t.cpu() for key, t in values.items()}
 
 
 class TACEAseCalc(Calculator):
@@ -42,6 +116,10 @@ class TACEAseCalc(Calculator):
         Model outputs to evaluate. Defaults to the model's target properties.
     neighborlist_backend : str, optional
         Neighbor-list backend. Defaults to "matscipy".
+    neighbor_skin : float, optional
+        Extra radius in angstroms for reusing neighbors across MD steps.
+        Zero rebuilds the neighbor list on every call. Per-edge properties
+        always use the original neighbor ordering.
     enable_oeq, enable_cue, enable_eqt, enable_eqx, enable_luna : bool, optional
         Enable the corresponding acceleration backend when loading the model.
     enable_compile : bool, optional
@@ -65,6 +143,7 @@ class TACEAseCalc(Calculator):
         fidelity_idx: int | None = None,
         target_property: list[str] | None = None,
         neighborlist_backend: str = "matscipy",
+        neighbor_skin: float = 0.0,
         enable_oeq: bool = False,
         enable_cue: bool = False,
         enable_eqt: bool = False,
@@ -103,6 +182,9 @@ class TACEAseCalc(Calculator):
         self.cutoff = model.get_cutoff()
         self.element = model.get_torch_element()
         self.neighborlist_backend = neighborlist_backend
+        self.neighbors = (
+            VerletNeighborList(neighbor_skin) if neighbor_skin != 0 else None
+        )
         self.implemented_properties = []
         for p in self.target_property:
             ase_name = PROPERTIES[p]["ase_name"]
@@ -134,11 +216,21 @@ class TACEAseCalc(Calculator):
             keyspec=self.keySpecification,
             training=False,
             neighborlist_backend=self.neighborlist_backend,
+            neighborhood=(
+                self.neighbors
+                if self.neighbors is not None
+                and not any(
+                    PROPERTIES[k]["scope"] == "per-edge"
+                    for k in (*self.target_property, *self.embedding_property)
+                )
+                else None
+            ),
         )
-        batch = Batch.from_data_list([graph]).to(self.device)
+        batch = _single_model_input(self.model, graph, self.device)
         with torch.enable_grad():
             outs = self.model(batch)
         self.results = {}
+        values = _host_results(outs, self.target_property)
         for p in self.target_property:
             p_rank = PROPERTIES[p]["rank"]
             p_scope = PROPERTIES[p]["scope"]
@@ -147,15 +239,15 @@ class TACEAseCalc(Calculator):
             if p_scope == "per-system":
                 if p_rank == 0:
                     if p == "energy":
-                        energy = outs[p].detach().cpu().item()
+                        energy = values[p].item()
                         self.results["energy"] = energy
                         self.results["free_energy"] = self.results["energy"]
                     else:
-                        self.results[save_name] = outs[p].detach().cpu().item()
+                        self.results[save_name] = values[p].item()
                 else:
-                    self.results[save_name] = outs[p].detach().cpu().numpy().squeeze(0)
+                    self.results[save_name] = values[p].numpy().squeeze(0)
             elif p_scope in {"per-atom", "per-edge", "per-pair"}:
-                self.results[save_name] = outs[p].detach().cpu().numpy()
+                self.results[save_name] = values[p].numpy()
             else:
                 raise ValueError(f"Unsupported property scope: {p_scope}")
 

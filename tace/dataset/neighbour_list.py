@@ -370,6 +370,8 @@ def get_neighborhood(
             cutoff=cutoff,
         )
     elif backend == "vesin":
+        if not np.isfinite(neighbor_cell).all() or np.linalg.det(neighbor_cell) == 0:
+            raise ValueError("Vesin requires a nonsingular neighbor-search cell.")
         # https://github.com/Luthaf/vesin/blob/main/python/vesin/vesin/_ase.py
         edges = vesin_nl(cutoff=cutoff, full_list=True).compute(
             points=positions,
@@ -419,6 +421,93 @@ def get_neighborhood(
     edge_index = np.stack((source, target))
 
     return edge_index, edge_shifts, pbc, lattice
+
+
+class VerletNeighborList:
+    """Reuse candidate image pairs for successive geometries.
+
+    Parameters
+    ----------
+    skin : float
+        Extra search radius in angstroms. The returned edges use the physical
+        cutoff, not the search radius.
+    """
+
+    def __init__(self, skin: float):
+        if not np.isfinite(skin) or skin <= 0:
+            raise ValueError("Neighbor skin must be finite and positive.")
+        self.skin = float(skin)
+        self.reference = None
+
+    def __call__(self, *, positions, cutoff, pbc, lattice, max_neighbors, backend):
+        positions = np.asarray(positions, dtype=np.float64)
+        if np.any(np.asarray(pbc) & ~np.any(lattice, axis=1)):
+            # Search backends complete missing axes. Their image offsets cannot
+            # be reconstructed from a missing physical periodic vector.
+            return get_neighborhood(
+                positions, cutoff, pbc, lattice, max_neighbors, backend
+            )
+        position_scale = max(positions.max(initial=0), -positions.min(initial=0))
+        roundoff = 128 * np.finfo(float).eps
+        settings = (cutoff, self.skin, tuple(pbc), max_neighbors, backend)
+        rebuild = (
+            self.reference is None
+            or self.settings != settings
+            or self.reference.shape != positions.shape
+        )
+        if not rebuild:
+            displacement = positions - self.reference
+            span = self.max_shift @ np.abs(lattice)
+            margin = self.skin - roundoff * (
+                position_scale + span.max() + cutoff + self.skin
+            )
+            if not np.array_equal(self.cell, lattice):
+                if not all(pbc) or self.inverse_cell is None:
+                    rebuild = True
+                else:
+                    # v_new = v_ref @ (I + strain) + delta_j - delta_i for
+                    # every lattice image, including those outside the list.
+                    strain = self.inverse_cell @ (lattice - self.cell)
+                    margin -= (cutoff + self.skin) * np.linalg.norm(strain)
+                    displacement -= self.reference @ strain
+            if not rebuild:
+                rebuild = margin <= 0 or np.any(
+                    np.einsum("ij,ij->i", displacement, displacement)
+                    >= (0.5 * margin) ** 2
+                )
+        if rebuild:
+            edges, shifts, _, cell = get_neighborhood(
+                positions, cutoff + self.skin, pbc, lattice, max_neighbors, backend
+            )
+            self.edges, self.shifts = edges, shifts
+            self.max_shift = np.abs(shifts).max(axis=0, initial=0)
+            self.offsets = shifts @ cell
+            self.reference, self.settings, self.cell = positions.copy(), settings, cell
+            self.inverse_cell = (
+                np.linalg.inv(cell) if all(pbc) and np.linalg.cond(cell) < 1e6 else None
+            )
+
+        source, target = self.edges
+        vectors = positions[target] - positions[source]
+        vectors += (
+            self.offsets
+            if np.array_equal(self.cell, lattice)
+            else self.shifts @ lattice
+        )
+        squared = np.einsum("ij,ij->i", vectors, vectors)
+        cutoff2 = cutoff * cutoff
+        # Exact-shell inclusion and floating-point tie handling belong to the backend.
+        error = roundoff * (
+            position_scale + (self.max_shift @ np.abs(lattice)).max() + cutoff
+        )
+        if error >= self.skin or np.any(
+            np.abs(squared - cutoff2) <= error * (2 * cutoff + error)
+        ):
+            return get_neighborhood(
+                positions, cutoff, pbc, lattice, max_neighbors, backend
+            )
+        inside = squared < cutoff2
+        return self.edges[:, inside], self.shifts[inside], tuple(pbc), lattice
 
 
 def get_neighborhood_for_calculator(

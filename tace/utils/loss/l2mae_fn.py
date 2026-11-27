@@ -43,11 +43,20 @@ def l2mae_forces(
     pred: Dict[str, torch.Tensor],
     label: Dict[str, torch.Tensor],
     element_weights: Optional[List[float]] = None,
+    padded: bool = False,
 ) -> torch.Tensor:
+    """Mean force-vector error; for trailing padded atoms use the real count in ``ptr[-1]``."""
     key = "forces"
     batch = label["batch"]
     total_weight = (label["entropy"] * label["forces_weight"])[batch]
     total_weight = apply_element_weights(total_weight, label, element_weights)
+    if padded:
+        count = label["ptr"][-1]
+        valid = torch.arange(pred[key].shape[0], device=pred[key].device) < count
+        error = torch.where(valid[:, None], pred[key] - label[key], 1)
+        return (
+            torch.linalg.vector_norm(error, dim=-1) * total_weight * valid
+        ).sum() / count
     return torch.mean(
         torch.linalg.vector_norm(pred[key] - label[key], ord=2, dim=-1) * total_weight
     )

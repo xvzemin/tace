@@ -33,6 +33,7 @@ from tace.models.spherical.readout import EdgeReadOut
 from tace.models.spherical.representation import PairRepresentation
 from tace.models.spherical.scatter_norm import (
     AvgNumNeighborsScatterNorm,
+    CutoffScatterNorm,
     DensityScatterNorm,
     IdentityScatterNorm,
     NoCutoffDensityScatterNorm,
@@ -44,6 +45,118 @@ from tace.utils.precision import torch_default_dtype
 DTYPE = torch.float64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 pytestmark = pytest.mark.usefixtures("double_precision")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_directed_pair_product_eqx(monkeypatch, device):
+    """One edge per periodic image, with independent directions and mixed gradients."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    monkeypatch.setenv("TACE_USE_OEQ", "0")
+    monkeypatch.setitem(EQX_KERNELS, "conv", True)
+    radial = dict(DEFAULT_MODEL_CONFIG["radial_basis"], hidden=[8], bias=True)
+    args = (
+        "4x0e+4x1o+4x2e",
+        o3.Irreps.spherical_harmonics(2),
+        "4x0e+4x1e+4x2e",
+        4,
+        [1, 8],
+        4.0,
+        radial,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    reference = PairRepresentation(*args).double().to(device)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    scheduled = PairRepresentation(*args).double().to(device)
+    scheduled.load_state_dict(reference.state_dict(), strict=True)
+    assert tuple(dict(reference.named_parameters())) == tuple(
+        dict(scheduled.named_parameters())
+    )
+    x = torch.randn(3, reference.irreps_in.dim, dtype=torch.float64, device=device)
+    positions = x.new_tensor([[0.2, 0.1, 0.0], [1.3, 0.4, 0.2], [0.1, 1.5, 0.2]])
+    cell = x.new_tensor([[[2.9, 0.1, 0.0], [0.2, 3.0, 0.3], [0.0, 0.1, 3.0]]])
+    edges = torch.tensor([[1, 0, 2, 1, 0, 2], [0, 1, 0, 0, 1, 1]], device=device)
+    shifts = x.new_tensor(
+        [[1, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [-1, 0, 0], [0, 0, 0]]
+    )
+    types = torch.tensor([0, 1, 1], device=device)
+    probe = x.new_empty(edges.size(1), reference.irreps_out.dim).normal_()
+    direction = torch.randn_like(positions)
+
+    def values(rep):
+        feat, pos, box = [v.detach().requires_grad_() for v in (x, positions, cell)]
+        y = rep(feat, types, pos, edges, shifts, box, types * 0)
+        inputs = (feat, pos, box, *rep.parameters())
+        grad = torch.autograd.grad((y * probe).sum(), inputs, create_graph=True)
+        mixed = torch.autograd.grad(
+            (grad[1] * direction).sum(), inputs, allow_unused=True
+        )
+        return (y, *grad, *mixed)
+
+    rejector = scheduled.interactions[0].rejector
+    hits = []
+    hook = rejector.contraction.register_forward_hook(lambda *args: hits.append(1))
+    expected, actual = values(reference), values(scheduled)
+    assert hits == ([1] if device == "cuda" else [])
+    for a, b in zip(expected, actual, strict=True):
+        if a is None or b is None:
+            assert a is b
+        else:
+            torch.testing.assert_close(a, b, atol=2e-8, rtol=2e-7)
+    # The same contraction handles a zero-length edge axis without specializing
+    # a size branch while exporting a dynamic Hessian graph.
+    for rep in (reference, scheduled):
+        y = rep(x, types, positions, edges[:, :0], shifts[:0], cell, types * 0)
+        assert y.shape == (0, rep.irreps_out.dim)
+    assert hits == ([1, 1] if device == "cuda" else [])
+    hook.remove()
+    if device == "cuda":
+        three = torch.randn(3, rejector.irreps_in1.dim, device=device)
+        sh = three.new_empty(3, rejector.irreps_in2.dim).normal_()
+        weights = three.new_empty(3, rejector.weight_numel).normal_()
+        rows = torch.export.Dim("directed_edges", min=2, max=16)
+        captured = torch.export.export(
+            rejector,
+            (three, sh, weights),
+            dynamic_shapes=({0: rows},) * 3,
+            strict=False,
+        )
+        assert torch.ops.eqx.o3_contraction.default in {
+            node.target for node in captured.graph.nodes
+        }
+        other = tuple(v.repeat(2, 1) for v in (three, sh, weights))
+        torch.testing.assert_close(
+            captured.module()(*other), reference.interactions[0].rejector(*other)
+        )
+
+
+@pytest.mark.parametrize("dim", [1, 3, 5])
+def test_multihead_readout_mask(dim):
+    heads, channels = 3, 4
+    ids = torch.tensor([0, -1, 0, 1], device=DEVICE)
+    x = torch.randn(heads * channels * dim, len(ids), device=DEVICE).T.requires_grad_()
+    reference = torch.stack(
+        [
+            torch.cat(
+                [
+                    block if h == int(i) % heads else 0 * block
+                    for h, block in enumerate(row.chunk(heads))
+                ]
+            )
+            for row, i in zip(x, ids)
+        ]
+    )
+    actual = readout.mh_mask(x, ids, heads)
+    torch.testing.assert_close(actual, reference)
+    for derivative in range(2):
+        (actual,) = torch.autograd.grad(
+            actual.square().sum(), x, create_graph=not derivative
+        )
+        (reference,) = torch.autograd.grad(
+            reference.square().sum(), x, create_graph=not derivative
+        )
+        torch.testing.assert_close(actual, reference)
+    assert readout.mh_mask(x[:0], ids[:0], heads).shape == x[:0].shape
 
 
 def test_element_edge_path_lookup():
@@ -266,6 +379,7 @@ def test_model_config_defaults():
     )
     assert config["mlp_type"] == "mlp_v1"
     assert config["max_neighbors"] is None
+    assert config["fidelity"] == [DEFAULT_MODEL_CONFIG["fidelity"]]
     assert config["radial_basis"]["apply_cutoff"] is True
     components = [0, "1o", 2]
     deeper = check_model_config(
@@ -943,6 +1057,53 @@ def test_cutoff_scatter_norm_force_training(
         results.append((out["energy"], out["forces"], gradient))
     for actual, expected in zip(results[1], results[0]):
         torch.testing.assert_close(actual, expected, rtol=2e-8, atol=2e-10)
+
+
+@pytest.mark.parametrize("kind", ["cutoff", "density", "no_cutoff_density"])
+def test_rank_local_scatter_normalization(small_model, monkeypatch, kind):
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    model = small_model(kind, num_layers=1)
+    model.lmp = True
+    rep = model.readout_fn.representation
+    norm = rep.interactions[0].scatter_norm
+    if isinstance(norm, DensityScatterNorm):
+        with torch.no_grad():
+            norm.beta.fill_(0.3)
+    index = torch.tensor([[3, 4, 0, 4], [1, 0, 1, 0]], device=DEVICE)
+    data = dict(
+        node_type=index.new_zeros(5),
+        batch=index.new_zeros(3),
+        edge_index=index,
+        edge_vector=torch.randn(4, 3, device=DEVICE),
+        natoms=(3, 2),
+        lmp_data=object(),
+    )
+    graph = model.prepare_graph(data)
+    fn = norm.edge_weights if kind == "cutoff" else norm.forward
+
+    def evaluate(padded):
+        def observed(*args, **kwargs):
+            assert (
+                args[-1] == 3
+            )  # includes the isolated owner, not the two send-only ghosts
+            return fn(*args[:-1], 5 if padded else args[-1], **kwargs)
+
+        context = (
+            patch.object(CutoffScatterNorm, "edge_weights", staticmethod(observed))
+            if kind == "cutoff"
+            else patch.object(norm, "forward", observed)
+        )
+        with context:
+            y = rep(data, graph)["descriptors"][-1]
+            (first,) = torch.autograd.grad(
+                y.square().sum(), graph.edge_vector, create_graph=True
+            )
+            (second,) = torch.autograd.grad(
+                first.square().sum(), graph.edge_vector, retain_graph=True
+            )
+        return y, first, second
+
+    torch.testing.assert_close(evaluate(False), evaluate(True))
 
 
 def test_final_norm_rejects_const_norm():

@@ -9,8 +9,8 @@ from typing import Optional
 import torch
 from e3nn import o3
 
-from equivariantx import conv as eqx_conv
 from equivariantx import o2
+from equivariantx import conv as eqx_conv
 from tace.utils.env import acceleration_enabled
 from tace.utils.torch_scatter import scatter_sum
 
@@ -29,6 +29,8 @@ def uv_convolution(
     edge_cutoff,
     radial_network=None,
     edge_pairs=None,
+    *,
+    num_nodes=None,
 ):
     """Evaluate radial weighting and the fused local O(2) MLP."""
     linears = [module.linear_up, module.linear_down]
@@ -45,6 +47,7 @@ def uv_convolution(
         tuple(value for linear in linears for value in (linear.weight, linear.bias)),
         radial_network=radial_network,
         edge_pairs=edge_pairs,
+        **({"num_nodes": num_nodes} if num_nodes is not None else {}),
     )
     return module.reshape_out.inverse(message)
 
@@ -90,6 +93,8 @@ class UvO2TensorProductConv(torch.nn.Module):
     >>> conv.weight_numel
     4
     """
+
+    supports_receiver_count = True
 
     def __init__(
         self,
@@ -246,6 +251,8 @@ class UvO2TensorProductConv(torch.nn.Module):
         edge_cutoff: Optional[torch.Tensor] = None,
         radial_network=None,
         edge_pairs=None,
+        *,
+        num_nodes: int | None = None,
     ) -> torch.Tensor:
         if edge_cutoff is None:
             raise ValueError("O2 convolution requires edge_cutoff.")
@@ -266,6 +273,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                 edge_cutoff,
                 radial_network=radial_network,
                 edge_pairs=edge_pairs,
+                num_nodes=num_nodes,
             )
         node_features, source_features, target_features = self._to_local(
             node_feats, edge_index, wigner
@@ -280,5 +288,5 @@ class UvO2TensorProductConv(torch.nn.Module):
             edge_index,
             wigner_inv,
             edge_cutoff,
-            node_features.size(0),
+            node_features.size(0) if num_nodes is None else num_nodes,
         )

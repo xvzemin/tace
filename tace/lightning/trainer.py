@@ -4,6 +4,7 @@
 ################################################################################
 
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -23,7 +24,36 @@ from ..utils.callbacks import PrintMetricsCallback
 from ..utils.env import acceleration_enabled
 from ..utils.logger import log_parameters
 from ..utils.precision import resolve_precision
+from .foundation import FoundationTrainingCallback
 from .lit_model import LightningWrapperModel
+
+
+def check_training_entry(cfg, *, fast):
+    """Validate the selected training route before dataset preparation."""
+    if not fast and cfg.get("fast_schedule") is not None:
+        raise ValueError("fast_schedule is only supported by tace-fast-train")
+    if cfg.get("trainer", {}).get("callbacks"):
+        raise ValueError(
+            "Configure callbacks under top-level callbacks, not trainer.callbacks."
+        )
+    for callback in cfg.get("callbacks", {}).values():
+        target = callback.get("_target_") if isinstance(callback, Mapping) else None
+        if isinstance(callback, Mapping) and target is None:
+            for key in ("training_package", "replay_bucket"):
+                if key in callback:
+                    raise ValueError(
+                        f"{key} requires _target_: tace.utils.callbacks.FoundationTrainingCallback"
+                    )
+        if not fast and (
+            isinstance(callback, FoundationTrainingCallback)
+            or target
+            in (
+                "tace.utils.callbacks.FoundationTrainingCallback",
+                "tace.lightning.foundation.FoundationTrainingCallback",
+                FoundationTrainingCallback,
+            )
+        ):
+            raise ValueError("Use tace-fast-train for a FoundationTrainingCallback.")
 
 
 def _maybe_start_wsd_decay_on_resume(cfg: Dict, resume_ckpt: str) -> None:
@@ -57,7 +87,13 @@ def _maybe_start_wsd_decay_on_resume(cfg: Dict, resume_ckpt: str) -> None:
     )
 
 
-def build_trainer(cfg: Dict, dataloader_valid: DataLoader = None) -> L.Trainer:
+def build_trainer(
+    cfg: Dict,
+    dataloader_valid: DataLoader = None,
+    *,
+    fast: bool = False,
+    module_type: type[LightningWrapperModel] = LightningWrapperModel,
+) -> L.Trainer:
     """Build and configure a PyTorch Lightning Trainer.
 
     Args:
@@ -77,6 +113,16 @@ def build_trainer(cfg: Dict, dataloader_valid: DataLoader = None) -> L.Trainer:
     # === Configuration Preprocessing ===
     if not isinstance(cfg, Dict):
         raise TypeError(f"Expected DictConfig type, got {type(cfg)}")
+    check_training_entry(cfg, fast=fast)
+
+    # A specialized fast module owns its fit lifecycle (e.g. OAM's capture);
+    # it must never also install the generic execution callback.
+    generic_fast = fast and module_type is LightningWrapperModel
+    if fast and not generic_fast:
+        from .oamv2 import OAMLightningModule
+
+        if module_type is not OAMLightningModule:
+            raise ValueError("Unsupported specialized tace-fast-train module.")
 
     # === Logger Configuration ===
     logger_cfg = cfg.get("logger", None)
@@ -90,11 +136,14 @@ def build_trainer(cfg: Dict, dataloader_valid: DataLoader = None) -> L.Trainer:
     # === User Callbacks Configuration ===
     initialized_callbacks = []
     for cb_name, cb_config in cfg.get("callbacks", {}).items():
+        if isinstance(cb_config, FoundationTrainingCallback):
+            initialized_callbacks.append(cb_config)
+            continue
+        target = cb_config.get("_target_") if isinstance(cb_config, Mapping) else None
+        if target is None:
+            logging.warning(f"Skipping unconfigured callback: {cb_name}")
+            continue
         try:
-            if cb_config.get("_target_") is None:
-                logging.warning(f"Skipping unconfigured callback: {cb_name}")
-                continue
-
             callback = instantiate({k: v for k, v in cb_config.items() if k != "extra"})
             initialized_callbacks.append(callback)
             logging.debug(
@@ -106,7 +155,25 @@ def build_trainer(cfg: Dict, dataloader_valid: DataLoader = None) -> L.Trainer:
                 f"Config: {cb_config}\n"
                 f"Error: {str(e)}"
             )
+            # This explicit execution-provider request must not fall back to a
+            # different training path if its Hydra construction fails.
+            if fast:
+                raise RuntimeError(error_msg) from e
             logging.error(error_msg, exc_info=True)
+
+    providers = [
+        c for c in initialized_callbacks if isinstance(c, FoundationTrainingCallback)
+    ]
+    if providers and not fast:
+        raise ValueError("Use tace-fast-train for a FoundationTrainingCallback.")
+    if providers and not generic_fast:
+        raise ValueError(
+            "The specialized fast schedule cannot also use FoundationTrainingCallback."
+        )
+    if len(providers) > 1:
+        raise ValueError("Configure at most one FoundationTrainingCallback.")
+    if generic_fast and not providers:
+        initialized_callbacks.insert(0, FoundationTrainingCallback())
 
     # === Built-in callbacks ===
     initialized_callbacks += [
@@ -218,6 +285,7 @@ def train(
     embedding_property: list[str] = [],
     *,
     module_type: type[LightningWrapperModel] = LightningWrapperModel,
+    fast: bool = False,
 ):
     resolve_precision(cfg, training=True).apply()
     lit_model = module_type(
@@ -234,7 +302,7 @@ def train(
         if lit_model.automatic_optimization
         else dict(cfg, trainer=dict(cfg["trainer"], gradient_clip_val=None))
     )
-    trainer = build_trainer(trainer_cfg)
+    trainer = build_trainer(trainer_cfg, fast=fast, module_type=module_type)
 
     # TRAIN AND VALID
     resume_ckpt = cfg.get("resume_from_model", None)

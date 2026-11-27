@@ -18,12 +18,11 @@ dependencies = [
     "torch>=2.4",
     "torch_geometric>=2.4",
     "lightning",
-    "tqdm",
-    "omegaconf",
     "hydra-core>=1.3",
-    "matscipy",
+    "omegaconf",
     "ase",
     "ase-db-backends",
+    "matscipy",
     "numpy",
     "e3nn>=0.4.4",
     "scipy>=1.15",
@@ -32,12 +31,12 @@ dependencies = [
     "matplotlib",
     "lmdb",
     "huggingface_hub",
-    #  "wandb",
+    "tqdm",
+    "filelock",
+    "ninja",
 ]
 
 [project.optional-dependencies]
-
-spb = ["physical-basis>=1.0.0,<2"]
 
 dev = [
     "pytest",
@@ -45,16 +44,11 @@ dev = [
 ]
 
 oeq = [
-    "openequivariance>=0.5.4",
+    "openequivariance>=0.6.4",
 ]
 
 luna = [
     "LunaEquivariance>=0.1.0",
-]
-
-eqx = [
-    "ninja",
-    "filelock",
 ]
 
 torchsim = [
@@ -99,14 +93,18 @@ nl = [
     "ase",
     "matscipy",
     "vesin",
+    "nvalchemi-toolkit>=0.1.0",
+    "nvalchemi-toolkit-ops",
 ]
+
+spb = ["physical-basis==1.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/xvzemin/tace"
 
 [project.scripts]
 tace-train = "tace.scripts.train:main"
-tace-train-oam-v2 = "tace.scripts.train_oamv2:main"
+tace-fast-train = "tace.scripts.train_fast:main"
 tace-eval = "tace.scripts.eval:main"
 tace-clean = "tace.scripts.clean:main"
 tace-split = "tace.scripts.split:main"
@@ -123,20 +121,14 @@ tace-average = "tace.scripts.average:main"
 tace-plot-diatom = "tace.scripts.plot_diatom:main"
 
 [tool.setuptools.packages.find]
-include = [
-    "tace",
-    "tace.*",
-    "equivariantx",
-    "equivariantx.*",
-]
-exclude = [
-    "equivariantx.build", "equivariantx.build.*", "equivariantx.dist", "equivariantx.dist.*",
-    "equivariantx.tests", "equivariantx.tests.*", "equivariantx.docs", "equivariantx.docs.*",
-]
+include = ["tace", "tace.*", "equivariantx", "equivariantx.*", "equivariantx_foundation", "equivariantx_foundation.*"]
+namespaces = false
+exclude = ["equivariantx.tests", "equivariantx.tests.*", "equivariantx_foundation.tests", "equivariantx_foundation.tests.*"]
 
 [tool.setuptools.package-data]
-"tace.utils" = ["*.yaml"]
-"equivariantx" = ["README.md", "LICENSE.md", "ops/common/cuda/csrc/*.cpp", "ops/cuda/co2/*.cu", "models/tace/tace_oam_xl_v2/README.rst"]
+"tace.dataset" = ["stats_yaml/*.yaml"]
+equivariantx = ["LICENSE.md", "ops/common/cuda/csrc/*.cpp", "ops/cuda/co2/*.cu"]
+equivariantx_foundation = ["LICENSE.md", "models/tace/tace_oam_xl_v2/README.rst"]
 
 [tool.ruff]
 target-version = "py310"
@@ -158,7 +150,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["equivariantx", "tace"]
+known-first-party = ["equivariantx", "equivariantx_foundation", "tace"]
 
 [tool.ruff.format]
 line-ending = "lf"

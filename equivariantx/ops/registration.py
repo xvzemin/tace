@@ -22,7 +22,6 @@ for module in (
     "equivariantx.ops.common.rotation",
     "equivariantx.ops.common.wigner",
     "equivariantx.ops.common.bilinear",
-    "equivariantx.ops.common.tece",
     "equivariantx.ops.common.linear",
     "equivariantx.ops.common.cuda.channel_linear",
     "equivariantx.ops.common.cuda.cartesian",

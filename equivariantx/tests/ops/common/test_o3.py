@@ -78,8 +78,10 @@ def test_projection_policy(width, limit, expected, monkeypatch, double_precision
     )
 
 
-@pytest.mark.parametrize("compiler", ["inductor", "aoti"])
-def test_projected_joint(compiler, tmp_path, double_precision):
+@pytest.mark.parametrize(
+    "compiler,budget", [("inductor", None), ("aoti", None), ("aoti", 256)]
+)
+def test_projected_joint(compiler, budget, tmp_path, double_precision):
     metadata, program, values, source, target = projected_case(1024)
 
     def joint(function, *values):
@@ -89,7 +91,22 @@ def test_projected_joint(compiler, tmp_path, double_precision):
         loss = energy + (force - 0.1).square().sum()
         return loss, force, *torch.autograd.grad(loss, values[:3])
 
-    graph = make_fx(lambda *values: joint(contraction, *values))(*values)
+    def scheduled(*args):
+        return contraction(*args, projection_workspace_bytes=budget)
+
+    graph = make_fx(lambda *values: joint(scheduled, *values))(*values)
+    if budget is not None:
+        native = [
+            n
+            for n in graph.graph.nodes
+            if getattr(n.target, "overloadpacket", None) is torch.ops.eqx.o3_contraction
+        ]
+        assert len(native) >= 3
+        assert all(
+            n.target is torch.ops.eqx.o3_contraction.bounded
+            and n.kwargs["projection_workspace_bytes"] == budget
+            for n in native
+        )
     inputs = tuple(value.detach() for value in values)
     if compiler == "aoti":
         exported = torch.export.export(graph, inputs)

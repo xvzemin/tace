@@ -12,10 +12,19 @@ def direct(module, inputs, weight, leading_shape):
     from ...common.channel_product import polynomial_contraction
 
     output = polynomial_contraction(
-        module.kernel_metadata, inputs, weight, leading_shape, module.irreps_out.dim
+        module.kernel_metadata,
+        inputs,
+        weight,
+        leading_shape,
+        module.output_dim,
+        shared=module.shared_inputs,
     )
     return module._flatten_output(
-        output.reshape(*leading_shape, module._base_irreps_out.dim, module.num_channels)
+        output.reshape(
+            *leading_shape,
+            module.output_dim // module.num_channels,
+            module.num_channels,
+        )
     )
 
 

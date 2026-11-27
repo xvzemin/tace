@@ -222,28 +222,6 @@ register_kernel(
     reference="equivariantx.ops.common.torch.wigner:rotation_reference",
 )
 register_kernel(
-    "tece_contraction",
-    "cuda",
-    "equivariantx.ops.common.cuda.models.tace.interaction:contraction",
-)
-register_kernel(
-    "tece_interaction",
-    "cuda",
-    "equivariantx.ops.common.cuda.models.tace.interaction:interaction",
-)
-register_kernel(
-    "tece_contraction",
-    "torch",
-    "equivariantx.ops.common.torch.tece:contraction",
-    reference="equivariantx.ops.common.torch.tece:contraction_reference",
-)
-register_kernel(
-    "tece_interaction",
-    "torch",
-    "equivariantx.ops.common.torch.tece:interaction",
-    reference="equivariantx.ops.common.torch.tece:interaction_reference",
-)
-register_kernel(
     "edge_program",
     "torch",
     "equivariantx.ops.common.torch.edge:evaluate",

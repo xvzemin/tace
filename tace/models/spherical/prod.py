@@ -15,7 +15,11 @@ from equivariantx.mbe.ace import (
     GeneralizedContraction,
     UuuFullyConnectedSymmetricContraction,
 )
-from tace.utils.env import acceleration_enabled, select_acceleration
+from equivariantx.ops import config as eqx_config
+from tace.utils.env import (
+    acceleration_enabled,
+    select_acceleration,
+)
 
 from ..layout import LayoutTransform
 from ..linear import (
@@ -28,7 +32,10 @@ from ..mlp import ACTIVATION
 from .base import Product
 from .dropout import GraphDropPath
 from .fused import UuuSymmetricContraction, UuuTensorProduct
-from .paths import SymmetricProductPaths, symmetric_contraction_paths
+from .paths import (
+    SymmetricProductPaths,
+    symmetric_contraction_paths,
+)
 
 
 class PathProduct(Product):
@@ -355,6 +362,7 @@ class NonlinearCgtpACE(PathProduct):
 
     asymmetric = True
     use_generalized_cg = False
+    _compiled_cg_rows = True
 
     def _setup(self) -> None:
         self.validate_instructions()
@@ -444,15 +452,28 @@ class NonlinearCgtpACE(PathProduct):
             self.stochastic_depth = GraphDropPath(self.stochastic_depth_p)
         if self.use_generalized_cg:
             self.generalized = self.build_generalized(not self.asymmetric)
-        if not self.use_generalized_cg or (
-            self.generalized.codegen_supported
-            and acceleration_enabled("eqx", kernel="product")
+        self._configure_eqx()
+
+    def _configure_eqx(self) -> None:
+        """Prepare the optional fusion only if selected for this representation."""
+        if acceleration_enabled("eqx", kernel="product") and (
+            not self.use_generalized_cg or self.generalized.codegen_supported
         ):
             self.build_eqx()
+        else:
+            self._clear_eqx()
+
+    def _clear_eqx(self):
+        for name in ("eqx_metadata", "eqx_bindings", "eqx_products"):
+            if hasattr(self, name):
+                delattr(self, name)
 
     def build_eqx(self) -> None:
         """Build the fused product from its operators and parameters."""
-        from equivariantx.models.tace.nonlinear_ace import build, build_product
+        from equivariantx_foundation.models.tace.nonlinear_ace import (
+            build,
+            build_product,
+        )
 
         self.eqx_metadata, self.eqx_bindings = build(self)
         if not self.use_generalized_cg:
@@ -471,6 +492,7 @@ class NonlinearCgtpACE(PathProduct):
         if (
             hasattr(self, "eqx_metadata")
             and node_feats.is_cuda
+            and eqx_config.DEFAULT_BACKEND == "cuda"
             and node_feats.dtype in (torch.float32, torch.float64)
             and acceleration_enabled("eqx", kernel="product")
             # Inductor reuses the native factors across force derivatives.
@@ -480,7 +502,7 @@ class NonlinearCgtpACE(PathProduct):
                 for layer in (self.linear_up, self.gate[0], *self.coefs, self.linear)
             )
         ):
-            from equivariantx.models.tace.nonlinear_ace import run
+            from equivariantx_foundation.models.tace.nonlinear_ace import run
 
             output = run(self, node_feats, self.embedding(node_type))
         else:
@@ -494,7 +516,9 @@ class NonlinearCgtpACE(PathProduct):
             start, stop = self.gate_slices[0]
             output = self.coefs[0](corr * weight[:, start:stop][:, self.gate_index_1])
             fused_products = (
-                not self.use_generalized_cg
+                self._compiled_cg_rows
+                and hasattr(self, "eqx_products")
+                and not self.use_generalized_cg
                 and node_feats.is_cuda
                 and node_feats.dtype in (torch.float32, torch.float64)
                 and acceleration_enabled("eqx", kernel="product")
@@ -665,7 +689,9 @@ class TaceACE(PathProduct):
             and not self.fully_connected
             and acceleration_enabled("eqx", kernel="product")
         ):
-            from equivariantx.models.tace.nonlinear_ace import build_path_gates
+            from equivariantx_foundation.models.tace.nonlinear_ace import (
+                build_path_gates,
+            )
 
             self.eqx_metadata, self.eqx_bindings = build_path_gates(self)
         if (self.layer > 0 or self.use_first_dropout) and self.stochastic_depth_p > 0:
@@ -730,11 +756,12 @@ class TaceACE(PathProduct):
         if (
             hasattr(self, "eqx_metadata")
             and node_feats.is_cuda
+            and eqx_config.DEFAULT_BACKEND == "cuda"
             and acceleration_enabled("eqx", kernel="product")
             and not (self.training and acceleration_enabled("compile"))
             and not any(has_lora(linear) for linear in (self.linear_up, self.linear))
         ):
-            from equivariantx.models.tace.nonlinear_ace import run
+            from equivariantx_foundation.models.tace.nonlinear_ace import run
 
             outs = run(self, node_feats)
         elif self.fully_connected and self.weight_numel:

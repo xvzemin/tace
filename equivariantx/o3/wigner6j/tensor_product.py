@@ -360,8 +360,9 @@ class Wigner6jTensorProduct(torch.nn.Module):
             weights.append(weight)
         return tuple(weights)
 
-    def combine_weights(self, weight1, weight2, *, backend="torch"):
+    def combine_weights(self, weight1, weight2, *, backend=None):
         """Apply fixed recoupling coefficients to products of standard weights."""
+        backend = self.backend if backend is None else backend
         if self.unit_weights[0]:
             weight1 = torch.cat(
                 (weight1, weight1.new_ones(weight1.shape[:-1] + (1,))), -1
@@ -370,7 +371,7 @@ class Wigner6jTensorProduct(torch.nn.Module):
             weight2 = torch.cat(
                 (weight2, weight2.new_ones(weight2.shape[:-1] + (1,))), -1
             )
-        if backend == "cuda":
+        if backend == "cuda" and weight1.is_cuda:
             return self.weight_product(
                 weight1.unsqueeze(-1), weight2.unsqueeze(-1), backend
             ).squeeze(-1)

@@ -27,6 +27,7 @@ and `Hydra <https://hydra.cc/>`_.
    acceleration.rst
    environment_variables.rst
    foundation.rst
+   foundation_adapters.rst
    finetune.rst
    ase.rst
    lammps.rst

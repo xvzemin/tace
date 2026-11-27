@@ -18,6 +18,81 @@ from .testing import (
 )
 
 
+@pytest.mark.parametrize("space", ["o3", "co3"])
+@pytest.mark.parametrize("backend", ["cuda", "torch"])
+def test_shared_quartic_product(space, device, double_precision, backend):
+    from equivariantx import co3
+    from equivariantx.mbe import ace
+
+    ns = o3 if space == "o3" else co3
+    layer = (
+        ace.UuuFullyConnectedSymmetricContraction
+        if space == "o3"
+        else ace.IctdUuuFullyConnectedSymmetricContraction
+    )
+    options = dict(internal_weights=False, shared_weights=False)
+    kwargs = {"backend": "torch"} if space == "co3" else {}
+    ir = ns.Irreps("32x0e+32x1o+32x2e")
+    tp = ns.TensorProduct(
+        ir,
+        ir,
+        ir,
+        [
+            (0, 0, 0, "uuu", False),
+            (1, 1, 0, "uuu", False),
+            (0, 1, 1, "uuu", False),
+            (1, 0, 1, "uuu", False),
+            (1, 1, 2, "uuu", False),
+            (0, 2, 2, "uuu", False),
+        ],
+        **options,
+        **kwargs,
+    )
+    linears = [ns.Linear(ir, "3x0e+4x2e", **options, **kwargs) for _ in range(4)]
+    op = layer([tp] * 3, linears, backend=backend).to(device)
+    assert op.shared_powers is not None and not op.state_dict()
+    x = torch.randn(3, ir.dim, device=device, requires_grad=True)
+    ws = tuple(
+        torch.randn(2, linear.weight_numel, device=device, requires_grad=True)
+        for linear in linears
+    )
+    z = torch.tensor([1, 0, 1], device=device)
+    actual = op.shared_powers(x, ws, z)
+    if x.is_cuda and backend == "cuda":
+        args = (x.detach(), tuple(w.detach() for w in ws), z)
+        exported = torch.export.export(op, args, strict=True)
+        assert "eqx.generalized_cg" not in exported.graph_module.code
+        torch.testing.assert_close(
+            exported.module()(*args), actual.detach(), rtol=2e-10, atol=2e-10
+        )
+    op.use_shared_powers = False
+    if space == "co3" and x.device.type == "cpu" and backend == "cuda":
+        # The ordinary CUDA contraction projects the terminal coefficient output.
+        # Use physical STF inputs for the independent Cartesian CPU reference.
+        x_stf = co3.Projector(ir, backend="torch")(x)
+        actual, expected = op.shared_powers(x_stf, ws, z), op(x_stf, ws, z)
+    else:
+        expected = op(x, ws, z)
+    for order in range(3):
+        torch.testing.assert_close(actual, expected, rtol=2e-10, atol=2e-10)
+        if order < 2:
+            seed = torch.randn_like(expected) / expected.numel() ** 0.5
+            actual, expected = [
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (v.sin() * seed).sum(),
+                            (x, *ws),
+                            create_graph=True,
+                            retain_graph=True,
+                        )
+                    ]
+                )
+                for v in (actual, expected)
+            ]
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_generalized_ordered_factors(device):
     if device == "cuda" and not torch.cuda.is_available():

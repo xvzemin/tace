@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Tuple, Union
 import torch
 from e3nn import o3
 
+from equivariantx.conv import undirected_edge_pairs
 from tace.dataset.neighbour_list import get_neighborhood
 from tace.dataset.quantity import DIRECT_PROPERTIES, PROPERTIES, hessian_pair_indices
 from tace.utils.torch_scatter import scatter_sum
@@ -186,6 +187,64 @@ def stress_from_virials(
     return torch.where(valid[:, None, None], stress, torch.zeros_like(stress))
 
 
+def _uniform_pair_index(num_graphs, width, device):
+    nodes = torch.arange(num_graphs * width, device=device).view(num_graphs, width)
+    columns = nodes[:, None, :].expand(-1, width, -1)
+    return torch.stack((columns.transpose(1, 2), columns)).reshape(2, -1)
+
+
+def _molecular_hessian_pairs(positions, ptr, cutoff):
+    size = positions.size(0)
+    graphs = ptr.numel() - 1
+    width = size // graphs
+    uniform = graphs == 1 or (size % graphs == 0 and bool((ptr.diff() == width).all()))
+    xyz = positions.to(torch.float64)
+    tile = 131072  # Two FP64 coordinate gathers per CUDA tile: 6 MiB.
+    if size * size > 4 * tile and (not uniform or xyz.is_cuda):
+        bounds = range(0, size + 1, width) if uniform else ptr.tolist()
+        sizes = [b - a for a, b in zip(bounds, bounds[1:])]
+        total = sum(n * n for n in sizes)
+        if total > 4 * tile:
+            pairs = torch.empty((2, total), device=ptr.device, dtype=torch.long)
+            mask = torch.empty(total, device=ptr.device, dtype=torch.bool)
+            offset = 0
+            for start, n in zip(bounds, sizes):
+                end = offset + n * n
+                indices = torch.arange(start, start + n, device=ptr.device)
+                block = pairs[:, offset:end].view(2, n, n)
+                block[0].copy_(indices[:, None])
+                block[1].copy_(indices)
+                if not xyz.is_cuda:
+                    x = xyz[start : start + n]
+                    keep = (
+                        torch.cdist(x, x, compute_mode="donot_use_mm_for_euclid_dist")
+                        < cutoff
+                    )
+                    mask[offset:end].copy_(keep.fill_diagonal_(False).reshape(-1))
+                offset = end
+            if xyz.is_cuda:
+                for block, keep in zip(pairs.split(tile, 1), mask.split(tile)):
+                    source, target = block
+                    delta = xyz.index_select(0, target).sub_(
+                        xyz.index_select(0, source)
+                    )
+                    keep.copy_(
+                        (source != target)
+                        & (torch.linalg.vector_norm(delta, dim=-1) < cutoff)
+                    )
+            return pairs, mask.nonzero().flatten()
+    if uniform:
+        pairs = _uniform_pair_index(graphs, width, ptr.device)
+        x = xyz.view(graphs, width, 3)
+        distances = torch.cdist(
+            x, x, compute_mode="donot_use_mm_for_euclid_dist"
+        ).reshape(-1)
+    else:
+        pairs = hessian_pair_indices(ptr)
+        distances = torch.linalg.vector_norm(xyz[pairs[1]] - xyz[pairs[0]], dim=-1)
+    return pairs, torch.nonzero((pairs[0] != pairs[1]) & (distances < cutoff)).flatten()
+
+
 def prepare_direct_hessian_inputs(data, cutoff):
     """Prepare atom pairs and periodic neighbors for a Hessian readout.
 
@@ -204,10 +263,24 @@ def prepare_direct_hessian_inputs(data, cutoff):
         pair share one output index; diagonal blocks use the node readout.
     """
     data = dict(data.items())
-    positions = data["positions"].detach().cpu().numpy()
+    positions = data["positions"].detach()
+    ptr = data["ptr"]
+    pbc = data.get("pbc")
+    if pbc is None or not pbc.any():
+        pair_index, rows = _molecular_hessian_pairs(positions, ptr, cutoff)
+        data["direct_hessian_pair_index"] = pair_index
+        data["direct_hessian_edge_pairs"] = rows
+        data["direct_hessian_edge_shifts"] = positions.new_zeros((rows.numel(), 3))
+        return data
+
+    data["direct_hessian_pair_index"] = (
+        _uniform_pair_index(1, positions.size(0), ptr.device)
+        if ptr.numel() == 2
+        else hessian_pair_indices(ptr)
+    )
+    positions = positions.cpu().numpy()
     lattice = data["lattice"].detach().cpu().numpy()
-    ptr = data["ptr"].tolist()
-    pbc = data.get("pbc", torch.zeros((len(ptr) - 1, 3), dtype=torch.bool))
+    ptr = ptr.tolist()
     pbc = pbc.detach().cpu().numpy()
     cutoff = float(cutoff)
     pairs, shifts = [], []
@@ -222,7 +295,6 @@ def prepare_direct_hessian_inputs(data, cutoff):
         pairs.append(torch.as_tensor(offset + source[keep] * count + target[keep]))
         shifts.append(torch.as_tensor(edge_shifts[keep]))
         offset += count * count
-    data["direct_hessian_pair_index"] = hessian_pair_indices(data["ptr"])
     data["direct_hessian_edge_pairs"] = torch.cat(pairs).to(data["ptr"])
     data["direct_hessian_edge_shifts"] = torch.cat(shifts).to(data["positions"])
     return data
@@ -433,8 +505,6 @@ def repr_without(module: torch.nn.Module, *names: str) -> str:
 
 def prepare_edge_pairs(data):
     """Populate the reciprocal edge map before tracing the model."""
-    from equivariantx.conv import undirected_edge_pairs
-
     if "edge_pair_rows" not in data:
         pairs = undirected_edge_pairs(
             data["edge_index"], data["edge_shifts"], num_nodes=data["positions"].size(0)

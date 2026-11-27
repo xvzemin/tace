@@ -86,9 +86,11 @@ def project(metadata, features):
     )
 
 
-def polynomial_contraction(metadata, inputs, weight, shape, output_dim):
+def polynomial_contraction(
+    metadata, inputs, weight, shape, output_dim, *, shared=False
+):
     """Evaluate all paths using CUDA and recursive multilinear adjoints."""
-    values = (*inputs, weight)
+    values = (inputs[0], weight) if shared else (*inputs, weight)
     if any(
         not x.is_cuda or x.dtype not in (torch.float32, torch.float64) for x in values
     ):
@@ -99,14 +101,17 @@ def polynomial_contraction(metadata, inputs, weight, shape, output_dim):
         raise ValueError("Inputs and weights must have the same device and dtype.")
     rows = math.prod(shape)
     operands = [
-        x.reshape(1, x.shape[-1])
+        x
+        if x.ndim == 2 and x.shape[0] == rows
+        else x.reshape(1, x.shape[-1])
         if i and math.prod(x.shape[:-1]) == 1
         else x.expand(*shape, x.shape[-1]).reshape(rows, x.shape[-1])
         for i, x in enumerate(values)
     ]
     operands.append(inputs[0].new_empty((0, output_dim)))
-    role = len(values)
-    program = repr(((tuple(range(role + 1)), role, 0, 0),))
+    role = len(inputs) + 1
+    mapping = (0,) * len(inputs) + (1, 2) if shared else tuple(range(role + 1))
+    program = repr(((mapping, role, 0, 0),))
     return channel_product(metadata, program, operands)[0].reshape(*shape, output_dim)
 
 

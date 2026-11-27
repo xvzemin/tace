@@ -3,12 +3,75 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+import sys
 from typing import Any, Dict, List, Optional
 
 import torch
 
 from .basis_change import LESLatentAlphas, LESLatentQuads
 from .readout import build_scalar_readout, build_tensor_readout
+
+
+def is_periodic_charge_only_les(head: torch.nn.Module) -> bool:
+    """Whether the live head uses the reviewed field-free LES 0.2.0 charge solver.
+
+    This checks the head, not its enclosing model, graph boundary conditions or
+    any particular reciprocal-grid layout. It does not import optional LES for
+    non-LES models.
+    """
+    if type(head) is not TACELES:
+        return False
+    package = sys.modules.get("les")
+    if getattr(package, "__version__", None) != "0.2.0" or type(
+        head.les
+    ) is not getattr(package, "Les", None):
+        return False
+    from les.module import Ewald_vectorized
+
+    solver = head.les.ewald
+    return (
+        type(solver) is Ewald_vectorized
+        and head.les.is_periodic is True
+        and solver.is_periodic is True
+        and getattr(head.les, "geometry_precision", False)
+        and not any(
+            getattr(head.les, k, False)
+            for k in (
+                "compute_bec",
+                "use_atomwise",
+                "use_atomic_alpha",
+                "use_fixed_atomic_charges",
+                "use_epsilon_r_scaling",
+            )
+        )
+        and not solver.use_epsilon_r_scaling
+        and not any(
+            hasattr(head, k)
+            for k in (
+                "latent_dipoles_readouts",
+                "latent_quads_readouts",
+                "latent_kappas_readouts",
+                "latent_alphas_readout0s",
+                "latent_alphas_readout2s",
+            )
+        )
+        and not {
+            "_solve",
+            "_run_les",
+            "_les_options",
+            "_sum_readouts",
+            "_readout_latent_quantities",
+        }.intersection(vars(head))
+        and "compute_potential_triclinic" not in vars(solver)
+        and not any("forward" in vars(m) for m in (head, head.les, solver))
+        and not any(
+            m._forward_hooks
+            or m._forward_pre_hooks
+            or m._backward_hooks
+            or m._backward_pre_hooks
+            for m in head.modules()
+        )
+    )
 
 
 def required_les_irreps(les_arguments: Dict[str, Any]) -> List[str]:
@@ -108,6 +171,7 @@ class TACELES(torch.nn.Module):
         self.make_latent_kappas_positive = bool(
             les_arguments.get("make_kappa_positive", False)
         )
+
     def _sum_readouts(
         self,
         readouts: torch.nn.ModuleList,
@@ -119,9 +183,7 @@ class TACELES(torch.nn.Module):
         values = []
         descriptor_indices = range(self.num_layers) if self.use_alllayer else [-1]
         for readout, descriptor_index in zip(readouts, descriptor_indices):
-            output = readout(
-                descriptors[descriptor_index], node_fidelity
-            ).reshape(
+            output = readout(descriptors[descriptor_index], node_fidelity).reshape(
                 descriptors[descriptor_index].shape[0],
                 self.num_fidelities,
                 irrep_dim,
@@ -363,10 +425,7 @@ class TACELES(torch.nn.Module):
         positions = positions.index_select(0, num_atoms_arange)
         batch = batch.index_select(0, num_atoms_arange)
         atomic_numbers = atomic_numbers.index_select(0, num_atoms_arange)
-        if (
-            bool(getattr(self.les, "compute_bec", False))
-            and latent_dipoles is not None
-        ):
+        if bool(getattr(self.les, "compute_bec", False)) and latent_dipoles is not None:
             latent_dipoles = latent_dipoles + 0.0 * positions.sum()
 
         lattice_les = lattice.clone()

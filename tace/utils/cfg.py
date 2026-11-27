@@ -6,13 +6,12 @@
 """Configuration conversion, output and Hydra resolvers."""
 
 import math
+from functools import cache
 from pathlib import Path
 
 import yaml
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, ListConfig, OmegaConf
-
-from .strategy import is_rank_0
 
 
 def deep_convert(cfg):
@@ -26,6 +25,8 @@ def deep_convert(cfg):
 
 def save_full_cfg(cfg: dict):
     """Write the resolved training configuration on rank zero."""
+    from .strategy import is_rank_0
+
     if not is_rank_0():
         return
     with Path("_full_config.yaml").open("w", encoding="utf-8") as stream:
@@ -87,3 +88,18 @@ def register_resolvers():
     OmegaConf.register_new_resolver("float", lambda x: float(x))
     OmegaConf.register_new_resolver("ceil", lambda x: math.ceil(float(x)))
     OmegaConf.register_new_resolver("floor", lambda x: math.floor(float(x)))
+
+
+# The fast entry composes first, then imports the ordinary builder (and its
+# decorated main). Both entry points must share one resolver registration.
+_register_training_resolvers = cache(register_resolvers)
+
+
+def training_cli(task):
+    """Compose in the invocation directory without importing a model or backend."""
+    from hydra import main
+
+    _register_training_resolvers()
+    return main(version_base="1.3", config_path=str(Path.cwd()), config_name="tace")(
+        task
+    )

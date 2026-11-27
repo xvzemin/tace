@@ -23,7 +23,6 @@ __all__ = [
     "mbe",
     "conv",
     "ops",
-    "models",
     "nn",
     "utils",
 ]

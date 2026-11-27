@@ -2,6 +2,7 @@
 
 from .basis import ChangeOfBasis, Projector, path_matrix, projector_matrix
 from .cartesian_harmonics import CartesianHarmonics
+from .contraction import SymmetricContraction
 from .convolution import UuTensorProductConv, UvTensorProductConv
 from .gate import Activation, Gate
 from .irreps import Irrep, Irreps
@@ -31,6 +32,7 @@ __all__ = [
     "path_matrix",
     "projector_matrix",
     "CartesianHarmonics",
+    "SymmetricContraction",
     "Linear",
     "ElementLinear",
     "UuLinear",

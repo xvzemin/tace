@@ -26,6 +26,65 @@ def test_native_projection(dtype, rows):
     torch.testing.assert_close(project_rank_two(value), value @ matrix)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("rows", [0, 7])
+def test_mixed_rank_two_sections(dtype, rows):
+    from equivariantx.ops.decompositions import torch_decompositions
+
+    # The second even rank-two entry is deliberately *not* projected.
+    irreps = "2x2e+1x0e+2x2e+1x2o+2x1e+1x2e"
+    actual, reference = (
+        co3.Projector(irreps, [0, 3, 5], backend=b).to(device="cuda", dtype=dtype)
+        for b in ("cuda", "torch")
+    )
+    x = torch.randn(rows, 2 * actual.irreps_in.dim, device="cuda", dtype=dtype)[
+        ..., ::2
+    ]
+    x.requires_grad_()
+    op = torch.ops.eqx.stf_rank_two_layout.default
+    graph = make_fx(actual)(x)
+    assert [n.target for n in graph.graph.nodes if n.op == "call_function"] == [op]
+    lowered = make_fx(actual, decomposition_table=torch_decompositions())(x)
+    assert all(n.target != op for n in lowered.graph.nodes)
+    torch.testing.assert_close(lowered(x), reference(x))
+    pair = actual(x), reference(x)
+    for _ in range(3):
+        torch.testing.assert_close(*pair)
+        tangent = torch.randn_like(x)
+        pair = [
+            torch.autograd.grad((y.sin() * tangent).sum(), x, create_graph=True)[0]
+            for y in pair
+        ]
+    tangent = torch.randn_like(x)
+    torch.testing.assert_close(
+        torch.func.jvp(actual, (x,), (tangent,)),
+        torch.func.jvp(reference, (x,), (tangent,)),
+    )
+
+
+def test_invalid_mixed_rank_two_sections():
+    from equivariantx.ops.cuda.co3.basis import project_rank_two_layout
+
+    x = torch.randn(1, 36, device="cuda")
+    for sections in ([0, 9, 27, 45], [0, 18, 15, 24], [1, 11, 18, 27]):
+        with pytest.raises(ValueError, match="section"):
+            project_rank_two_layout(x, sections)
+
+
+def test_mixed_rank_two_dynamic_export_and_custom_blocks():
+    layer = co3.Projector("1x2e+1x0e+1x2e", backend="cuda").double().cuda()
+    x = torch.randn(4, 19, device="cuda", dtype=torch.float64)
+    exported = torch.export.export(
+        layer, (x,), dynamic_shapes=({0: torch.export.Dim("rows", min=0)},), strict=True
+    ).module()
+    for size in (0, 1, 7):
+        value = x.new_empty(size, 19).normal_()
+        torch.testing.assert_close(exported(value), layer(value))
+    # Projector.forward historically delegates to a customized block map.
+    layer.forward_blocks = lambda blocks: [2 * v for v in blocks]
+    torch.testing.assert_close(layer(x), 2 * x)
+
+
 def test_high_order_and_transforms():
     layer = co3.Projector("2x2e+1x3e", backend="cuda").double().cuda()
     reference = co3.Projector("2x2e+1x3e").double().cuda()
@@ -59,11 +118,15 @@ def test_high_order_and_transforms():
     check_forward_ad(layer, reference, (value,))
 
 
-@pytest.mark.parametrize("backend", ["torch", "cuda"])
-def test_joint_aoti(tmp_path, backend):
-    layer = co3.Projector("2x2e", backend=backend).double().cuda()
-    value = torch.randn(5, 18, dtype=torch.float64, device="cuda", requires_grad=True)
-    weight = torch.randn(18, dtype=torch.float64, device="cuda", requires_grad=True)
+@pytest.mark.parametrize(
+    "backend,irreps",
+    [("torch", "2x2e"), ("cuda", "2x2e"), ("cuda", "2x2e+1x0e+2x2e")],
+)
+def test_joint_aoti(tmp_path, backend, irreps):
+    layer = co3.Projector(irreps, backend=backend).double().cuda()
+    dim = layer.irreps_in.dim
+    value = torch.randn(5, dim, dtype=torch.float64, device="cuda", requires_grad=True)
+    weight = torch.randn(dim, dtype=torch.float64, device="cuda", requires_grad=True)
 
     def joint(value, weight):
         energy = layer(value * weight).sin().sum()

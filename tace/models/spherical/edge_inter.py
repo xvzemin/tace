@@ -5,16 +5,147 @@
 
 import torch
 from e3nn import o3
+from torch._subclasses.fake_tensor import is_fake
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
+import equivariantx as eqx
+from tace.utils.env import acceleration_enabled
+
+from ..layout import LayoutTransform
 from ..linear import e3nnLinear
 from ..mlp import BATCH_MLP, MLP
+from ..time_reversal import contains_time_odd_irreps
 from .base import EdgeInteraction
 from .fused import UvO2TensorProduct, UvuTensorProduct
 from .paths import generate_paths
 
 
+class _RowwisePairProduct(UvuTensorProduct):
+    """Couple one directed edge per row, without a node reduction."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._setup_rowwise()
+        self._certify_cg()
+        self._cg_load_hook = self.register_load_state_dict_post_hook(_refresh_pair_cg)
+
+    def _certify_cg(self):
+        # The EQX row program owns canonical CG constants; a customized e3nn
+        # buffer is an operand of the host product instead. Certify once after
+        # construction, a module move, or loading a checkpoint.
+        tp = self.tp
+        self._cg_certificate = None
+        if type(tp) is not o3.TensorProduct or any(True for _ in tp.parameters()):
+            return
+        tables = []
+        for name, value in tp.named_buffers():
+            if name in ("weight", "output_mask"):
+                continue
+            prefix = "_compiled_main_left_right._w3j_"
+            if not name.startswith(prefix):
+                return
+            degrees = name[len(prefix) :].split("_")
+            if (
+                len(degrees) != 3
+                or not all(n.isdecimal() for n in degrees)
+                or value.is_meta
+                or value.is_inference()
+                or is_fake(value)
+                or value.dtype not in (torch.float32, torch.float64)
+            ):
+                return
+            if not torch.equal(
+                value.detach().cpu(),
+                o3.wigner_3j(*map(int, degrees), dtype=value.dtype, device="cpu"),
+            ):
+                return
+            tables.append((name.rsplit(".", 1)[-1], value, value._version))
+        self._cg_certificate = (tp, tuple(tables))
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        if type(self) is _RowwisePairProduct:
+            self._certify_cg()
+        return self
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state.pop("_cg_certificate", None)
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        if type(self) is _RowwisePairProduct:
+            self._certify_cg()
+
+    def _canonical_cg(self):
+        cert = getattr(self, "_cg_certificate", None)
+        if cert is None or self.tp is not cert[0]:
+            return False
+        if not cert[1]:
+            return True
+        if torch.compiler.is_compiling() or torch.jit.is_tracing():
+            return False
+        mode = get_proxy_mode()
+        if mode is not None and mode.tracing_mode == "real":
+            # A real-mode trace can see the original tensor object even when
+            # it is a live placeholder. TACE's frozen traces use fake tensors.
+            return False
+        # functional_call can replace these with live graph inputs. Tensor
+        # versions alone cannot distinguish that case from the original table.
+        compiled = self.tp._compiled_main_left_right
+        return all(
+            getattr(compiled, name, None) is value
+            and not value.requires_grad
+            and statically_known_true(value._version == version)
+            for name, value, version in cert[1]
+        )
+
+    def _setup_rowwise(self):
+        """Install row-wise contractions on the existing weighted CG instructions."""
+        self.contraction = eqx.conv.O3TensorProductConv(
+            self.tp, backend="cuda", batch_paths=True
+        )
+        self.to_channels_last = LayoutTransform(
+            self.irreps_in1, layout_out="flatten_ir_mul"
+        )
+        self.to_mul_ir = LayoutTransform(
+            self.irreps_out, layout_in="flatten_ir_mul", layout_out="flatten_mul_ir"
+        )
+
+    def forward(self, x, y, weights):
+        if (
+            x.is_cuda
+            and x.dtype in (torch.float32, torch.float64)
+            and y.dtype == weights.dtype == x.dtype
+            and not torch.is_autocast_enabled("cuda")
+            and x.ndim == y.ndim == weights.ndim == 2
+            and x.size(0) == y.size(0) == weights.size(0)
+            and self._canonical_cg()
+        ):
+            # The angular input has unit multiplicity and needs no permutation.
+            out = self.contraction(
+                self.to_channels_last(x),
+                y,
+                weights,
+                weights.new_empty(0, self.weight_numel),
+                None,
+            )
+            return self.to_mul_ir(out)
+        return super().forward(x, y, weights)
+
+
+def _refresh_pair_cg(module, incompatible_keys):
+    module._certify_cg()
+
+
 class O3CgtpEdgeInteraction(EdgeInteraction):
-    """Couple edge features with supplied spherical harmonics using CGTP."""
+    """Couple directed edges with supplied harmonics, keeping periodic images separate.
+
+    The EQX convolution option can evaluate the same weighted CG paths row by
+    row on CUDA. Image summation and block transposition belong to the readout.
+    """
 
     def _setup(self) -> None:
         self.irreps_hidden = o3.Irreps(
@@ -57,7 +188,18 @@ class O3CgtpEdgeInteraction(EdgeInteraction):
         instructions, self.irreps_out = generate_paths(
             self.irreps_out, self.irreps_hidden, self.irreps_sh
         )
-        self.rejector = UvuTensorProduct(
+        product = UvuTensorProduct
+        if (
+            acceleration_enabled("eqx", kernel="conv")
+            and not acceleration_enabled("oeq")
+            and instructions
+            and all(mul == 1 for mul, _ in self.irreps_sh)
+            and not contains_time_odd_irreps(
+                self.irreps_hidden, self.irreps_sh, self.irreps_out
+            )
+        ):
+            product = _RowwisePairProduct
+        self.rejector = product(
             self.irreps_hidden,
             self.irreps_sh,
             self.irreps_out,
@@ -103,9 +245,7 @@ class O3CgtpEdgeInteraction(EdgeInteraction):
         )
         output = radial @ radial_weight
         output = (
-            output
-            + source_weight[node_type[source]]
-            + target_weight[node_type[target]]
+            output + source_weight[node_type[source]] + target_weight[node_type[target]]
         )
         if linear.bias is not None:
             output = output + linear.bias

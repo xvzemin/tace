@@ -61,7 +61,9 @@ def launch(cfg):
     import torch
     from omegaconf import open_dict
 
-    from equivariantx.models.tace.tace_oam_xl_v2.precision import validate_environment
+    from equivariantx_foundation.models.tace.tace_oam_xl_v2.precision import (
+        validate_environment,
+    )
     from tace.lightning.oamv2 import OAMLightningModule
     from tace.scripts.train import train_from_config
     from tace.utils.precision import resolve_precision
@@ -96,15 +98,4 @@ def launch(cfg):
             )
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
     torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
-    train_from_config(cfg, OAMLightningModule)
-
-
-def main():
-    configure_environment()
-    from tace.scripts.train import training_cli
-
-    training_cli(launch)()
-
-
-if __name__ == "__main__":
-    main()
+    train_from_config(cfg, OAMLightningModule, fast=True)

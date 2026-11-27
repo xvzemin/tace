@@ -20,11 +20,22 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - name: Install test dependencies
+      - name: Build TACE with bundled EquivariantX and Foundation
+        run: python -m pip wheel --no-deps --wheel-dir "${{ runner.temp }}/wheels" .
+      - name: Install the wheel and test dependencies
         id: install
-        run: python -m pip install ".[dev,spb]" "torch-sim-atomistic==0.6.2"
+        shell: bash
+        working-directory: ${{ runner.temp }}/wheels
+        run: |
+          wheels=(tace-*.whl)
+          python -m pip install "./${wheels[0]}[dev,spb]" "torch-sim-atomistic==0.6.2"
+      - name: Verify the installed distribution and CPU execution
+        run: python -I .github/check_wheel.py
       - name: Test TACE CPU operations and interfaces
         run: python -m pytest tests -q
       - name: Test EQX portable operations
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python -m pytest equivariantx/tests -q
+      - name: Test Foundation adapters
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m pytest equivariantx_foundation/tests -q

@@ -76,7 +76,6 @@ class IdentityScatterNorm(ScatterNorm):
 
 
 class CutoffScatterNorm(IdentityScatterNorm):
-
     @staticmethod
     def edge_weights(
         edge_cutoff: torch.Tensor | None, target: torch.Tensor, num_nodes: int

@@ -353,6 +353,7 @@ def contract(
     results,
     batch_paths=False,
     pair_index=None,
+    projection_workspace_bytes=None,
 ):
     """Contract without saving edge messages or full projected edge weights."""
     device, dtype = operands[0].device, operands[0].dtype
@@ -447,7 +448,9 @@ def contract(
                 output_role=4,
                 chunk_size=CHUNK_SIZE,
                 workspace_bytes=min(
-                    WORKSPACE_BYTES,
+                    WORKSPACE_BYTES
+                    if projection_workspace_bytes is None
+                    else min(projection_workspace_bytes, WORKSPACE_BYTES),
                     torch.cuda.get_device_properties(device).total_memory // 16,
                 ),
             )
@@ -461,6 +464,7 @@ def contraction(
     operands: list[torch.Tensor],
     *,
     batch_paths: bool = False,
+    projection_workspace_bytes=None,
 ) -> list[torch.Tensor]:
     """Run sparse contractions outside the tensor tracing boundary."""
     from ..graph import convolution
@@ -476,14 +480,23 @@ def contraction(
         if count and parse_metadata(metadata)[0]:
             from .convolution import contract
 
-            contract(metadata, terms, source, target, values, outputs, batch_paths)
+            contract(
+                metadata,
+                terms,
+                source,
+                target,
+                values,
+                outputs,
+                batch_paths,
+                projection_workspace_bytes=projection_workspace_bytes,
+            )
 
     if source is None:
         run((source, target, *operands), results)
     else:
         convolution(
             "o3",
-            (metadata, program, batch_paths),
+            (metadata, program, batch_paths, projection_workspace_bytes),
             run,
             source,
             target,

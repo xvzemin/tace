@@ -32,16 +32,21 @@ def json_bytes(value):
 
 
 def digest(path):
+    checksum = hashlib.sha256()
     with open(path, "rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        while chunk := stream.read(1024 * 1024):
+            checksum.update(chunk)
+    return checksum.hexdigest()
 
 
-@lru_cache(maxsize=1)
-def source_fingerprint():
+@lru_cache(maxsize=None)
+def source_fingerprint(packages):
     files = {}
-    for package in ("tace", "equivariantx"):
+    for package in packages:
         root = Path(importlib.util.find_spec(package).submodule_search_locations[0])
         for path in sorted(root.rglob("*")):
+            if {"tests", "build", "docs"}.intersection(path.relative_to(root).parts):
+                continue
             if path.is_file() and path.suffix in (".py", ".cpp", ".cu", ".cuh", ".h"):
                 files[f"{package}/{path.relative_to(root).as_posix()}"] = digest(path)
     return {
@@ -519,7 +524,13 @@ class JointArtifactCache:
             contract = {
                 "format_version": FORMAT_VERSION,
                 "context_sha256": module_context(module),
-                "source": source_fingerprint(),
+                "source": source_fingerprint(
+                    tuple(
+                        name
+                        for name in ("tace", "equivariantx", "equivariantx_foundation")
+                        if sys.modules.get(name) is not None
+                    )
+                ),
                 "runtime": runtime_signature(next(iter(devices)), options),
                 "input_keys": list(keys),
                 "parameter_names": list(parameter_names),

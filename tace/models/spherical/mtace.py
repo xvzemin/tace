@@ -131,7 +131,9 @@ class MagneticBasis(torch.nn.Module):
         if not isinstance(num_mag_radial_basis, int) or num_mag_radial_basis < 1:
             raise ValueError("num_mag_radial_basis must be a positive integer.")
         if angular_normalization != "integral":
-            raise ValueError("angular_normalization currently only supports 'integral'.")
+            raise ValueError(
+                "angular_normalization currently only supports 'integral'."
+            )
         if radial_normalization != "clamp":
             raise ValueError("radial_normalization currently only supports 'clamp'.")
 
@@ -149,11 +151,15 @@ class MagneticBasis(torch.nn.Module):
             num_basis=num_mag_radial_basis,
             include_constant=False,
         )
-        self.magnetic_node_irreps_out = spherical_harmonics_irreps(
-            Lmax,
-            p=-1 if parity is False else 1,
-            time_reversal=-1 if time_reversal else 1,
-        ).sort().irreps.simplify()
+        self.magnetic_node_irreps_out = (
+            spherical_harmonics_irreps(
+                Lmax,
+                p=-1 if parity is False else 1,
+                time_reversal=-1 if time_reversal else 1,
+            )
+            .sort()
+            .irreps.simplify()
+        )
         self.angular_basis = SolidHarmonics(
             self.magnetic_node_irreps_out,
             normalization=angular_normalization,
@@ -168,9 +174,7 @@ class MagneticBasis(torch.nn.Module):
                 target_irreps=path_irreps,
             )
         else:
-            magnetic_edge_irreps = o3.Irreps(
-                [(1, make_irrep(0, 1, 1))]
-            )
+            magnetic_edge_irreps = o3.Irreps([(1, make_irrep(0, 1, 1))])
         self.magnetic_edge_tensor_product = UuuTensorProduct(
             self.magnetic_node_irreps_out,
             self.magnetic_node_irreps_out,
@@ -186,9 +190,7 @@ class MagneticBasis(torch.nn.Module):
         magnetic_scale, atomic_numbers: list[int]
     ) -> torch.Tensor:
         if not isinstance(magnetic_scale, (list, tuple)) or not magnetic_scale:
-            raise TypeError(
-                "magnetic_scale must be a non-empty per-fidelity sequence"
-            )
+            raise TypeError("magnetic_scale must be a non-empty per-fidelity sequence")
         values = []
         for scale in magnetic_scale:
             if isinstance(scale, Mapping):
@@ -236,7 +238,8 @@ class MagneticBasis(torch.nn.Module):
             self.magnetic_edge_tensor_product(
                 magnetic_node_attrs[target], magnetic_node_attrs[source]
             )
-            if compute_edge else None
+            if compute_edge
+            else None
         )
 
         return (
@@ -658,9 +661,7 @@ class O3MagneticWigner6jInteraction(O3CgtpInteraction):
         magnetic_edge_feats=None,
     ) -> torch.Tensor:
         if magnetic_node_attrs is None or magnetic_edge_feats is None:
-            raise ValueError(
-                "w6j_mag requires magnetic harmonics and edge features."
-            )
+            raise ValueError("w6j_mag requires magnetic harmonics and edge features.")
         weights = self.edge_info(edge_feats)
         if edge_cutoff is not None:
             weights = weights * edge_cutoff
@@ -683,9 +684,11 @@ class O2MagneticInteraction(UvO2Interaction):
     def _prepare_setup(self) -> None:
         if self.magnetic_edge_irreps is None:
             raise ValueError("uv_o2_mag requires magnetic_edge_irreps.")
-        self.magnetic_edge_irreps_out = o3.Irreps(
-            [(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps]
-        ).sort().irreps.simplify()
+        self.magnetic_edge_irreps_out = (
+            o3.Irreps([(self.num_channel, ir) for _, ir in self.magnetic_edge_irreps])
+            .sort()
+            .irreps.simplify()
+        )
 
         # A magnetic SOC edge carries both the spatial bond harmonics and the
         # magnetic source-target tensor product.  We do not truncate their
@@ -707,17 +710,19 @@ class O2MagneticInteraction(UvO2Interaction):
             target_irreps=self.path_irreps,
         )
         self.irreps_out = (
-            self.irrreps_tp_out * self.num_channel
-        ).sort().irreps.simplify()
+            (self.irrreps_tp_out * self.num_channel).sort().irreps.simplify()
+        )
 
         # Match the skip connection to the product-basis output constructed
         # from the corrected interaction irreps.
         if self.layer == self.num_layers - 1:
             irreps_sc = o3.Irreps(self.target_irreps)
         elif self.correlation == 1:
-            irreps_sc = o3.Irreps(
-                [(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax]
-            ).sort().irreps.simplify()
+            irreps_sc = (
+                o3.Irreps([(1, ir) for _, ir in self.irreps_out if ir.l <= self.Lmax])
+                .sort()
+                .irreps.simplify()
+            )
         else:
             irreps_sc = to_possible_tp_irreps(
                 self.irreps_out,
@@ -746,9 +751,7 @@ class O2MagneticInteraction(UvO2Interaction):
             ](),
             odd_scalar_act=ACTIVATION[
                 (
-                    self.scalar_act[1]
-                    if isinstance(self.scalar_act, list)
-                    else "tanh"
+                    self.scalar_act[1] if isinstance(self.scalar_act, list) else "tanh"
                 ).removeprefix("scaled_")
             ](),
             tensor_act=ACTIVATION[
@@ -791,16 +794,15 @@ class O2MagneticInteraction(UvO2Interaction):
     ) -> torch.Tensor:
         source_info, target_info = magnetic_node_info
         source, target = edge_index
-        return self.source_magnetic_info(source_info)[source] * (
-            self.target_magnetic_info(target_info)[target]
+        return (
+            self.source_magnetic_info(source_info)[source]
+            * (self.target_magnetic_info(target_info)[target])
         )
 
     def _apply_rejector(
         self,
         node_feats: torch.Tensor,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ],
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None],
         magnetic_edge_attrs: Union[torch.Tensor, None],
         conv_weights: torch.Tensor,
         edge_index: torch.Tensor,

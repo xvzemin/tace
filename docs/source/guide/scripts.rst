@@ -32,7 +32,9 @@ Script Overview
    * - Command
      - Purpose
    * - ``tace-train``
-     - Train, validate, or test from a Hydra configuration
+     - Standard training, including generic EQX and joint AOTInductor training
+   * - ``tace-fast-train``
+     - Train with a Foundation model-specific or regional plan, or the OAM-v2 capture schedule
    * - ``tace-eval``
      - Run inference on an ASE-readable structure file
    * - ``tace-export-train``

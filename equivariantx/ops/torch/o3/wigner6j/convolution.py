@@ -5,7 +5,7 @@ from .... import config
 
 def recoupled(module, values, edge_index, num_nodes):
     x1, x2, x3, weight1, weight2 = values
-    weight = module.combine_weights(weight1, weight2)
+    weight = module.combine_weights(weight1, weight2, backend="torch")
     message = module.tp132(
         module.tp13(x1, x3)[edge_index[0]],
         x2,

@@ -563,6 +563,27 @@ class NodeRepresentation(torch.nn.Module):
             )
         )
 
+    def _spatial_frames(self, data, graph):
+        skip_wigner = getattr(self, "_can_skip_wigner", False) and all(
+            interaction.use_eqx
+            for interaction in self.interactions
+            if isinstance(interaction, UuO2Interaction)
+        )
+        if not getattr(self, "use_local_frame", self.use_so2 or self.use_o2):
+            return None, None
+        if skip_wigner:
+            # Direction-only consumers normally construct their own geometry.
+            # An installed stack schedule may instead supply one packed frame.
+            producer = getattr(self, "_shared_direction_frame", None)
+            packed = None if producer is None else producer(self, graph)
+            return packed, packed
+        if getattr(self, "use_packed_wigner", False) and (
+            not self.use_so2 or graph.edge_vector.is_cuda
+        ):
+            packed = self.o2_angular_basis.forward_packed(graph.edge_vector)
+            return packed, packed
+        return self.o2_angular_basis(graph.edge_vector)
+
     def forward(self, data: Dict[str, torch.Tensor], graph) -> Dict[str, torch.Tensor]:
 
         node_type = graph.node_type
@@ -595,28 +616,15 @@ class NodeRepresentation(torch.nn.Module):
         message_cutoff = None
         if self.use_cutoff_scatter_norm:
             message_cutoff = CutoffScatterNorm.edge_weights(
-                edge_cutoff, data["edge_index"][1], node_type.size(0)
+                edge_cutoff,
+                data["edge_index"][1],
+                graph.lmp_natoms[0]
+                if graph.lmp_data is not None
+                else node_type.size(0),
             ).to(self.model_dtype)
 
         # === angular basis ===
-        edge_wigner = None
-        edge_wigner_inv = None
-        skip_wigner = getattr(self, "_can_skip_wigner", False) and all(
-            interaction.use_eqx
-            for interaction in self.interactions
-            if isinstance(interaction, UuO2Interaction)
-        )
-        if (
-            getattr(self, "use_local_frame", self.use_so2 or self.use_o2)
-            and not skip_wigner
-        ):
-            if getattr(self, "use_packed_wigner", False) and (
-                not self.use_so2 or graph.edge_vector.is_cuda
-            ):
-                edge_wigner = self.o2_angular_basis.forward_packed(graph.edge_vector)
-                edge_wigner_inv = edge_wigner
-            else:
-                edge_wigner, edge_wigner_inv = self.o2_angular_basis(graph.edge_vector)
+        edge_wigner, edge_wigner_inv = self._spatial_frames(data, graph)
         edge_attrs = (
             self.o3_angular_basis(
                 graph.edge_vector / graph.edge_length.clamp_min(1e-12)
@@ -653,8 +661,11 @@ class NodeRepresentation(torch.nn.Module):
                 for key, value in edge_wigner_inv.items()
             }
         elif edge_wigner is not None:
+            shared_rotation = edge_wigner_inv is edge_wigner
             edge_wigner = edge_wigner.to(self.model_dtype)
-            edge_wigner_inv = edge_wigner_inv.to(self.model_dtype)
+            edge_wigner_inv = (
+                edge_wigner if shared_rotation else edge_wigner_inv.to(self.model_dtype)
+            )
 
         initial_noncollinear_magmoms = data.get("initial_noncollinear_magmoms")
         magnetic_radial_basis = None
@@ -933,7 +944,9 @@ class PairRepresentation(torch.nn.Module):
             use_interpolation=radial_basis["use_interpolation"],
         )
         if self.radial_basis.widths is not None and interaction_type != "cgtp":
-            raise ValueError(f"{radial_basis['radial_basis']} requires a cgtp pair interaction.")
+            raise ValueError(
+                f"{radial_basis['radial_basis']} requires a cgtp pair interaction."
+            )
         if interaction_type not in EDGE_INTERACTION:
             raise ValueError("interaction_type must be 'cgtp' or 'o2'.")
         self.interactions = torch.nn.ModuleList()

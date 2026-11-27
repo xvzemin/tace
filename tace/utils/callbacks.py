@@ -9,6 +9,9 @@ import weakref
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.trainer.states import TrainerFn
 
+from ..lightning.foundation import (
+    FoundationTrainingCallback as FoundationTrainingCallback,
+)
 from .ema import ExponentialMovingAverage
 
 

@@ -3,6 +3,7 @@
 # License: MIT, see LICENSE.md
 ################################################################################
 
+from contextvars import ContextVar
 from typing import Dict, Sequence, Union
 
 import torch
@@ -12,9 +13,97 @@ from ..lammps import AOTI_LAMMPS_GHOST_EXCHANGE, Graph
 from ..utils import compute_symmetric_displacement, stress_from_virials
 from .compile import compiled_call, trace_and_compile
 
+_loading_frozen_graph = ContextVar("tace_loading_frozen_graph", default=False)
 
-class CompileTensorModel(TensorModel):
+_LES_FIELD_OR_SPIN_KEYS = frozenset(
+    {
+        "electric_field",
+        "magnetic_field",
+        "initial_collinear_magmoms",
+        "initial_noncollinear_magmoms",
+        "initial_magmoms",
+    }
+)
+
+
+def _valid_periodic_les_cell(pbc, lattice):
+    # Explicit 3x3 determinant: no CUDA LU synchronization in each inference.
+    a, b, c = lattice.unbind(dim=-2)
+    volume = (a * torch.linalg.cross(b, c, dim=-1)).sum(-1)
+    return pbc.all() & (torch.isfinite(volume) & (volume > 0)).all()
+
+
+class _GraphTensorModel(TensorModel):
+    """Tensor ABI shared by graph export and live compilation."""
+
     shape_padding = True
+
+    def _input_keys(self, data: Dict[str, torch.Tensor]) -> tuple[str, ...]:
+        required = [
+            "positions",
+            "node_type",
+            "edge_index",
+            "edge_shifts",
+            "lattice",
+            "batch",
+            "ptr",
+        ]
+        if "fidelity_idx" in data:
+            required.append("fidelity_idx")
+        if "pbc" in data:
+            required.append("pbc")
+        if "edge_pair_rows" in data:
+            required.extend(("edge_pair_rows", "edge_pair_inverse"))
+        if self._requires_noncollinear_magmoms():
+            required.append("initial_noncollinear_magmoms")
+        if self._requires_total_charge():
+            required.append("total_charge")
+        if "direct_hessian" in self.get_target_property():
+            required.extend(
+                [
+                    "direct_hessian_pair_index",
+                    "direct_hessian_edge_pairs",
+                    "direct_hessian_edge_shifts",
+                ]
+            )
+        missing = [key for key in required if key not in data]
+        if missing:
+            raise KeyError(f"missing compile inputs: {missing}")
+        return tuple(required)
+
+    def _output_keys(self) -> tuple[str, ...]:
+        target_property = self.get_target_property()
+        keys = []
+        if "energy" in target_property:
+            keys.extend(["energy", "node_energy"])
+        keys.extend(
+            key
+            for key in (
+                "direct_forces",
+                "direct_virials",
+                "direct_stress",
+                "forces",
+                "virials",
+                "stress",
+                "noncollinear_magnetic_forces",
+                "charges",
+                "direct_hessian",
+            )
+            if key in target_property
+        )
+        return tuple(keys)
+
+    def _requires_noncollinear_magmoms(self) -> bool:
+        return (
+            "initial_noncollinear_magmoms" in self.get_embedding_property()
+            or "noncollinear_magnetic_forces" in self.get_target_property()
+        )
+
+    def _requires_total_charge(self) -> bool:
+        return "charges" in self.get_target_property()
+
+
+class CompileTensorModel(_GraphTensorModel):
     allowed_properties = frozenset(
         {
             "energy",
@@ -151,69 +240,6 @@ class CompileTensorModel(TensorModel):
         result.update(zip(output_keys, outputs))
         return result
 
-    def _input_keys(self, data: Dict[str, torch.Tensor]) -> tuple[str, ...]:
-        required = [
-            "positions",
-            "node_type",
-            "edge_index",
-            "edge_shifts",
-            "lattice",
-            "batch",
-            "ptr",
-        ]
-        if "fidelity_idx" in data:
-            required.append("fidelity_idx")
-        if "pbc" in data:
-            required.append("pbc")
-        if "edge_pair_rows" in data:
-            required.extend(("edge_pair_rows", "edge_pair_inverse"))
-        if self._requires_noncollinear_magmoms():
-            required.append("initial_noncollinear_magmoms")
-        if self._requires_total_charge():
-            required.append("total_charge")
-        if "direct_hessian" in self.get_target_property():
-            required.extend(
-                [
-                    "direct_hessian_pair_index",
-                    "direct_hessian_edge_pairs",
-                    "direct_hessian_edge_shifts",
-                ]
-            )
-        missing = [key for key in required if key not in data]
-        if missing:
-            raise KeyError(f"missing compile inputs: {missing}")
-        return tuple(required)
-
-    def _output_keys(self) -> tuple[str, ...]:
-        target_property = self.get_target_property()
-        keys = []
-        if "energy" in target_property:
-            keys.extend(["energy", "node_energy"])
-        keys.extend(
-            key
-            for key in ("direct_forces", "direct_virials", "direct_stress")
-            if key in target_property
-        )
-        keys.extend(
-            key for key in ("forces", "virials", "stress") if key in target_property
-        )
-        if "noncollinear_magnetic_forces" in target_property:
-            keys.append("noncollinear_magnetic_forces")
-        if "charges" in target_property:
-            keys.append("charges")
-        if "direct_hessian" in target_property:
-            keys.append("direct_hessian")
-        return tuple(keys)
-
-    def _requires_noncollinear_magmoms(self) -> bool:
-        return (
-            "initial_noncollinear_magmoms" in self.get_embedding_property()
-            or "noncollinear_magnetic_forces" in self.get_target_property()
-        )
-
-    def _requires_total_charge(self) -> bool:
-        return "charges" in self.get_target_property()
-
     @classmethod
     def _validate_compile_properties(cls, readout_fn: torch.nn.Module) -> None:
         if hasattr(readout_fn, "les"):
@@ -250,7 +276,7 @@ class CompileTensorModel(TensorModel):
 class FlatTorchModel(torch.nn.Module):
     def __init__(
         self,
-        model: CompileTensorModel,
+        model: _GraphTensorModel,
         input_keys: Sequence[str],
         output_keys: Sequence[str],
     ) -> None:
@@ -266,9 +292,18 @@ class FlatTorchModel(torch.nn.Module):
             model.flags.compute_noncollinear_magnetic_forces
         )
         self.training_mode = model.training
+        self.periodic_les = getattr(model, "_periodic_les_graph", False)
 
     def forward(self, *args: torch.Tensor) -> tuple[torch.Tensor, ...]:
         data = {key: value for key, value in zip(self.input_keys, args)}
+        # CUDA Inductor benchmarks its generated kernels on synthetic data.
+        # Testing cell values there can poison compilation with a device-side
+        # assert. The graph loader validates the same precondition before launch.
+        if self.periodic_les and data["lattice"].device.type == "cpu":
+            torch._assert_async(
+                _valid_periodic_les_cell(data["pbc"], data["lattice"]),
+                "LES requires fully periodic finite cells with positive volume",
+            )
         graph = self._prepare_graph(data)
         output = self.readout_fn(data, graph)
         if (

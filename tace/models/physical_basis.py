@@ -183,7 +183,7 @@ class SpacePhysicalBasis(torch.nn.Module):
     ) -> torch.Tensor:
         """Return all selected modes, ordered by degree, for each edge."""
         x = scaled_pair_distance(distance, atomic_numbers, edge_index, self.lengthscale)
-        backend = "cuda" if acceleration_enabled("eqx", kernel="conv") else "torch"
+        backend = None if acceleration_enabled("eqx", kernel="conv") else "torch"
         if self.use_interpolation:
             return uniform_cubic_spline(
                 x, self.spline_table, self.step, backend=backend
@@ -337,7 +337,7 @@ class ExpWeightedjnSphericalBesselBasis(torch.nn.Module):
     ) -> torch.Tensor:
         """Evaluate the degree-ordered modes on the given edges."""
         x = scaled_pair_distance(distance, node_type, edge_index, self.lengthscale)
-        backend = "cuda" if acceleration_enabled("eqx", kernel="conv") else "torch"
+        backend = None if acceleration_enabled("eqx", kernel="conv") else "torch"
         return fourier_radial(
             x,
             self.frequencies,

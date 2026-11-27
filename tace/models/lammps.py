@@ -5,6 +5,7 @@
 
 import threading
 from contextlib import contextmanager
+from math import prod
 from typing import Any, Iterator, NamedTuple, Tuple, Union
 
 import torch
@@ -35,38 +36,33 @@ def use_lammps_mliap_data(data: Any) -> Iterator[None]:
             _LAMMPS_MLIAP_CONTEXT.data = previous
 
 
+def exchange_rows(features, exchange):
+    """Exchange packed atom rows with a Kokkos ML-IAP callback."""
+    width = prod(features.shape[1:])
+    rows = features.contiguous().resolve_neg().view(features.shape[0], width)
+    result = features.new_empty(features.shape)
+    exchange(rows, result.view(features.shape[0], width), width)
+    return result
+
+
 @torch.library.custom_op("tace::lammps_forward_exchange", mutates_args=())
 def _lammps_forward_exchange(node_features: torch.Tensor) -> torch.Tensor:
-    lmp_data = _current_lammps_mliap_data()
-    original_shape = node_features.shape
-    node_features_flat = node_features.reshape(node_features.size(0), -1)
-    out_flat = torch.empty_like(node_features_flat)
-    lmp_data.forward_exchange(node_features_flat, out_flat, out_flat.size(-1))
-    return out_flat.reshape(original_shape)
+    return exchange_rows(node_features, _current_lammps_mliap_data().forward_exchange)
 
 
 @_lammps_forward_exchange.register_fake
 def _lammps_forward_exchange_fake(node_features: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(node_features)
+    return node_features.new_empty(node_features.shape)
 
 
 @torch.library.custom_op("tace::lammps_reverse_exchange", mutates_args=())
 def _lammps_reverse_exchange(grad_output: torch.Tensor) -> torch.Tensor:
-    lmp_data = _current_lammps_mliap_data()
-    original_shape = grad_output.shape
-    grad_output_flat = grad_output.reshape(grad_output.size(0), -1)
-    grad_input_flat = torch.empty_like(grad_output_flat)
-    lmp_data.reverse_exchange(
-        grad_output_flat,
-        grad_input_flat,
-        grad_input_flat.size(-1),
-    )
-    return grad_input_flat.reshape(original_shape)
+    return exchange_rows(grad_output, _current_lammps_mliap_data().reverse_exchange)
 
 
 @_lammps_reverse_exchange.register_fake
 def _lammps_reverse_exchange_fake(grad_output: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(grad_output)
+    return grad_output.new_empty(grad_output.shape)
 
 
 def _lammps_exchange_backward(ctx, grad_output: torch.Tensor):
@@ -81,25 +77,13 @@ torch.library.register_autograd(
 
 class GhostExchange(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, *args):
-        node_features, lmp_data = args
-        original_shape = node_features.shape
-        node_features_flat = node_features.view(node_features.size(0), -1)
-        out_flat = torch.empty_like(node_features_flat)
-        lmp_data.forward_exchange(node_features_flat, out_flat, out_flat.size(-1))
-
-        # save for backward
-        ctx.original_shape = original_shape
+    def forward(ctx, node_features, lmp_data):
         ctx.lmp_data = lmp_data
-
-        return out_flat.view(original_shape)
+        return exchange_rows(node_features, lmp_data.forward_exchange)
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_output_flat = grad_output.view(grad_output.size(0), -1)
-        gout_flat = torch.empty_like(grad_output_flat)
-        ctx.lmp_data.reverse_exchange(grad_output_flat, gout_flat, gout_flat.size(-1))
-        return gout_flat.view(ctx.original_shape), None
+        return exchange_rows(grad_output, ctx.lmp_data.reverse_exchange), None
 
 
 class e3nnGhostExchangeMixin:
@@ -119,12 +103,11 @@ class e3nnGhostExchangeMixin:
         if node_feats.shape[0] == expected_total:
             node_feats = self._exchange_lammps(node_feats, lmp_data)
             return node_feats
-        pad = torch.zeros(
-            (nghosts, node_feats.shape[1]),
-            dtype=node_feats.dtype,
-            device=node_feats.device,
+        # Release the zero-filled ghost staging rows before exchange allocates
+        # its distinct full-size Kokkos output.
+        node_feats = torch.cat(
+            (node_feats, node_feats.new_zeros((nghosts, node_feats.shape[1]))), dim=0
         )
-        node_feats = torch.cat((node_feats, pad), dim=0)
         node_feats = self._exchange_lammps(node_feats, lmp_data)
         return node_feats
 

@@ -4,10 +4,12 @@ Set TACE_TEST_MODEL_DIR to a directory containing the three .pt checkpoints.
 No models are downloaded during the test run.
 """
 
+import ctypes
 import importlib
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -21,6 +23,214 @@ from ase.md.verlet import VelocityVerlet
 
 from tace.interface.ase import MagneticFIRE, TACEAseCalc
 from tace.models.adapter import TensorModel
+
+
+@pytest.mark.parametrize("backend", ["matscipy", "ase"])
+def test_ase_neighbor_skin_matches_directed_image_pairs(backend, monkeypatch):
+    from tace.dataset import neighbour_list as nl
+
+    exact = nl.get_neighborhood
+    search = Mock(wraps=exact)
+    monkeypatch.setattr(nl, "get_neighborhood", search)
+    cache = nl.VerletNeighborList(0.6)
+    for invalid in (0, -0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="skin"):
+            nl.VerletNeighborList(invalid)
+
+    def rows(edges, shifts):
+        return sorted(map(tuple, np.column_stack((edges.T, shifts)).tolist()))
+
+    def check(coords, cell, pbc, cutoff=1.0):
+        kw = dict(
+            positions=coords,
+            lattice=cell,
+            pbc=pbc,
+            cutoff=cutoff,
+            max_neighbors=None,
+            backend=backend,
+        )
+        got, shifts, boundary, lattice = cache(**kw)
+        want, images, _, _ = exact(**kw)
+        assert rows(got, shifts) == rows(want, images)
+        assert tuple(boundary) == tuple(pbc)
+        np.testing.assert_array_equal(lattice, cell)
+        return got.shape[1]
+
+    xy = np.array([[0.0, 0.0, 0.0], [1.05, 0.0, 0.0]])
+    cell = np.diag([5.0, 5.0, 5.0])
+    free = (False, False, False)
+    assert check(xy, cell, free) == 0
+    xy[1, 0] = 0.95
+    assert check(xy, cell, free) == 2
+    xy[1, 0] = 1.08
+    assert check(xy, cell, free) == 0
+    assert search.call_count == 1
+    xy[1, 0] = 1.0
+    check(xy, cell, free)  # Match the backend's exact-shell convention.
+    xy[1, 0] = 2.1
+    check(xy, cell, free)
+    assert search.call_count == 3
+
+    # Include periodic self images, triclinic shifts and wrapped coordinates.
+    cell = np.array([[1.85, 0.0, 0.0], [0.3, 2.1, 0.0], [0.1, 0.2, 5.0]])
+    slab = (True, True, False)
+    for dx in (0.0, 0.07, 1.85):
+        check(xy + [[dx, 0, 0], [0, 0, 0]], cell, slab, 2.05)
+    assert check(xy[:1], cell, slab, 2.05) > 0
+    assert check(xy[:1], cell * 2, slab, 2.05) == 0
+    check(xy, cell, (True, False, False), 1.9)
+
+    # Small affine shears reuse image indices but not the old Cartesian shifts.
+    pbc = (True,) * 3
+    check(xy, cell, pbc, 2.07)
+    searches = search.call_count
+    strain = np.array([[1.01, 0.07, 0.0], [0.0, 0.99, 0.0], [0.0, 0.0, 1.0]])
+    check(xy @ strain, cell @ strain, pbc, 2.07)
+    assert search.call_count == searches
+    # Compression can move a previously absent periodic image inside the cutoff.
+    check(xy * 0.6, cell * 0.6, pbc, 2.07)
+    assert search.call_args_list[searches].args[1] == 2.07 + cache.skin
+
+    check(
+        np.array([[0.05, 0.1, 0.3], [0.85, 0.6, 0.4]]),
+        np.diag([0.0, 3.0, 3.0]),
+        (True, False, False),
+        0.4,
+    )
+    rng = np.random.default_rng(3)
+    start, direction = rng.normal(size=(2, 3))
+    direction /= np.linalg.norm(direction)
+    cell = np.array([[3.7, 0.37, 0.15], [-0.75, 3.4, 0.5], [0.5, -0.13, 2.9]])
+    for delta in (-1e-10, 0.0, 1e-10):
+        r = 1.219123654
+        check(
+            np.stack((start, start + 20000 * cell[0] + (r + delta) * direction)),
+            cell,
+            pbc,
+            r,
+        )
+
+
+def test_vesin_rejects_singular_periodic_plane():
+    from tace.dataset.neighbour_list import VerletNeighborList, get_neighborhood
+
+    for neighbors in (get_neighborhood, VerletNeighborList(0.5)):
+        with pytest.raises(ValueError, match="nonsingular neighbor-search cell"):
+            neighbors(
+                positions=np.zeros((2, 3)),
+                cutoff=1.0,
+                pbc=(True, True, False),
+                lattice=np.array([[2.0, 0, 0], [2.0, 0, 0], [0.0, 0, 2.0]]),
+                max_neighbors=None,
+                backend="vesin",
+            )
+
+
+def test_ase_neighbor_skin_energy_forces_stress(double_precision):
+    from .test_model_loading import make_model
+
+    model = make_model().cpu()
+    ordinary = TACEAseCalc(model, device="cpu")
+    cached = TACEAseCalc(model, device="cpu", neighbor_skin=0.6)
+    atoms = Atoms(
+        "HCO",
+        positions=[[0, 0, 0], [1.3, 0.2, 0], [4.05, 0.1, 0]],
+        pbc=True,
+        cell=[7.3, 6.8, 5.6],
+    )
+    for x, symbol in [(4.05, "O"), (3.92, "C"), (4.08, "H")]:
+        atoms.positions[2, 0] = x
+        atoms[2].symbol = symbol
+        ordinary.calculate(atoms)
+        cached.calculate(atoms)
+        for key in ("energy", "forces", "stress"):
+            np.testing.assert_allclose(
+                cached.results[key], ordinary.results[key], rtol=1e-10, atol=1e-10
+            )
+
+
+@pytest.mark.parametrize("edges", [0, 4])
+def test_ase_single_graph_staging_and_batch_observers(edges):
+    from torch.nn.modules import module as module_hooks
+    from torch_geometric.data import Batch, Data
+
+    from tace.interface.ase.calculator import _single_model_input
+    from tace.models.adapter import TensorModel
+
+    # Include a noncontiguous input, a scalar, node, cell, edge and pair
+    # tensors. A PyG singleton cat isolates user-owned source storage.
+    graph = Data(
+        num_nodes=3,
+        positions=torch.arange(18.0).view(3, 6)[:, ::2],
+        entropy=torch.tensor(2.3),
+        fidelity_idx=torch.tensor([2]),
+        lattice=torch.eye(3)[None],
+        edge_index=torch.zeros(2, edges, dtype=torch.long),
+        edge_shifts=torch.zeros(edges, 3, dtype=torch.int64),
+        initial_noncollinear_magmoms=torch.randn(3, 3),
+        direct_hessian=torch.randn(9, 3, 3),
+    )
+    # This test exercises collation, not a dummy readout.
+    model = TensorModel.__new__(TensorModel)
+    torch.nn.Module.__init__(model)
+    cpu = torch.device("cpu")
+    expected = Batch.from_data_list([graph])
+    got = _single_model_input(model, graph, cpu)
+    assert type(got) is dict and got.keys() == dict(expected.items()).keys()
+    for k, v in expected.items():
+        if isinstance(v, torch.Tensor):
+            torch.testing.assert_close(got[k], v, rtol=0, atol=0, check_stride=True)
+        else:
+            assert got[k] == v
+    before = graph.positions.clone()
+    got["positions"].zero_()
+    torch.testing.assert_close(graph.positions, before)
+
+    def assert_batch(m, g):
+        out = _single_model_input(m, g, cpu)
+        assert isinstance(out, Batch) and out.num_graphs == 1
+        torch.testing.assert_close(out.to_data_list()[0].positions, g.positions)
+
+    with model.register_forward_pre_hook(lambda *_: None):
+        assert_batch(model, graph)
+    with module_hooks.register_module_forward_hook(lambda *_: None):
+        assert_batch(model, graph)
+
+    class Custom(TensorModel):
+        pass
+
+    host = Custom.__new__(Custom)
+    torch.nn.Module.__init__(host)
+    assert_batch(host, graph)
+    graph.note = "nonstandard conditioning"
+    assert_batch(model, graph)
+
+
+def test_ase_native_model_hooks_receive_real_batch(double_precision):
+    from torch_geometric.data import Batch
+
+    from .test_model_loading import make_model
+
+    atoms = Atoms(
+        "HCO",
+        positions=[[0, 0, 0], [1.3, 0.2, 0], [2.1, 0.1, 0]],
+        cell=[8.1, 7.3, 6.8],
+        pbc=True,
+    )
+    calc = TACEAseCalc(make_model().cpu(), device="cpu")
+    calc.calculate(atoms)
+    expected = dict(calc.results)
+    seen = []
+
+    def observer(_, args):
+        assert isinstance(args[0], Batch)
+        seen.append(args[0].get_example(0).num_nodes)
+
+    with calc.model.register_forward_pre_hook(observer):
+        calc.calculate(atoms)
+    assert seen == [3]
+    for k, v in expected.items():
+        np.testing.assert_allclose(calc.results[k], v, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("custom_keys", [False, True])
@@ -331,6 +541,108 @@ def lammps_kokkos():
         yield lammps, pytest.importorskip("lammps.mliap")
     finally:
         probe.lib.lammps_kokkos_finalize()
+
+
+@pytest.mark.parametrize("flag", [None, 0, 1, 2, 3, 4])
+def test_kokkos_energy_requests_and_directed_pair_rows(flag):
+    pytest.importorskip("lammps.mliap.mliap_unified_abc")
+    from tace.interface.lammps import TACELammpsCalc
+
+    data = SimpleNamespace(
+        npairs=3,
+        pair_i=np.array([0, 1, 0], dtype=np.int32),
+        pair_j=np.array([1, 3, 2], dtype=np.int32),
+        rij=np.ones((3, 3)),
+        eatoms=torch.full((2,), -7.0, dtype=torch.float64),
+        energy=-11.0,
+        update_pair_forces=Mock(),
+    )
+    if flag is not None:
+        data.eflag = flag
+    calc = SimpleNamespace(device=torch.device("cpu"))
+    batch = TACELammpsCalc._prepare_batch(
+        calc, data, 2, 2, torch.zeros(4, dtype=torch.long)
+    )
+    assert (
+        batch["edge_index"].dtype == torch.int64 and batch["edge_index"].is_contiguous()
+    )
+    assert batch["edge_index"].tolist() == [[1, 3, 2], [0, 1, 0]]
+    assert batch["edge_vector"].requires_grad
+    forces = torch.arange(18, dtype=torch.float32).reshape(3, 6)[:, ::2]
+    TACELammpsCalc._update_lammps_data(data, torch.tensor([1.0, 2.0, 4.0]), forces, 2)
+    (sent,) = data.update_pair_forces.call_args.args
+    assert sent.is_contiguous() and sent.dtype == torch.float64
+    torch.testing.assert_close(sent, forces.double())
+    assert data.eatoms.tolist() == ([-7.0, -7.0] if flag == 0 else [1.0, 2.0])
+    assert data.energy == (-11.0 if flag == 0 else 3.0)
+    data.npairs = 0
+    data.pair_i = data.pair_j = data.rij = None
+    empty = TACELammpsCalc._prepare_batch(
+        calc, data, 2, 2, torch.zeros(4, dtype=torch.long)
+    )
+    assert empty["edge_index"].shape == (2, 0) and empty["edge_vector"].shape == (0, 3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA force handoff")
+def test_kokkos_force_only_handoff_synchronizes_new_buffer(monkeypatch):
+    pytest.importorskip("lammps.mliap.mliap_unified_abc")
+    from tace.interface.lammps import TACELammpsCalc
+
+    source = torch.arange(18, dtype=torch.float64, device="cuda").reshape(3, 6)
+    scalar = source.new_zeros(1)
+    stream = Mock(wraps=torch.cuda.current_stream())
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *_: stream)
+    dense = source[:, :3].contiguous()
+    for forces, waits in (
+        (dense, 0),
+        (torch._neg_view(dense), 1),
+        (source[:, ::2], 1),
+        (source[:, ::2].float(), 1),
+    ):
+
+        def accept(sent, forces=forces, waits=waits):
+            assert (
+                not sent.is_neg()
+                and sent.dtype == torch.float64
+                and sent.is_contiguous()
+            )
+            assert stream.synchronize.call_count == waits
+            assert (sent.data_ptr() == forces.data_ptr()) == (waits == 0)
+            torch.testing.assert_close(sent, forces.double())
+
+        data = SimpleNamespace(eflag=0, update_pair_forces=Mock(side_effect=accept))
+        stream.reset_mock()
+        TACELammpsCalc._update_lammps_data(data, scalar, forces, 1)
+        data.update_pair_forces.assert_called_once()
+
+
+@pytest.mark.parametrize("eflag", [0, 3])
+def test_kokkos_raw_force_pointer_uses_logical_sign(eflag):
+    pytest.importorskip("lammps.mliap.mliap_unified_abc")
+    from tace.interface.lammps import TACELammpsCalc
+
+    force = torch.tensor([[1.0, -2.0, 3.0]], dtype=torch.float64)
+    negative = torch._neg_view(force)
+    assert (
+        negative.is_neg()
+        and negative.is_contiguous()
+        and negative.data_ptr() == force.data_ptr()
+    )
+
+    def accept(sent):
+        assert not sent.is_neg()
+        # Exactly what a C consumer of the pointer sees, without Tensor dispatch.
+        assert list((ctypes.c_double * 3).from_address(sent.data_ptr())) == [
+            -1.0,
+            2.0,
+            -3.0,
+        ]
+
+    data = SimpleNamespace(
+        eflag=eflag, eatoms=torch.zeros(1), update_pair_forces=Mock(side_effect=accept)
+    )
+    TACELammpsCalc._update_lammps_data(data, torch.ones(1), negative, 1)
+    data.update_pair_forces.assert_called_once()
 
 
 @pytest.mark.parametrize("accelerated", [False, True])
@@ -720,7 +1032,9 @@ def test_torchsim_system_fidelity_validation(
         torchsim_calculator()(torchsim_state)
 
 
-def test_clean_cli_preserves_outputs_on_help_and_invalid_arguments(tmp_path, monkeypatch):
+def test_clean_cli_preserves_outputs_on_help_and_invalid_arguments(
+    tmp_path, monkeypatch
+):
     from tace.scripts.clean import main
 
     monkeypatch.chdir(tmp_path)

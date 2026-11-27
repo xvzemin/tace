@@ -6,6 +6,7 @@
 import math
 
 import torch
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from equivariantx import co2, co3, o2
 from equivariantx.o2.rotation_matrix import rotation_matrix_to_y_axis
@@ -91,7 +92,7 @@ def use_streamed_convolution(plan, features, edge_index):
         plan is not None
         and features.is_cuda
         and features.dtype == torch.float32
-        and edge_index.shape[1] >= 8192
+        and statically_known_true(edge_index.shape[1] >= 8192)
     )
 
 

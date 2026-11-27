@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from functools import lru_cache
+from itertools import chain
 
 import torch
 
@@ -52,7 +53,7 @@ def metadata_batches(metadata, max_entries=1024):
 
 
 @lru_cache(maxsize=128)
-def forward_source(dtype, metadata, terms):
+def forward_source(dtype, metadata, terms, extra_inputs=()):
     plans = decode_plans(metadata)
     groups = defaultdict(list)
     for term_index, (plan, mapping, _, _) in enumerate(terms):
@@ -76,12 +77,23 @@ def forward_source(dtype, metadata, terms):
             f"case {index}: {{",
             f"for(int q=t;q<{4 * width};q+=blockDim.x) {{ int u=q%{width}; long long n=n0+q/{width}; scalar v=0; if(n<nodes) {{",
         ]
-        for (sx, sy, dx, dy), coefficient in angular.items():
-            parts.append(
-                f"v += scalar({coefficient:.17g})*p{mapping[0]}[n*{dim[0]}+{sx}+u*{dx}]*p{mapping[1]}[n*{dim[1]}+{sy}+u*{dy}];"
-            )
+        factors = ((mapping[0], mapping[1], mapping[4]), *extra_inputs)
+        if extra_inputs:
+            parts.append("scalar total=0;")
+        for i, (left, right, gate_input) in enumerate(factors):
+            if i:
+                parts.append("v=0;")
+            for (sx, sy, dx, dy), coefficient in angular.items():
+                parts.append(
+                    f"v += scalar({coefficient:.17g})*p{left}[n*{dim[0]}+{sx}+u*{dx}]*p{right}[n*{dim[1]}+{sy}+u*{dy}];"
+                )
+            if extra_inputs:
+                parts.append(f"total+=v*p{gate_input}[n*{dim[4]}+{gate}+u];")
+        reduce = (
+            "v=total;" if extra_inputs else f"v*=p{mapping[4]}[n*{dim[4]}+{gate}+u];"
+        )
         parts += [
-            f"v*=p{mapping[4]}[n*{dim[4]}+{gate}+u]; }} a[q]=v; }}",
+            f"{reduce} }} a[q]=v; }}",
             "__syncthreads();",
         ]
         # Schedule expert outputs together. A narrow expert must not leave
@@ -112,6 +124,8 @@ def forward_source(dtype, metadata, terms):
         parts += ["}", "return; }"]
         cases.append("\n".join(parts))
     count = max(i for _, mapping, _, _ in terms for i in mapping) + 1
+    if extra_inputs:
+        count = max(count, 1 + max(i for factors in extra_inputs for i in factors))
     pointers = ", ".join(f"const scalar* p{i}" for i in range(count))
     scalar = "double" if dtype == torch.float64 else "float"
     code = f"""using scalar={scalar};
@@ -293,7 +307,7 @@ def inputs_source(dtype, metadata, branches, roles, large_batch=False):
 
 
 @lru_cache(maxsize=128)
-def weights_source(dtype, metadata, terms):
+def weights_source(dtype, metadata, terms, extra_inputs=()):
     plans = decode_plans(metadata)
     paths = defaultdict(list)
     for term_index, (plan, mapping, _, slot) in enumerate(terms):
@@ -324,12 +338,25 @@ def weights_source(dtype, metadata, terms):
             f"for(int start=0;start<{width};start+={tile_width}) {{",
             f"for(int u=start+t;u<{width} && u<start+{tile_width};u+=blockDim.x) {{ scalar v[{dz}]={{}};",
         ]
-        for (a, b, c), coefficient in angular.items():
-            parts.append(
-                f"v[{c}]+=scalar({coefficient:.17g})*p{mapping[0]}[n*{dims[0]}+{sx + a}+u*{dx}]*p{mapping[1]}[n*{dims[1]}+{sy + b}+u*{dy}];"
-            )
+        factors = ((mapping[0], mapping[1], mapping[4]), *extra_inputs)
+        if extra_inputs:
+            parts.append(f"scalar total[{dz}]={{}};")
+        for i, (left, right, gate_input) in enumerate(factors):
+            if i:
+                parts.append(f"for(int m=0;m<{dz};++m) v[m]=0;")
+            for (a, b, c), coefficient in angular.items():
+                parts.append(
+                    f"v[{c}]+=scalar({coefficient:.17g})*p{left}[n*{dims[0]}+{sx + a}+u*{dx}]*p{right}[n*{dims[1]}+{sy + b}+u*{dy}];"
+                )
+            if extra_inputs:
+                parts.append(
+                    f"for(int m=0;m<{dz};++m) total[m]+=v[m]*p{gate_input}[n*{dims[4]}+{gate}+u];"
+                )
+        result = (
+            "total[m]" if extra_inputs else f"v[m]*p{mapping[4]}[n*{dims[4]}+{gate}+u]"
+        )
         parts += [
-            f"for(int m=0;m<{dz};++m) angular[(u-start)*{dz}+m]=v[m]*p{mapping[4]}[n*{dims[4]}+{gate}+u]; }}",
+            f"for(int m=0;m<{dz};++m) angular[(u-start)*{dz}+m]={result}; }}",
             "__syncthreads();",
         ]
         for (plan, mapping, sw, so, shift, ci, co, slot, _), scale in maps.items():
@@ -343,6 +370,8 @@ def weights_source(dtype, metadata, terms):
         parts.append("__syncthreads(); } return; }")
         cases.append("\n".join(parts))
     count = max(i for _, mapping, _, _ in terms for i in mapping) + 1
+    if extra_inputs:
+        count = max(count, 1 + max(i for factors in extra_inputs for i in factors))
     slots = tuple(sorted({slot for _, _, _, slot in terms}))
     pointers = ", ".join(f"const scalar* p{i}" for i in range(count))
     destinations = ", ".join(f"scalar* o{slot}" for slot in slots)
@@ -360,16 +389,50 @@ def weights_source(dtype, metadata, terms):
     )
 
 
+@lru_cache(maxsize=128)
+def factor_groups(groups, input_role):
+    """Share the coefficient contraction across matching product-rule terms.
+
+    Everything except the two features and their gate must match, including
+    coefficient plan (element/shared), other factor, slot and term multiplicity.
+    """
+    by_output = defaultdict(list)
+    for inputs, terms in groups:
+        by_output[tuple((p, m[input_role], slot) for p, m, _, slot in terms)].append(
+            (inputs, terms)
+        )
+    jobs = []
+    for matched in by_output.values():
+        if 2 <= len(matched) <= 3:
+            jobs.append((matched[0][1], tuple(inputs for inputs, _ in matched[1:])))
+        else:
+            jobs.extend((terms, ()) for _, terms in matched)
+    return tuple(jobs)
+
+
+@lru_cache(maxsize=128)
+def wide_projections(metadata):
+    # For narrow coefficient matrices there is less work to amortize the
+    # larger angular expression. Leave those schedules and mixed widths alone.
+    return all(
+        min(r[4:6]) >= 32
+        for _, _, schedules in decode_plans(metadata)
+        for _, entries in schedules[3]
+        for r, _ in entries
+    )
+
+
 def execution_jobs(metadata, program, node_type, operands, outputs):
     """Build forward and transposed launches for one group of angular paths."""
     nodes = node_type.numel()
     grouped = defaultdict(list)
+    forwards = defaultdict(list)
     weights = defaultdict(list)
     reverse = defaultdict(list)
     for term in program:
         plan, mapping, role, slot = term
         if role == 3:
-            grouped[role, slot, mapping[0], mapping[1], mapping[4]].append(term)
+            forwards[slot, (mapping[0], mapping[1], mapping[4])].append(term)
         elif role in (0, 1, 4):
             reverse[mapping[0], mapping[1], mapping[3], mapping[4]].append(term)
         else:
@@ -397,10 +460,18 @@ def execution_jobs(metadata, program, node_type, operands, outputs):
         else:
             for term in terms:
                 grouped[term[2], term[3]].append(term)
-    for key, terms in grouped.items():
-        role, slot = key[:2]
+    if len(forwards) > 1 and wide_projections(metadata):
+        forward_jobs = factor_groups(
+            tuple((k[1], tuple(v)) for k, v in forwards.items()), 2
+        )
+    else:
+        forward_jobs = ((tuple(v), ()) for v in forwards.values())
+    for terms, extra_inputs in chain(
+        forward_jobs, ((tuple(v), ()) for v in grouped.values())
+    ):
+        _, _, role, slot = terms[0]
         if role == 3:
-            code, groups, count = forward_source(dtype, metadata, tuple(terms))
+            code, groups, count = forward_source(dtype, metadata, terms, extra_inputs)
             grid = (nodes + 3) // 4
         else:
             code, groups, width, count = transpose_source(dtype, metadata, tuple(terms))
@@ -412,8 +483,14 @@ def execution_jobs(metadata, program, node_type, operands, outputs):
                 nodes,
             ]
             jobs.append((code, args, grid, groups, 128, 0))
-    for terms in weights.values():
-        code, groups, count, slots = weights_source(dtype, metadata, tuple(terms))
+    if len(weights) > 1 and wide_projections(metadata):
+        weight_jobs = factor_groups(tuple((k, tuple(v)) for k, v in weights.items()), 3)
+    else:
+        weight_jobs = ((tuple(v), ()) for v in weights.values())
+    for terms, extra_inputs in weight_jobs:
+        code, groups, count, slots = weights_source(
+            dtype, metadata, terms, extra_inputs
+        )
         if groups:
             args = [v.data_ptr() for v in operands[:count]] + [node_type.data_ptr()]
             args += [outputs[slot].data_ptr() for slot in slots] + [nodes]

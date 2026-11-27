@@ -1,5 +1,9 @@
 """Node--edge--node convolutions with Wigner-6j recoupling."""
 
+from functools import wraps
+
+import torch
+
 from ...ops.precision import validate_module_precision
 from ...ops.torch.o3.wigner6j import convolution as torch_kernel
 from .tensor_product import Wigner6jTensorProduct
@@ -27,6 +31,14 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
         Force recoupled or standard evaluation. ``None`` selects by angular
         work and node reuse. Internal execution switches take precedence.
 
+    Notes
+    -----
+    On CUDA, wide standard trees with single-copy attributes and separate
+    per-edge weights can run as two indexed contractions. The first writes
+    a bounded tile of intermediate edge features; the second sums directly
+    at destinations. Dynamic exports tile the two contractions at runtime
+    without specializing the number of edges.
+
     Examples
     --------
     >>> import torch
@@ -41,6 +53,41 @@ class Wigner6jTensorProductConv(Wigner6jTensorProduct):
     >>> layer(x, attrs, spin, edges).shape
     torch.Size([3, 18])
     """
+
+    @wraps(Wigner6jTensorProduct.__init__)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Many independent, channel-preserving paths otherwise issue one
+        # angular operation per path. Reuse the two *original* weighted
+        # tensor products; no expanded Racah weights or new model state.
+        if (
+            len(self.schedule.second_paths) >= 32
+            and torch.cuda.is_available()
+            and not torch.version.hip
+            and self.recouple is not True
+            and all(mul == 1 for _, mul, _ in self.schedule.input_sections[1])
+            and all(mul == 1 for _, mul, _ in self.schedule.input_sections[2])
+            and all(
+                ins.has_weight for tp in (self.tp1, self.tp2) for ins in tp.instructions
+            )
+            and not self.shared_weights
+        ):
+            from ...ops.cuda.o3.wigner6j.convolution import standard_expression
+            from ...utils.module import default_dtype
+            from ..cgtp.convolution import O3TensorProductConv
+
+            # Kernel metadata captures Python coefficients: preserve double
+            # accuracy even if a model constructed in FP32 is later cast.
+            with default_dtype(torch.float64):
+                self.standard12 = O3TensorProductConv(
+                    self.tp1, backend="cuda", batch_paths=True
+                )
+                self.standard123 = O3TensorProductConv(
+                    self.tp2, backend="cuda", batch_paths=True
+                )
+            self.standard12.to(self.weight1)
+            self.standard123.to(self.weight2)
+            self.standard_metadata = standard_expression(self)
 
     def forward(
         self,

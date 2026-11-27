@@ -320,6 +320,119 @@ def test_local_channel_scaling():
         losses = [sum(g.square().sum() for g in gs) for gs in gradients]
 
 
+def independent_product_spec():
+    # Permuted outputs and two different fanouts of the common input.
+    rows = (
+        ((2, -1, 0, 4), -0.75),
+        ((0, -1, 0, 1), 1.25),
+        ((-1, 1, 1, 0), 0.5),
+        ((-1, 2, 1, 3), -1.5),
+        ((1, -1, 2, 5), 2.0),
+        ((-1, 0, 3, 2), -0.25),
+    )
+    return 32, (3, 3, 4, 6), rows
+
+
+def test_joint_product_rejects_unsafe_ownership():
+    from equivariantx.ops.common.cuda.channel_product import joint_product_source
+    from equivariantx.utils.metadata import (
+        independent_channel_groups as independent_groups,
+    )
+
+    c, dims, rows = independent_product_spec()
+    metadata = repr((c, dims, rows))
+    assert len(independent_groups(metadata)) == 4
+    assert not independent_groups(repr((c, dims, rows[:-1])))  # a hole
+    assert not independent_groups(repr((c, dims, rows + (((2, -1, 2, 4), 1.0),))))
+    assert not independent_groups(
+        repr((c, (1, 1, 1, 1), (((0, 0, 0, 0), 1.0),)))
+    )  # dense
+    assert not independent_groups(
+        repr((c, (1, 1, 1), (((0, 0, 0), 1.0),)))
+    )  # ordinary scaling
+    assert not independent_groups(repr((0, dims, rows)))  # strided plan
+    # The primal sets are disjoint, but the adjoint of an aliased input now
+    # wants the same destination from both groups. Partial writes aren't safe.
+    program = repr((((0, 0, 1, 3), 0, 0, 8), ((0, 0, 1, 3), 1, 0, 8)))
+    assert joint_product_source(metadata, program, torch.float64) is None
+    # Conversely an output with no contributing rows is a real zero, not
+    # an uninitialized result of an empty joint program.
+    program = repr((((0, 1, 2, 3), 0, 0, 2),))
+    assert joint_product_source(metadata, program, torch.float64) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native CUDA channel product")
+def test_joint_product_shape_only_markers():
+    from equivariantx.ops.common.cuda.channel_product import channel_product
+
+    spec = independent_product_spec()
+    x, y, w, marker = [
+        torch.ones((rows, dim * spec[0]), device="cuda")
+        for rows, dim in zip((5, 5, 4, 0), spec[1])
+    ]
+    program = repr((((0, 1, 2, 3), 3, 0, 0),))
+    # A zero-row output marker is just a shape. An empty feature actually read by
+    # a nonempty invocation must not pass a null device pointer into the kernel.
+    assert channel_product(repr(spec), program, [x, y, w[:1].expand(5, -1), marker])[
+        0
+    ].shape == (5, 6 * spec[0])
+    with pytest.raises(ValueError, match="zero-row operand"):
+        channel_product(repr(spec), program, [x, y, w[:0], marker])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native CUDA channel product")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("shared", [True, False])
+def test_joint_product_noncontiguous_adjoints(dtype, shared, monkeypatch):
+    from equivariantx.ops.common.channel_product import local_product
+    from equivariantx.ops.common.cuda import channel_product as provider
+
+    torch.manual_seed(827)
+    c, dims, rows = independent_product_spec()
+    metadata = repr((c, dims, rows))
+    calls = []
+    original = provider.kernels
+
+    def record(sources, device):
+        calls.append(len(sources))
+        return original(sources, device)
+
+    monkeypatch.setattr(provider, "kernels", record)
+    for n in (5, 17):
+        xs = tuple(
+            (
+                torch.randn(
+                    (1 if shared and k == 2 else n, d, 2 * c),
+                    device="cuda",
+                    dtype=dtype,
+                )
+                * 0.15
+            )[..., ::2].requires_grad_()
+            for k, d in enumerate(dims[:-1])
+        )
+        result = local_product(metadata, *xs)
+        components = [None] * dims[-1]
+        for (a, b, j, i), coef in rows:
+            components[i] = (
+                coef * (xs[0][:, a] if a >= 0 else xs[1][:, b]) * xs[2][:, j]
+            )
+        expected = torch.stack(components, dim=1).flatten(1)
+        seed = torch.randn_like(result, requires_grad=True)
+        directions = [torch.randn_like(x) for x in xs]
+
+        def derivatives(y):
+            first = torch.autograd.grad(y, xs, seed, create_graph=True)
+            second = torch.autograd.grad(first, (*xs, seed), directions)
+            return (y, *first, *second)
+
+        torch.testing.assert_close(derivatives(result), derivatives(expected))
+        if shared:
+            assert max(calls) > 1  # shared-weight adjoint uses the general reduction
+        else:
+            assert calls == [1, 1, 1]
+        calls.clear()
+
+
 def diagonal_problem(space, shared, dtype, *, channels=3, simple=False):
     from equivariantx import co2, o2
 

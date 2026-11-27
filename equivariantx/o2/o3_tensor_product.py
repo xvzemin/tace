@@ -413,7 +413,8 @@ class O3TensorProduct(torch.nn.Module):
             Number of target nodes. Defaults to the input node count.
         vectors : torch.Tensor, optional
             Nonzero edge vectors, shape ``(edges, 3)`` or ``(1, 3)``. Evaluate
-            transverse couplings without selecting an alignment frame.
+            the angular coupling from these directions. Geometry and harmonic
+            amplitudes may be float64 when features are float32.
 
         Returns
         -------
@@ -484,15 +485,20 @@ class O3TensorProduct(torch.nn.Module):
             or harmonic_scale.size(1) != self.num_harmonics
         ):
             raise ValueError("Expected one amplitude per edge and harmonic entry.")
-        for value in (
-            radial,
-            projection,
-            vectors if vectors is not None else wigner,
-            harmonic_scale,
-        ):
+        for value in (radial, projection):
             if value.device != features.device or value.dtype != features.dtype:
                 raise ValueError(
-                    "All convolution operands must share dtype and device."
+                    "Radial weights and features must share dtype and device."
+                )
+        geometry = vectors if vectors is not None else wigner
+        for value in (geometry, harmonic_scale):
+            if value.device != features.device or not (
+                value.dtype == features.dtype
+                or (features.dtype == torch.float32 and value.dtype == torch.float64)
+            ):
+                raise ValueError(
+                    "Geometry must share the feature device and use feature precision "
+                    "or float64 with float32 features."
                 )
         return self.convolution(
             features,

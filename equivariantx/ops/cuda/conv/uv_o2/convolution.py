@@ -17,6 +17,7 @@ def evaluate(
     edge_index,
     vectors,
     radial_network,
+    target_features=None,
 ):
     """Evaluate the complete local convolution with CUDA kernels."""
     edge_features, conv_weights, radial_network, _ = prepare(
@@ -57,11 +58,12 @@ def evaluate(
         radial_network,
         False,
         normalized=True,
+        target_features=target_features,
     )
     return edge_program(
         metadata,
         inputs,
         *edge_index,
-        features.shape[0],
+        features.shape[0] if target_features is None else target_features.shape[0],
         inline=False,
     )[0]

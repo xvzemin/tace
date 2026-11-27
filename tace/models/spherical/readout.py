@@ -9,6 +9,7 @@ from typing import List, Union
 import torch
 from e3nn import o3
 from e3nn.nn import Activation, Gate
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ..linear import e3nnElementLinear, e3nnLinear
 from ..mlp import ACTIVATION
@@ -64,6 +65,22 @@ class EdgeReadOut(torch.nn.Module):
         """Return ``(num_edges, irreps_out.dim)`` without selecting output heads."""
         edge_feats = self.linear_down(edge_feats)
         return self.linear_nonlinearity(self.nonlinearity(edge_feats))
+
+
+def _sparse_symmetric_blocks(values, rows, reverse, num_pairs):
+    """Sum active unordered pairs once and mirror them into the dense output."""
+    key = torch.minimum(rows, reverse)
+    keys, order = key.sort()
+    opposite = torch.maximum(rows, reverse).index_select(0, order)
+    oriented = torch.where((rows == key)[:, None, None], values, values.mT)
+    # Only the first slot in each equal-key run receives contributions. This
+    # keeps shapes static even with repeated periodic images. Mirroring the
+    # already-reduced block keeps H_ij == H_ji.T even for colliding GPU adds.
+    slot = torch.searchsorted(keys, key)
+    reduced = torch.zeros_like(values).index_add_(0, slot, oriented).mul_(0.5)
+    blocks = values.new_zeros(num_pairs, 3, 3)
+    blocks.index_add_(0, keys, reduced)
+    return blocks.index_add_(0, opposite, reduced.mT)
 
 
 class DirectHessianReadout(torch.nn.Module):
@@ -133,24 +150,30 @@ class DirectHessianReadout(torch.nn.Module):
         )
 
     def to_cartesian(
-        self, coefficients: torch.Tensor, fidelity: torch.Tensor
+        self, coefficients: torch.Tensor, fidelity: torch.Tensor | None
     ) -> torch.Tensor:
-        """Select fidelity heads and convert irreps to Cartesian blocks."""
-        parts = coefficients.split(
-            [dim * self.num_fidelities for dim in self.component_dims],
-            dim=-1,
-        )
-        coefficients = torch.cat(
-            [
-                part.reshape(coefficients.size(0), self.num_fidelities, dim)
-                for part, dim in zip(parts, self.component_dims)
-            ],
-            dim=-1,
-        )
-        row = torch.arange(coefficients.size(0), device=coefficients.device)
+        """Select fidelity heads (optional for a single head) and convert blocks."""
+        if fidelity is not None:
+            parts = coefficients.split(
+                [dim * self.num_fidelities for dim in self.component_dims], dim=-1
+            )
+            row = torch.arange(coefficients.size(0), device=coefficients.device)
+            coefficients = torch.cat(
+                [
+                    part.reshape(coefficients.size(0), self.num_fidelities, dim)[
+                        row, fidelity
+                    ]
+                    for part, dim in zip(parts, self.component_dims)
+                ],
+                dim=-1,
+            )
+        elif self.num_fidelities != 1:
+            raise ValueError(
+                "Multi-fidelity Cartesian conversion needs fidelity indices."
+            )
         return torch.einsum(
             "pk,abk->pab",
-            coefficients[row, fidelity].to(torch.float64),
+            coefficients.to(torch.float64),
             self.basis.to(torch.float64),
         )
 
@@ -166,42 +189,59 @@ class DirectHessianReadout(torch.nn.Module):
     ) -> torch.Tensor:
         source, target = pair_index
         counts = ptr[1:] - ptr[:-1]
-        offsets = counts.square().cumsum(0) - counts.square()
+        sizes = counts.square()
+        offsets = sizes.cumsum(0) - sizes
         node = torch.arange(features.size(0), device=features.device)
-        diagonal = offsets[batch] + (node - ptr[batch]) * (counts[batch] + 1)
-        blocks = torch.zeros(
-            (source.numel(), 3, 3), dtype=torch.float64, device=features.device
-        ).index_copy(
-            0, diagonal, self.to_cartesian(self.node_readout(features), node_fidelity)
+        start = ptr[batch]
+        # In the packed dense output, pair (i, j) lives at row_base[i] + j.
+        row_base = offsets[batch] + (node - start) * counts[batch] - start
+        diagonal = row_base + node
+        rows = torch.cat((diagonal, edge_pairs))
+        coefficients = torch.cat(
+            (self.node_readout(features), self.edge_readout(edge_feats))
         )
-
-        edge_index = pair_index[:, edge_pairs]
-        coefficients = self.edge_readout(edge_feats)
-        blocks = blocks.index_add(
-            0, edge_pairs, self.to_cartesian(coefficients, node_fidelity[edge_index[0]])
+        origin = None if self.num_fidelities == 1 else source[edge_pairs]
+        fidelity = (
+            None
+            if origin is None
+            else torch.cat((node_fidelity, node_fidelity[origin]))
         )
-
-        graph = batch[source]
-        reverse = (
-            offsets[graph] + (target - ptr[graph]) * counts[graph] + source - ptr[graph]
-        )
-        return (blocks + blocks[reverse].transpose(-1, -2)) * 0.5
+        values = self.to_cartesian(coefficients, fidelity)
+        # Switch only when an extra FP64 Hessian costs at least 72 MiB
+        # and there are at least 64 dense rows per active contribution.
+        # Unknown symbolic sizes, small cells and image-heavy batches retain
+        # the dense transpose, avoiding a sort and any new shape guard.
+        if (
+            values.is_cuda
+            and statically_known_true(source.numel() >= 1024**2)
+            and statically_known_true(source.numel() >= 64 * rows.size(0))
+        ):
+            if origin is None:
+                origin = source[edge_pairs]
+            reverse_edges = row_base[target[edge_pairs]] + origin
+            return _sparse_symmetric_blocks(
+                values, rows, torch.cat((diagonal, reverse_edges)), source.numel()
+            )
+        blocks = values.new_zeros(source.numel(), 3, 3).index_add_(0, rows, values)
+        if statically_known_true(ptr.numel() == 2):
+            n = features.size(0)
+            square = blocks.view(n, n, 3, 3)
+            return (square + square.permute(1, 0, 3, 2)).mul_(0.5).reshape_as(blocks)
+        reverse = row_base[target] + source
+        return (blocks + blocks.index_select(0, reverse).transpose(-1, -2)).mul_(0.5)
 
 
 def mh_mask(
     x: torch.Tensor,
     node_fidelity: torch.Tensor,
     num_fidelities: int,
-    dim: int,
 ) -> torch.Tensor:
-    B = x.size(0)
-    fid_mul = x.size(-1) // dim
-    mul = fid_mul // num_fidelities
-    mask = torch.zeros(B, num_fidelities, mul, device=x.device, dtype=x.dtype)
-    mask[torch.arange(B, device=x.device), node_fidelity, :] = 1
-    mask = mask.reshape(B, fid_mul, 1)
-    x = x.reshape(B, fid_mul, dim)
-    return (x * mask).view(B, -1)
+    """Mask contiguous head blocks without duplicating the mask per channel."""
+    nodes, width = x.shape
+    mask = x.new_zeros((nodes, num_fidelities))
+    mask[torch.arange(nodes, device=x.device), node_fidelity] = 1
+    blocks = x.reshape(nodes, num_fidelities, width // num_fidelities)
+    return (blocks * mask.unsqueeze(-1)).reshape_as(x)
 
 
 class ScalarReadOut(ReadOut):
@@ -251,9 +291,7 @@ class ScalarReadOut(ReadOut):
         for idx, linear in enumerate(self.linear2[:-1]):
             x = self.acts[idx](self._apply_linear(linear, x, node_type))
             if self.num_fidelities > 1:
-                x = mh_mask(
-                    x, node_fidelity, self.num_fidelities, self.irreps_out[0].ir.dim
-                )
+                x = mh_mask(x, node_fidelity, self.num_fidelities)
         return self._apply_linear(self.linear2[-1], x, node_type)
 
 
@@ -320,9 +358,7 @@ class TensorReadOut(ReadOut):
         for idx, linear in enumerate(self.linear2[:-1]):
             x = self.acts[idx](self._apply_linear(linear, x, node_type))
             if self.num_fidelities > 1:
-                x = mh_mask(
-                    x, node_fidelity, self.num_fidelities, self.irreps_out[0].ir.dim
-                )
+                x = mh_mask(x, node_fidelity, self.num_fidelities)
         return self._apply_linear(self.linear2[-1], x, node_type)
 
 

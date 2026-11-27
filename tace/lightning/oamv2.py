@@ -8,17 +8,19 @@ import gc
 
 import torch
 
-from equivariantx.models.tace.tace_oam_xl_v2 import TACEOAMXLV2
-from equivariantx.models.tace.tace_oam_xl_v2.capture import CapturedTraining
-from equivariantx.models.tace.tace_oam_xl_v2.padding import (
+from equivariantx_foundation.models.tace.tace_oam_xl_v2 import TACEOAMXLV2
+from equivariantx_foundation.models.tace.tace_oam_xl_v2.capture import CapturedTraining
+from equivariantx_foundation.models.tace.tace_oam_xl_v2.padding import (
     pad_batch,
-    register_padded_force_loss,
+    padded_force_loss,
 )
-from equivariantx.models.tace.tace_oam_xl_v2.precision import (
+from equivariantx_foundation.models.tace.tace_oam_xl_v2.precision import (
     require_tensors,
     validate_environment,
 )
-from equivariantx.models.tace.tace_oam_xl_v2.training import GradientWorkspace
+from equivariantx_foundation.models.tace.tace_oam_xl_v2.training import (
+    GradientWorkspace,
+)
 from tace.lightning.lit_model import LightningWrapperModel
 from tace.utils.env import memory_first
 
@@ -90,7 +92,7 @@ class OAMLightningModule(LightningWrapperModel):
             )
         require_tensors((*self.model.parameters(), *self.model.buffers()))
         original = self.model
-        from equivariantx.models.tace.tace_oam_xl_v2.radial_jet import (
+        from equivariantx_foundation.models.tace.tace_oam_xl_v2.radial_jet import (
             supports_degree_jets,
         )
 
@@ -98,8 +100,13 @@ class OAMLightningModule(LightningWrapperModel):
             memory_first()
             and original.readout_fn.representation.radial_basis.widths is not None
         )
-        self.model = TACEOAMXLV2.from_tace(
+        from equivariantx_foundation import optimize
+
+        self.model = optimize(
             original,
+            family="tace",
+            task="joint_training",
+            backend="cuda",
             fuse_products=False,
             radial_mode="stream" if stream else "materialize",
             angular_mode="cg",
@@ -119,7 +126,7 @@ class OAMLightningModule(LightningWrapperModel):
             ),
         )
         object.__setattr__(self, "canonical_model", original)
-        self.training_loss = register_padded_force_loss(copy.deepcopy(self.loss_fn))
+        self.training_loss = padded_force_loss(copy.deepcopy(self.loss_fn))
 
     def _process_batch(self, batch):
         self.prepare_execution()
@@ -141,6 +148,7 @@ class OAMLightningModule(LightningWrapperModel):
                 maximum=self.capture_limit,
                 shared_graph_plan=True,
             )
+            self.captured_training.programs = self._training_programs()
         data = dict(batch.items())
         nodes = data["positions"].shape[0]
         predictions, value = self.captured_training(pad_batch(data, 64, 1024))
@@ -151,17 +159,54 @@ class OAMLightningModule(LightningWrapperModel):
         }
         return predictions, loss
 
-    def release_training_capture(self):
-        """Return the training graph's private workspace before evaluation."""
+    def _training_programs(self):
+        # The adapter invalidates its cache on device, dtype, target or fidelity
+        # changes. Optimizer updates and temporary EMA weights are live inputs.
+        cache = self.model.adapter._compiled_cache
+        loss = self.training_loss
+        key = (
+            id(loss),
+            tuple(loss.loss_property),
+            tuple(loss.loss_function_name),
+            tuple(loss.loss_property_weights),
+            repr(loss.loss_function_kwargs),
+            tuple((id(p), p.requires_grad) for p in self.model.parameters()),
+        )
+        cached = cache.get("oam_training_programs")
+        if cached is None or cached[0] != key:
+            cached = cache["oam_training_programs"] = (key, {})
+        return cached[1]
+
+    def release_training_capture(self, *, keep_programs=False):
+        """Release graph storage and its gradient views before evaluation."""
+        if not keep_programs and self.canonical_model is not None:
+            self.model.adapter._compiled_cache.pop("oam_training_programs", None)
         if self.captured_training is None:
             return
-        torch.cuda.synchronize(self.device)
+        torch.cuda.synchronize(self.captured_training.stream.device)
+        if keep_programs:
+            programs = self.captured_training.programs
+            reusable = [
+                (key, program)
+                for key, program in programs.items()
+                if program.artifact_info["status"] in ("hit", "saved")
+            ][-self.capture_limit :]
+            programs.clear()
+            programs.update(reusable)
+        self.workspace.detach()
         self.captured_training = None
         self.workspace = None
         gc.collect()
         torch.cuda.empty_cache()
 
     def on_validation_start(self):
+        from lightning.pytorch.trainer.states import TrainerFn
+
+        self.release_training_capture(
+            keep_programs=self.trainer.state.fn == TrainerFn.FITTING
+        )
+
+    def on_train_end(self):
         self.release_training_capture()
 
     def on_test_start(self):

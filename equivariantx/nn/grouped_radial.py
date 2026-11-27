@@ -5,7 +5,7 @@ from typing import NamedTuple
 
 import torch
 
-from ..ops import config
+from ..ops import config, resolve_backend
 from ..ops.common.grouped_radial import (
     affine_chain,
     affine_shape,
@@ -120,6 +120,8 @@ class GroupedRadialMLP(torch.nn.Module):
         Each network emits its own paths in this order.
     context_features : int, optional
         Number of trailing input features supplied to every network.
+    backend : {None, "torch", "cuda"}, optional
+        Execution backend. CPU inputs use PyTorch.
 
     Examples
     --------
@@ -133,8 +135,11 @@ class GroupedRadialMLP(torch.nn.Module):
     ``(0, weight_numel)`` to evaluate it inside a full-mode convolution.
     """
 
-    def __init__(self, in_features, networks, paths, *, context_features=0):
+    def __init__(
+        self, in_features, networks, paths, *, context_features=0, backend=None
+    ):
         super().__init__()
+        self.backend = resolve_backend(backend)
         self.in_features = tuple(in_features)
         self.context_features = context_features
         if any(n < 1 for n in in_features) or context_features < 0:
@@ -219,7 +224,9 @@ class GroupedRadialMLP(torch.nn.Module):
             or value.shape[1] != sum(self.in_features) + self.context_features
         ):
             raise ValueError("Input width does not match grouped radial layout.")
-        if self.chain_steps and not config.TORCH_REFERENCE:
+        if self.chain_steps and (
+            not config.TORCH_REFERENCE or (self.backend == "cuda" and value.is_cuda)
+        ):
             return self.packed(value)
         return grouped_reference(
             value, self.sections, self.branches, self.context_features, self.outputs
@@ -244,8 +251,9 @@ class GroupedRadialMLP(torch.nn.Module):
             return None
         return self.packed(value, backend=backend, mode=mode)
 
-    def packed(self, value, *, hidden_only=False, backend="torch", mode=None):
+    def packed(self, value, *, hidden_only=False, backend=None, mode=None):
         """Apply independent affine stages in group-major layout."""
+        backend = self.backend if backend is None else backend
         native = backend == "cuda" and eager_rows(value)
         xs = [value.narrow(-1, start, n) for start, n, _ in self.sections]
         if self.context_features:

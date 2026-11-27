@@ -8,6 +8,57 @@ from equivariantx import co2, o2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("mode", ["sum", "expand"])
+def test_symmetric_powers(mode, backend, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    inp, out = "3x1mo+3x2m", "3x0e+3x1mo+3x2m"
+    ref = o2.SymmetricContraction(
+        inp, out, 4, algorithm="dense", path_mode=mode, backend="torch"
+    ).to(device)
+    op = co2.SymmetricContraction(inp, out, 4, path_mode=mode, backend=backend).to(
+        device
+    )
+    to_cart = co2.ChangeOfBasis(op.irreps_in, backend=backend).to(device)
+    to_out = co2.ChangeOfBasis(op.irreps_out, backend=backend).to(device)
+    x = ref.irreps_in.randn(2, 1, -1, device=device, requires_grad=True)
+    w = torch.randn(3, ref.weight_numel, device=device, requires_grad=True)
+    actual, expected = op(to_cart(x), w), to_out(ref(x, w))
+    if backend == "cuda" and mode == "sum":
+        cart, weight = to_cart(x).detach(), w.detach()
+        exported = torch.export.export(op, (cart, weight), strict=True)
+        torch.testing.assert_close(exported.module()(cart, weight), expected.detach())
+        direction = torch.randn_like(x)
+        _, tangent = torch.func.jvp(
+            lambda v: op(v, weight), (cart,), (to_cart(direction),)
+        )
+        _, reference = torch.func.jvp(
+            lambda v: ref(v, weight), (x.detach(),), (direction,)
+        )
+        torch.testing.assert_close(tangent, to_out(reference), rtol=1e-10, atol=1e-10)
+    for order in range(3):
+        torch.testing.assert_close(actual, expected, atol=1e-10, rtol=1e-10)
+        if order < 2:
+            seed = torch.randn_like(expected)
+            actual, expected = [
+                torch.cat(
+                    [
+                        g.flatten()
+                        for g in torch.autograd.grad(
+                            (v * seed).sum(),
+                            (x, w),
+                            create_graph=True,
+                            retain_graph=True,
+                        )
+                    ]
+                )
+                for v in (actual, expected)
+            ]
+    assert op(to_cart(x[:0]), w).shape == (0, 3, op.irreps_out.dim)
+
+
 @pytest.mark.parametrize("mode", ["u1u", "uuu", "uvw"])
 @pytest.mark.parametrize("irrep_normalization", ["component", "norm", "none"])
 @pytest.mark.parametrize("path_normalization", ["element", "path", "none"])

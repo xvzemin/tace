@@ -155,8 +155,8 @@ def acceleration_enabled(name: str, *, kernel: Optional[str] = None) -> Optional
     value = os.environ.get(env_name)
     if value is None:
         return None
-    if name.lower() == "eqx" and kernel is not None:
-        return value == "1" and EQX_KERNELS[kernel]
+    if name.lower() == "eqx" and value == "1":
+        return kernel is None or EQX_KERNELS[kernel]
     return value == "1"
 
 

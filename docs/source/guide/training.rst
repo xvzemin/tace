@@ -19,18 +19,38 @@ Once you have prepared the input files, you can start training using the command
 
     tace-train -cn tace.yaml
 
-For the OAM-v2 training schedule, use the same Hydra configuration and
-overrides:
+Use the same Hydra configuration for standard training or for a Foundation
+model-specific training plan:
 
 .. code-block:: bash
 
-    tace-train-oam-v2 -cn omat.yaml
-    tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uv_o2
-    tace-train-oam-v2 -cn omat.yaml model.config.atomic_basis.type=uu_o2
-    tace-train-oamv2 -cn omat.yaml model.config.radial_basis.radial_basis=ejn model.config.radial_basis.num_radial_basis=null
+    TACE_USE_EQX=1 TACE_USE_COMPILE=1 tace-train -cn tace.yaml
+    tace-fast-train -cn tace.yaml
 
-This entry uses one worker per visible CUDA device, FP32 model weights and
-TF32 matrix multiplication. The command ``tace-train-oamv2`` is equivalent.
+``tace-train`` does not install a Foundation training plan. Its generic EQX
+operators and joint AOTInductor training do not require Foundation.
+``tace-fast-train`` uses the bundled Foundation extension and requires CUDA. The default fast schedule
+requires a matching model or regional plan, or an explicit joint training
+package. It does not silently fall back to generic EQX training.
+For E/F or E/F/S training, see :ref:`foundation-lightning-training` for optional
+CUDA Graph replay. Alongside 7M, OAM-L and TECE-OAM-RRA, supported spherical
+CGTP and local UU/UV plans, and Cartesian ICTD and local UU/UV plans, can replay
+these objectives on a single GPU or with NCCL DDP.
+To run the dedicated OAM-v2 schedule (formerly ``tace-train-oam-v2``):
+
+.. code-block:: bash
+
+    tace-fast-train -cn omat.yaml +fast_schedule=oam_v2
+
+Alternatively, set ``fast_schedule: oam_v2`` in the fast training YAML.
+The OAM-v2 schedule uses one worker per visible CUDA device, FP32 model
+weights and TF32 matrix multiplication. Report steady-state step time after
+CUDA Graph replay starts, separately from first-batch compilation and capture.
+During validation, XL-v2 releases its captured graphs, static batches and
+gradient workspace. On returning to training it captures fresh graphs and
+can reuse a validated joint program from the same fit. No graphs or programs
+are stored in Lightning checkpoints.
+
 Use ``uv_o2`` for a radial weight followed by a local Linear–Gate–Linear
 map, or ``uu_o2`` for a single externally weighted channelwise linear map.
 ``model.config.mmax`` limits the retained local orders. Set

@@ -335,7 +335,9 @@ class BatchMLPV1(GroupedRadialMLP):
             if not weighted:
                 continue
             if mode != "uvu":
-                raise ValueError("Degree-specific radial weights require uvu CGTP paths.")
+                raise ValueError(
+                    "Degree-specific radial weights require uvu CGTP paths."
+                )
             mul, ir = product.irreps_in2[j]
             size = product.irreps_in1[i].mul * mul
             paths.append((ir.l, size))

@@ -4,6 +4,7 @@ import math
 from functools import lru_cache
 
 import torch
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ...utils.metadata import parse_metadata, static_dimensions
 from ...utils.program import Program, activate
@@ -179,13 +180,15 @@ def align_projection(radial, projection):
     return radial, projection
 
 
-def compose_radial(metadata, inputs, slot, network):
+def compose_radial(metadata, inputs, slot, network, *, num_targets=None):
     """Replace an edge input by a tiled radial network evaluation."""
     inputs = list(inputs)
     program = Program()
     radial = inputs[slot]
     parts = []
-    for i, (feature, storage) in enumerate(radial_parts(radial)):
+    for i, (feature, storage) in enumerate(
+        radial_parts(radial, num_targets=num_targets)
+    ):
         index = slot if i == 0 else len(inputs)
         if i == 0:
             inputs[slot] = feature
@@ -238,7 +241,7 @@ def convolve(kind, metadata, operands, edge_index, network):
     for role, tensor in enumerate(operands):
         if role == 1:
             parts = []
-            for feature, storage in radial_parts(tensor):
+            for feature, storage in radial_parts(tensor, num_targets=output.shape[0]):
                 parts.append(
                     program.input(
                         len(inputs), storage, static_dimensions(feature, (-1,))[0]
@@ -316,8 +319,8 @@ def materialize(radial, edge_index):
     return torch.cat(parts, dim=-1)
 
 
-def radial_parts(radial):
-    """Validate radial partitions and normalize broadcast rows to shared storage."""
+def radial_parts(radial, *, num_targets=None):
+    """Validate partitions and expose only addressable rows to a target reduction."""
     parts = radial if isinstance(radial, tuple) else ((radial, "edge"),)
     if not parts:
         raise ValueError("Radial partitions must not be empty.")
@@ -331,6 +334,15 @@ def radial_parts(radial):
             raise ValueError("Shared radial inputs must contain exactly one row.")
         if kind == "edge" and value.shape[0] == 1:
             kind = "shared"
+        if (
+            kind == "target"
+            and num_targets is not None
+            and not statically_known_true(value.shape[0] == num_targets)
+        ):
+            # A node table can include source-only halo rows. The program
+            # reduces its target adjoint into exactly num_targets rows;
+            # narrow's backward restores zeros for the unused table suffix.
+            value = value.narrow(0, 0, num_targets)
         result.append((value, kind))
     return tuple(result)
 

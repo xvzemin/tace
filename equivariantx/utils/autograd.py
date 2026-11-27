@@ -4,7 +4,7 @@ import torch
 
 
 @torch.no_grad()
-def clip_gradient_norm(parameters, maximum):
+def clip_gradient_norm(parameters, maximum, *, return_norm=True):
     """Clip parameter gradients in-place to a global L2 norm.
 
     Parameters
@@ -13,11 +13,14 @@ def clip_gradient_norm(parameters, maximum):
         Parameters with optional gradients.
     maximum : float
         Nonnegative upper bound on the gradient norm.
+    return_norm : bool
+        If false, only clip in place. Dense FP32 gradients on a single NVIDIA
+        device then use FP64 accumulation without a host synchronization.
 
     Returns
     -------
-    torch.Tensor
-        The global norm before clipping.
+    torch.Tensor or None
+        The global norm before clipping, or None when not requested.
     """
     if maximum < 0:
         raise ValueError("maximum must be nonnegative")
@@ -27,29 +30,43 @@ def clip_gradient_norm(parameters, maximum):
         if grad is not None:
             groups.setdefault((grad.device, grad.dtype), []).append(grad)
     if not groups:
-        return torch.tensor(0.0)
+        return torch.tensor(0.0) if return_norm else None
     device = next(iter(groups))[0]
-    norms = [
-        n.to(device)
-        for values in groups.values()
-        for n in torch._foreach_norm(values, 2)
-    ]
-    total = torch.linalg.vector_norm(torch.stack(norms))
-    if not bool(total.isfinite()):
-        # Individual finite FP32 components can overflow during the sum of squares.
-        accumulation_device = "cpu" if device.type == "mps" else device
+    values = groups.get((device, torch.float32))
+    if (
+        not return_norm
+        and len(groups) == 1
+        and device.type == "cuda"
+        and not torch.version.hip
+        and values is not None
+        and all(type(g) is torch.Tensor and g.layout == torch.strided for g in values)
+    ):
+        # The caller discards the norm. FP64 foreach avoids both intermediate
+        # FP32 overflow and a device-to-host check, including during CUDA replay.
+        norms = torch._foreach_norm(values, 2, dtype=torch.float64)
+        total = torch.linalg.vector_norm(torch.stack(norms))
+    else:
         norms = [
-            torch.linalg.vector_norm(
-                g.cpu() if g.device.type == "mps" else g, dtype=torch.float64
-            ).to(accumulation_device)
+            n.to(device)
             for values in groups.values()
-            for g in values
+            for n in torch._foreach_norm(values, 2)
         ]
         total = torch.linalg.vector_norm(torch.stack(norms))
+        if not bool(total.isfinite()):
+            # Individual finite FP32 components can overflow during the sum of squares.
+            accumulation_device = "cpu" if device.type == "mps" else device
+            norms = [
+                torch.linalg.vector_norm(
+                    g.cpu() if g.device.type == "mps" else g, dtype=torch.float64
+                ).to(accumulation_device)
+                for values in groups.values()
+                for g in values
+            ]
+            total = torch.linalg.vector_norm(torch.stack(norms))
     coefficient = (float(maximum) / (total + 1e-6)).clamp(max=1.0)
     for (device, dtype), values in groups.items():
         torch._foreach_mul_(values, coefficient.to(device=device, dtype=dtype))
-    return total
+    return total if return_norm else None
 
 
 def forward_ad_active():

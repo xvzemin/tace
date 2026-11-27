@@ -85,3 +85,19 @@ def harmonic_program(program, direction, degree, normalization="norm"):
             terms.append(term)
         values.append(program.sum(terms, 1))
     return program.concatenate(values)
+
+
+@lru_cache(maxsize=32)
+def harmonic_row_program(lmax, normalization="component"):
+    """Build a row program for all regular solid harmonics through ``lmax``."""
+    from .program import Program
+
+    program = Program()
+    xyz = program.input(0, "edge", 3)
+    root = program.concatenate(
+        [
+            harmonic_program(program, xyz, degree, normalization)
+            for degree in range(lmax + 1)
+        ]
+    )
+    return repr((tuple(program.nodes), ((root, 0, "edge"),)))

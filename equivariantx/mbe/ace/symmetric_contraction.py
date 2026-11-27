@@ -4,11 +4,20 @@ from collections import defaultdict
 
 import torch
 from e3nn import o3
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from ...o3.linear import ElementLinear
 from ...ops import config, resolve_backend
 from ...ops.precision import validate_module_precision, validate_precision
 from ...ops.torch.mbe.ace import symmetric_contraction as torch_kernel
+
+
+def square_entries(entries):
+    """Combine transposed component pairs of a single repeated input block."""
+    terms = defaultdict(float)
+    for a, b, c, value in entries:
+        terms[min(a, b), max(a, b), c] += value
+    return [(a, b, c, w) for (a, b, c), w in terms.items() if w]
 
 
 def make_metadata(rows, dims, weighted):
@@ -277,6 +286,8 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
     torch.Size([3, 2])
     """
 
+    use_shared_powers = True
+
     def __init__(self, tensor_products, linears, backend=None):
         backend = resolve_backend(backend)
         super().__init__()
@@ -356,7 +367,15 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
                     tp.irreps_in2.slices()[j].start,
                     tp.irreps_out.slices()[k].start,
                 )
-                for a, b, c, coefficient in self.coupling_entries(tp, index):
+                entries = self.coupling_entries(tp, index)
+                if (
+                    not stage
+                    and sx == sy
+                    and ir1 == ir2
+                    and tp.irreps_in1 == tp.irreps_in2
+                ):
+                    entries = square_entries(entries)
+                for a, b, c, coefficient in entries:
                     if weighted:
                         for input_ir, out_ir, sw, scale in linear_paths:
                             linear_slice = linear.irreps_in.slices()[input_ir]
@@ -412,6 +431,9 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
         self.channel_polynomial = (
             torch_kernel.build_channel_polynomial(self) if backend == "torch" else None
         )
+        from .powers import shared_powers
+
+        self.shared_powers = shared_powers(self) if self.use_shared_powers else None
 
     @staticmethod
     def coupling_entries(tensor_product, index):
@@ -487,6 +509,21 @@ class UuuFullyConnectedSymmetricContraction(torch.nn.Module):
                 raise ValueError(
                     "Prefix products must match the stage shape, dtype and device."
                 )
+        if (
+            self.use_shared_powers
+            and self.shared_powers is not None
+            and not prefix
+            and features.is_cuda
+            and (
+                self.backend == "cuda"
+                or not (config.TORCH_REFERENCE or config.TORCH_RECOMPUTE)
+            )
+            and not torch.compiler.is_compiling()
+            and get_proxy_mode() is None
+            and self.shared_powers.fits(features, weights[0].shape[0])
+            and all(w.shape[0] == weights[0].shape[0] for w in weights)
+        ):
+            return self.shared_powers(features, weights, node_type)
         if features.is_cuda and self.backend == "cuda":
             from ...ops.cuda.mbe.ace import symmetric_contraction as cuda_kernel
 

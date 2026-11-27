@@ -88,35 +88,6 @@ def edge_outputs(metadata, inputs, source, target, num_nodes):
     ]
 
 
-def tece_outputs(metadata, source, target, inputs):
-    description = parse_metadata(metadata)
-    if len(description) == 2:
-        description = parse_metadata(description[0])
-    channels, heads = description[2:4]
-    nodes = inputs[0].shape[0]
-    return [
-        inputs[0].new_empty(
-            (
-                nodes,
-                (description[0] + 1) ** 2
-                if inputs[5].ndim == 2
-                else inputs[6].shape[1],
-                channels,
-            )
-        ),
-        inputs[0].new_empty((nodes, heads)),
-        inputs[0].new_empty((nodes, heads)),
-    ]
-
-
-def tece_contraction_outputs(metadata, source, target, inputs):
-    slots = sorted({slot for _, slot, _ in parse_metadata(metadata)[1]})
-    return [
-        torch.empty_like(inputs[slot], memory_format=torch.contiguous_format)
-        for slot in slots
-    ]
-
-
 def linear_output(metadata, role, node_type, features, weight, output):
     din, dout = parse_metadata(metadata)[:2]
     shape = (

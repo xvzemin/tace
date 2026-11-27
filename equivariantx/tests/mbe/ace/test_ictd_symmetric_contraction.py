@@ -229,3 +229,84 @@ def test_parent_provider(
 @pytest.mark.parametrize("kind", ["ace", "ace_split"])
 def test_ictd_contractions(kind, double_precision, monkeypatch):
     check_ictd_contraction(kind, monkeypatch)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_wide_mixed_projection_live_map_and_adjoints(dtype):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA mixed Cartesian projector")
+    from equivariantx import co3
+    from equivariantx.ops.cuda.co3.basis import project_mixed_layout
+    from equivariantx.ops.cuda.mbe.ace import ictd_symmetric_contraction as kernel
+    from equivariantx.ops.torch.co3.basis import rank_two
+
+    module = co3.Projector("80x0e+80x2e+80x3o+80x1o+80x2e+80x3o").to("cuda", dtype)
+    sections = list(kernel._mixed_sections(module.irreps_in, module.groups))
+    x = torch.randn(
+        5, module.irreps_in.dim, device="cuda", dtype=dtype, requires_grad=True
+    )
+    b = torch.randn(27, 27, device="cuda", dtype=dtype, requires_grad=True) / 8
+
+    def reference(a, matrix):
+        parts = []
+        for (mul, ir), section in zip(module.irreps_in, module.slices, strict=True):
+            value = a[:, section].reshape(a.size(0), mul, ir.dim)
+            if ir.l == 2:
+                value = rank_two(value)
+            elif ir.l == 3:
+                value = value @ matrix.T
+            parts.append(value.flatten(1))
+        return torch.cat(parts, -1)
+
+    actual = project_mixed_layout(x, b, sections)
+    expected = reference(x, b)
+    tol = 6e-5 if dtype == torch.float32 else 2e-11
+    direction = torch.randn_like(x)
+    matrix_direction = torch.randn_like(b) / 20
+
+    def derivatives(y):
+        dx, db = torch.autograd.grad(y.sin().mean(), (x, b), create_graph=True)
+        hx, hb = torch.autograd.grad(
+            (dx * direction).sum() + (db * matrix_direction).sum(),
+            (x, b),
+            create_graph=True,
+        )
+        return (
+            y,
+            dx,
+            db,
+            hx,
+            hb,
+            torch.autograd.grad(
+                (hx * direction).sum() + (hb * matrix_direction).sum(), (x, b)
+            ),
+        )
+
+    from torch.utils._pytree import tree_leaves
+
+    values, refs = tree_leaves(derivatives(actual)), tree_leaves(derivatives(expected))
+    for value, ref in zip(values, refs, strict=True):
+        torch.testing.assert_close(value, ref, rtol=tol, atol=tol)
+        assert (value - ref).norm() / ref.norm() < tol
+    # Mutated or differentiable module tables are never replaced by a
+    # precomputed isotropic formula. Reuse the independent dense reference.
+    module.basis_3.add_(0.017)
+    torch.testing.assert_close(
+        kernel.project(module, x),
+        reference(x, module.basis_3 @ module.basis_3.T),
+        rtol=tol,
+        atol=tol,
+    )
+    if dtype == torch.float32:
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        captured = make_fx(lambda values: kernel.project(module, values))(x.detach())
+        assert all(
+            "stf_mixed_layout" not in str(n.target) for n in captured.graph.nodes
+        )
+    module.basis_3.requires_grad_(True)
+    y = kernel.project(module, x)
+    expected = reference(x, module.basis_3 @ module.basis_3.T)
+    (g,) = torch.autograd.grad(y.square().mean(), (module.basis_3,))
+    (target,) = torch.autograd.grad(expected.square().mean(), (module.basis_3,))
+    torch.testing.assert_close(g, target, rtol=tol, atol=tol)

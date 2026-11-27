@@ -121,6 +121,42 @@ def decode_plans(metadata):
     )
 
 
+@lru_cache(maxsize=128)
+@torch.compiler.assume_constant_result
+def independent_channel_groups(metadata):
+    """Find disjoint channel groups for complementary inputs sharing one factor.
+
+    The common factor's coordinate names the group. Every occupied coordinate
+    of *every* role must belong to just one group, even in a transposed program.
+    Keep the general evaluator for dense products, mixed widths and reductions.
+    """
+    width, dims, rows = parse_metadata(metadata)
+    if (
+        width not in (32, 64, 128)
+        or len(dims) != 4
+        or not 0 < len(rows) <= 128
+        or any(not 0 < d <= len(rows) for d in dims)
+    ):
+        return None
+    missing = {tuple(k for k, i in enumerate(indices) if i < 0) for indices, _ in rows}
+    if len(missing) != 2 or any(len(mask) != 1 or mask[0] == 3 for mask in missing):
+        return None
+    (pivot,) = set(range(3)) - {k for (k,) in missing}
+    groups = [[] for _ in range(dims[pivot])]
+    owner = {}
+    for indices, coefficient in rows:
+        group = indices[pivot]
+        for role, i in enumerate(indices):
+            if i >= dims[role]:
+                return None
+            if i >= 0 and owner.setdefault((role, i), group) != group:
+                return None
+        groups[group].append((indices, coefficient))
+    if len(owner) != sum(dims) or max(map(len, groups)) > 8:
+        return None
+    return tuple(tuple(group) for group in groups)
+
+
 def channel_product_layout(metadata):
     """Return flat dimensions and sparse channel-strided contractions."""
     width, dims, rows = parse_metadata(metadata)

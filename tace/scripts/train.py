@@ -29,8 +29,8 @@ from tace.dataset.statistics import (
 )
 from tace.lightning.lit_model import LightningWrapperModel, finetune, load_tace
 from tace.lightning.torch_model import create_model
-from tace.lightning.trainer import train
-from tace.utils.cfg import deep_convert, register_resolvers, save_full_cfg
+from tace.lightning.trainer import check_training_entry, train
+from tace.utils.cfg import deep_convert, save_full_cfg, training_cli
 from tace.utils.env import set_env, set_global_seed
 from tace.utils.logger import set_logger
 from tace.utils.precision import (
@@ -38,8 +38,6 @@ from tace.utils.precision import (
     set_precision,
     torch_default_dtype,
 )
-
-register_resolvers()
 
 
 def initialize(cfg):
@@ -202,15 +200,11 @@ def build(cfg: DictConfig):
     return cfg, statistics, target_property, embedding_property, model, datamodule
 
 
-def training_cli(task):
-    """Load a training configuration from the invocation directory."""
-    return hydra.main(
-        version_base="1.3", config_path=str(Path.cwd()), config_name="tace"
-    )(task)
-
-
-def train_from_config(cfg: DictConfig, module_type=LightningWrapperModel):
+def train_from_config(
+    cfg: DictConfig, module_type=LightningWrapperModel, *, fast=False
+):
     """Build the dataset and run the shared fit and test lifecycle."""
+    check_training_entry(cfg, fast=fast)
     cfg, statistics, target_property, embedding_property, model, datamodule = build(cfg)
     train(
         cfg=cfg,
@@ -220,6 +214,7 @@ def train_from_config(cfg: DictConfig, module_type=LightningWrapperModel):
         target_property=target_property,
         embedding_property=embedding_property,
         module_type=module_type,
+        fast=fast,
     )
 
 

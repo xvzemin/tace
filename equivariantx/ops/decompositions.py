@@ -30,7 +30,7 @@ def torch_decompositions():
     from .common.torch.quaternion import quaternion_polynomial
     from .common.torch.spline import evaluate as spline
     from .common.torch.wigner import alignment, packed_wigner, rotation
-    from .torch.co3.basis import rank_two
+    from .torch.co3.basis import rank_two, rank_two_layout
 
     decompositions = {
         **polynomial_decompositions(),
@@ -52,14 +52,28 @@ def torch_decompositions():
         torch.ops.eqx.rotary_product.default: rotary_product,
         torch.ops.eqx.contraction.default: contraction,
         torch.ops.eqx.o3_contraction.default: o3_decomposition,
+        torch.ops.eqx.o3_contraction.bounded: o3_decomposition,
     }
-    for name, function in (("grid_linear", linear), ("stf_rank_two", rank_two)):
+    for name, function in (
+        ("grid_linear", linear),
+        ("stf_rank_two", rank_two),
+        ("stf_rank_two_layout", rank_two_layout),
+    ):
         if hasattr(torch.ops.eqx, name):
             decompositions[getattr(torch.ops.eqx, name).default] = function
     return decompositions
 
 
-def o3_decomposition(metadata, program, source, target, operands, *, batch_paths=False):
+def o3_decomposition(
+    metadata,
+    program,
+    source,
+    target,
+    operands,
+    *,
+    batch_paths=False,
+    projection_workspace_bytes=None,
+):
     """Retain native calls for geometric programs without an exact Torch lowering."""
     if not o3_lowerable(metadata):
         return NotImplemented

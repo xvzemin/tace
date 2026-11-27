@@ -9,6 +9,14 @@ from ..precision import validate_uniform
 from .contraction import adjoint_program, project_radial
 
 
+def validate_projection_workspace(budget):
+    if budget is not None and (type(budget) is not int or budget <= 0):
+        raise ValueError(
+            "projection_workspace_bytes must be a positive integer or None."
+        )
+    return budget
+
+
 @torch.library.custom_op("eqx::o3_contraction", mutates_args=(), device_types="cuda")
 def contraction_cuda(
     metadata: str,
@@ -28,6 +36,49 @@ def contraction_cuda(
 
 
 contraction_cuda.register_fake(o3_outputs)
+
+
+# Preserve the boxed ABI of the default overload for already-exported packages.
+@torch.library.custom_op(
+    "eqx::o3_contraction.bounded", mutates_args=(), device_types="cuda"
+)
+def bounded_contraction_cuda(
+    metadata: str,
+    program: str,
+    source: torch.Tensor | None,
+    target: torch.Tensor | None,
+    operands: list[torch.Tensor],
+    *,
+    batch_paths: bool = False,
+    projection_workspace_bytes: int,
+) -> list[torch.Tensor]:
+    from .. import get_kernel
+
+    return get_kernel("o3_contraction", "cuda")(
+        metadata,
+        program,
+        source,
+        target,
+        operands,
+        batch_paths=batch_paths,
+        projection_workspace_bytes=validate_projection_workspace(
+            projection_workspace_bytes
+        ),
+    )
+
+
+@bounded_contraction_cuda.register_fake
+def bounded_outputs(
+    metadata,
+    program,
+    source,
+    target,
+    operands,
+    *,
+    batch_paths=False,
+    projection_workspace_bytes,
+):
+    return o3_outputs(metadata, program, source, target, operands)
 
 
 @torch.library.custom_op(
@@ -108,6 +159,9 @@ def contraction_setup_context(ctx, inputs, keyword_only_inputs, output):
     ctx.kernel_metadata = metadata
     ctx.program = parse_metadata(program)
     ctx.batch_paths = keyword_only_inputs["batch_paths"]
+    ctx.projection_workspace_bytes = keyword_only_inputs.get(
+        "projection_workspace_bytes"
+    )
     ctx.set_materialize_grads(False)
     ctx.save_for_backward(source, target, pair[0] if pair else None, *operands)
 
@@ -165,6 +219,7 @@ def contraction_backward(ctx, grad_outputs):
             values,
             batch_paths=ctx.batch_paths,
             pair_index=pair_index,
+            projection_workspace_bytes=ctx.projection_workspace_bytes,
         )
         for index, slot in destinations.items():
             gradients[index] = results[slot]
@@ -247,6 +302,9 @@ def angular_base_gradient(
 contraction_cuda.register_autograd(
     contraction_backward, setup_context=contraction_setup_context
 )
+bounded_contraction_cuda.register_autograd(
+    contraction_backward, setup_context=contraction_setup_context
+)
 pair_contraction_cuda.register_autograd(
     contraction_backward, setup_context=contraction_setup_context
 )
@@ -254,7 +312,15 @@ pair_contraction_cuda.register_autograd(
 
 @torch.compiler.allow_in_graph
 def contraction(
-    metadata, program, source, target, operands, *, batch_paths=False, pair_index=None
+    metadata,
+    program,
+    source,
+    target,
+    operands,
+    *,
+    batch_paths=False,
+    pair_index=None,
+    projection_workspace_bytes=None,
 ):
     """Expose supported O3 contractions inside functional transformations."""
     validate_uniform(operands)
@@ -290,6 +356,18 @@ def contraction(
             operands,
             pair_index,
             batch_paths=batch_paths,
+        )
+    if projection_workspace_bytes is not None:
+        # An explicit tile budget also suppresses the default wide-primal
+        # materialization shortcut; adjoints retain the same schedule.
+        return torch.ops.eqx.o3_contraction.bounded(
+            compact_metadata(metadata),
+            compact_metadata(program),
+            source,
+            target,
+            operands,
+            batch_paths=batch_paths,
+            projection_workspace_bytes=projection_workspace_bytes,
         )
     program, operands = project_radial(program, operands, 4)
     return torch.ops.eqx.o3_contraction(

@@ -1,4 +1,4 @@
-"""Multi-scale radial weights for tensor-product convolutions."""
+"""Radial inputs and weights for tensor-product convolutions."""
 
 from typing import NamedTuple
 
@@ -13,9 +13,82 @@ from ..ops.common.radial import (
     radial_linear_weight,
     radial_parts,
     radial_program,
+    radial_reference,
 )
 from ..ops.common.weights import ConvolutionWeights
 from ..ops.registry import resolve_backend
+from ..utils.metadata import static_dimensions
+
+
+class _IndexedRadial(NamedTuple):
+    network: object
+    tables: tuple
+
+    def forward(self, radial):
+        features = [
+            radial,
+            *(table.index_select(0, rows) for table, rows in self.tables),
+        ]
+        return radial_reference(self.network, torch.cat(features, dim=-1))
+
+    def to_edge_program(self, inputs, program, radial):
+        features = [radial]
+        for table, rows in self.tables:
+            slot = len(inputs)
+            inputs.extend((table, rows))
+            width = static_dimensions(table, (-1,))[0]
+            features.append(program.input(slot, ("indexed", slot + 1, slot), width))
+        return radial_program(
+            self.network, inputs, program, program.concatenate(features)
+        )
+
+    def narrow_edges(self, start, stop):
+        return self._replace(
+            tables=tuple((table, rows[start:stop]) for table, rows in self.tables)
+        )
+
+
+def indexed_radial(radial, network, tables):
+    """Append indexed table columns to the input of a convolution radial network.
+
+    Parameters
+    ----------
+    radial : torch.Tensor
+        Per-edge features of shape ``(edges, channels)``.
+    network : torch.nn.Sequential or sequence of torch.nn.Module
+        Hidden layers consuming the concatenated features.
+    tables : sequence of (torch.Tensor, torch.Tensor)
+        Pairs of feature matrices and int64 row indices of shape ``(edges,)``.
+        Each table has its own row count.
+
+    Returns
+    -------
+    network
+        Bound network for the convolution's ``radial_network`` argument.
+
+    Examples
+    --------
+    >>> x = torch.randn(4, 2)
+    >>> table = torch.randn(3, 5)
+    >>> rows = torch.tensor([2, 0, 1, 2])
+    >>> net = indexed_radial(x, [torch.nn.Linear(7, 8)], [(table, rows)])
+    >>> net.forward(x).shape
+    torch.Size([4, 8])
+    """
+    tables = tuple(tables)
+    if radial.ndim != 2 or any(
+        table.ndim != 2
+        or table.device != radial.device
+        or table.dtype != radial.dtype
+        or rows.device != radial.device
+        or rows.dtype != torch.int64
+        or rows.shape != (radial.shape[0],)
+        for table, rows in tables
+    ):
+        raise ValueError(
+            "Expected feature matrices and one int64 row per edge on the same device."
+        )
+    return _IndexedRadial(network, tables)
 
 
 class _HiddenBranches(NamedTuple):

@@ -27,7 +27,7 @@ from tace.dataset.read import ASEDatabaseSource, ASEFileSource
 from tace.lightning import create_model, export_tace, load_tace
 from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
 from tace.models.spherical.les import TACELES, required_les_irreps
-from tace.models.spherical.readout import DirectHessianReadout
+from tace.models.spherical.readout import DirectHessianReadout, _sparse_symmetric_blocks
 from tace.models.spherical.representation import PairRepresentation
 from tace.models.utils import get_target_irreps, prepare_direct_hessian_inputs
 from tace.utils.loss.common import hessian_loss, prepare_tensor_loss_counts
@@ -740,6 +740,13 @@ def check_direct_hessian_loss(device, loss, reduction):
     torch.testing.assert_close(value, value.new_tensor(expected))
     value.backward()
     assert torch.isfinite(prediction.grad).all()
+    label["direct_hessian_weight"][0] = 0
+    target[:4] = torch.nan
+    prediction.grad = None
+    value = fn({"direct_hessian": prediction}, label)
+    torch.testing.assert_close(value, value.new_tensor(b))
+    value.backward()
+    assert not prediction.grad[:4].any() and torch.isfinite(prediction.grad).all()
     label["direct_hessian_weight"].zero_()
     prediction.grad = None
     value = fn({"direct_hessian": prediction}, label)
@@ -1012,8 +1019,11 @@ def small_model(
     Lmax=2,
     lmax=2,
     parity=None,
+    cartesian=False,
 ):
     config = deepcopy(DEFAULT_MODEL_CONFIG)
+    if cartesian:
+        config["_target_"] = "tace.models.CartesianTACE"
     targets = ["energy", "forces", "direct_hessian"] if joint else ["direct_hessian"]
     config.update(
         num_layers=2,
@@ -1037,6 +1047,325 @@ def small_model(
     with torch_default_dtype(dtype):
         model = create_model(config, statistics, targets, [])
     return configure_model_precision(model, dtype, device=device)
+
+
+def test_hip_pair_live_cg(device, monkeypatch):
+    """The fixed-CG program cannot stand in for a live e3nn tensor operand."""
+    from tace.models.spherical.edge_inter import _RowwisePairProduct
+    from tace.models.spherical.paths import generate_paths
+
+    monkeypatch.setenv("TACE_USE_OEQ", "0")
+    x_ir, y_ir = o3.Irreps("2x1o"), o3.Irreps("1x2e")
+    paths, out = generate_paths(o3.Irreps("1o"), x_ir, y_ir)
+    pair = _RowwisePairProduct(x_ir, y_ir, out, paths, shared_weights=False).to(device)
+    original = deepcopy(pair.state_dict())
+    name, cg = next((n, b) for n, b in pair.named_buffers() if "_w3j_" in n)
+    torch.manual_seed(92)
+    args = tuple(
+        torch.randn(7, d, device=device, requires_grad=True)
+        for d in (x_ir.dim, y_ir.dim, pair.weight_numel)
+    )
+    seed = torch.randn(7, out.dim, device=device)
+    assert pair._canonical_cg() and deepcopy(pair)._canonical_cg()
+    baseline = pair.tp(*args)
+    calls = []
+    with pair.contraction.register_forward_hook(lambda *_: calls.append(1)):
+        torch.testing.assert_close(pair(*args), baseline)
+        assert len(calls) == int(device.type == "cuda")
+        calls.clear()
+        cg.requires_grad_()
+        assert not pair._canonical_cg()
+
+        def grads(value, inputs):
+            return torch.autograd.grad((value * seed).sum(), inputs, create_graph=True)
+
+        actual, expected = (
+            grads(pair(*args), (cg, *args)),
+            grads(pair.tp(*args), (cg, *args)),
+        )
+        assert actual[0].abs().max() > 0.1
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual[0].square().sum(), args[0]),
+            torch.autograd.grad(expected[0].square().sum(), args[0]),
+        )
+        cg.requires_grad_(False).neg_()
+        assert not pair._canonical_cg()
+        torch.testing.assert_close(pair(*args), -baseline)
+        pair.load_state_dict(deepcopy(pair.state_dict()))
+        assert not pair._canonical_cg()  # the replacement checkpoint is noncanonical
+        torch.testing.assert_close(pair(*args), -baseline)
+        assert not calls
+        pair.load_state_dict(original)
+        assert pair._canonical_cg()
+        replacement = (-0.5 * cg).requires_grad_()
+        actual = torch.func.functional_call(pair, {name: replacement}, args)
+        torch.testing.assert_close(actual, -0.5 * baseline)
+        torch.testing.assert_close(grads(actual, replacement)[0], expected[0])
+        assert not calls
+    if device.type == "cuda":
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        # The real-mode trace gets the very same tensor object as its example
+        # input. Its emitted graph must nevertheless read a different table.
+        def live(x, y, w, table):
+            return torch.func.functional_call(pair, {name: table}, (x, y, w))
+
+        traced = make_fx(live)(*args, cg)
+        torch.testing.assert_close(traced(*args, -cg), -baseline)
+    module, local_name = name.rsplit(".", 1)
+    parameter = torch.nn.Parameter(cg.clone())
+    setattr(pair.get_submodule(module), local_name, parameter)
+    assert not pair._canonical_cg()
+    torch.testing.assert_close(grads(pair(*args), parameter)[0], expected[0])
+
+
+def test_cartesian_hip_eqx_pair_matches_native(device, monkeypatch):
+    # Rank two has 9 Cartesian components but only 5 spherical components.
+    # Include repeated periodic images and a disconnected one-atom graph.
+    periodic = Atoms(
+        "H2",
+        positions=[[0.1, 0.2, 0.3], [1.4, 0.35, 0.2]],
+        cell=[[2.5, 0, 0], [0.6, 2.8, 0], [0.3, 0.4, 3.0]],
+        pbc=True,
+    )
+    targets = ["energy", "forces", "direct_hessian"]
+    batch = (
+        Batch.from_data_list(
+            [
+                from_atoms(
+                    build_element_lookup([1]),
+                    a,
+                    4.0,
+                    None,
+                    KeySpecification.from_defaults(),
+                    targets,
+                    [],
+                    neighborlist_backend="ase",
+                )
+                for a in (periodic, Atoms("H"))
+            ]
+        )
+        .to(device)
+        .to_dict()
+    )
+    for key in ("OEQ", "EQT", "CUE", "LUNA", "COMPILE"):
+        monkeypatch.setenv("TACE_USE_" + key, "0")
+    params = None
+    for eqx in ("0", "1"):
+        monkeypatch.setenv("TACE_USE_EQX", eqx)
+        model = small_model(
+            torch.float64, device, joint=True, hessian_cutoff=3.2, cartesian=True
+        )
+        if params is not None:
+            assert params.keys() == dict(model.named_parameters()).keys()
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    param.copy_(params[name])
+        prediction = model(dict(batch))
+        outputs = {k: prediction[k] for k in targets}
+        probe = torch.linspace(-1, 1, 45, dtype=torch.float64, device=device).view(
+            5, 3, 3
+        )
+        loss = (
+            (outputs["direct_hessian"] * probe).sum()
+            + outputs["energy"].square().sum()
+            + outputs["forces"].square().sum()
+        )
+        loss.backward()
+        grad = {k: p.grad for k, p in model.named_parameters() if p.grad is not None}
+        if params is None:
+            params = dict(model.named_parameters())
+            ref = {k: v.detach() for k, v in outputs.items()}
+            ref_grad = grad
+        else:
+            assert grad.keys() == ref_grad.keys()
+            for k in ref:
+                torch.testing.assert_close(outputs[k], ref[k], atol=1e-8, rtol=1e-7)
+            for k in grad:
+                torch.testing.assert_close(grad[k], ref_grad[k], atol=1e-8, rtol=1e-7)
+            # CPU uses the Torch path for either setting; also check conversion
+            # removed the spherical row program there, before a later .cuda().
+            product = model.readout_fn.pair_representation.interactions[0].rejector
+            assert not hasattr(product, "contraction")
+
+
+@pytest.mark.parametrize("counts", [(1,), (4,), (2, 2), (4, 1, 2)])
+def test_direct_hessian_molecular_pairs(device, counts):
+    # Coincident distinct atoms, a strict cutoff, and overlapping graphs.
+    coordinates = [[0, 0, 0], [0, 0, 0], [1, 0, 0], [1 - 1e-7, 0, 0]]
+    pos = (
+        torch.tensor(
+            [xyz for n in counts for xyz in coordinates[:n]],
+            dtype=torch.float64,
+            device=device,
+        )
+        + 1e7
+    )
+    ptr = [0, *np.cumsum(counts)]
+    data = dict(positions=pos.requires_grad_(), ptr=torch.tensor(ptr, device=device))
+    if len(counts) > 1:
+        data["pbc"] = torch.zeros((len(counts), 3), dtype=torch.bool, device=device)
+    result = prepare_direct_hessian_inputs(data, 1.0)
+    pairs = [
+        (i, j) for a, b in zip(ptr, ptr[1:]) for i in range(a, b) for j in range(a, b)
+    ]
+    expected = torch.tensor(pairs, device=device).T
+    torch.testing.assert_close(result["direct_hessian_pair_index"], expected)
+    source, target = expected
+    ref = (source != target) & ((pos[source] - pos[target]).square().sum(dim=-1) < 1)
+    rows = result["direct_hessian_edge_pairs"]
+    torch.testing.assert_close(rows, torch.where(ref)[0])
+    shifts = result["direct_hessian_edge_shifts"]
+    torch.testing.assert_close(shifts, pos.new_zeros((rows.numel(), 3)))
+    assert not shifts.requires_grad and "direct_hessian_pair_index" not in data
+
+
+def test_direct_hessian_large_ragged_pairs(device):
+    counts = (513, 512)
+    axes = [torch.arange(n, dtype=torch.float64, device=device) for n in counts]
+    x = torch.cat(axes)
+    pos = torch.stack((x, torch.zeros_like(x), torch.zeros_like(x)), dim=-1)
+    ptr = torch.tensor([0, counts[0], sum(counts)], device=device)
+    result = prepare_direct_hessian_inputs(dict(positions=pos, ptr=ptr), 1.125)
+    expected_rows = []
+    base = 0
+    for n in counts:
+        i = torch.arange(n - 1, device=device)
+        expected_rows.extend([base + i * n + i + 1, base + (i + 1) * n + i])
+        base += n * n
+    rows = result["direct_hessian_edge_pairs"]
+    torch.testing.assert_close(rows, torch.cat(expected_rows).sort().values)
+    pair_index = result["direct_hessian_pair_index"]
+    assert pair_index.shape == (2, base)
+    source, target = pair_index[:, rows]
+    assert ((source < counts[0]) == (target < counts[0])).all()
+    assert ((pos[source, 0] - pos[target, 0]).abs() == 1).all()
+
+
+@pytest.mark.parametrize("counts", [(3,), (2, 1, 3)])
+def test_hessian_packed_readout_dense_oracle(device, counts):
+    with torch_default_dtype(torch.float64):
+        head = DirectHessianReadout("2x0e+2x1e+2x2e", "2x0e+2x1e+2x2e", 2, 2).to(device)
+    n = sum(counts)
+    ptr = torch.tensor((0, *np.cumsum(counts)), device=device)
+    graph = torch.repeat_interleave(
+        torch.arange(len(counts), device=device), torch.tensor(counts, device=device)
+    )
+    pair = hessian_pair_indices(ptr)
+    rows = torch.nonzero(pair[0] != pair[1], as_tuple=True)[0]
+    rows = torch.cat((rows, rows[:1], rows[:2])).flip(0)
+    x = torch.randn(n, 18, dtype=torch.float64, device=device, requires_grad=True)
+    e = torch.randn(len(rows), 18, dtype=x.dtype, device=device, requires_grad=True)
+    fid = torch.arange(n, device=device) % 2
+    actual = head(x, e, ptr, graph, fid, pair, rows)
+
+    # Select heads independently per source, before converting each image.
+    def select(coeff, f):
+        parts = coeff.split([2, 6, 10], dim=-1)
+        selected = torch.cat(
+            [
+                p.reshape(-1, 2, d)[torch.arange(len(f), device=device), f]
+                for p, d in zip(parts, (1, 3, 5))
+            ],
+            dim=-1,
+        )
+        return torch.einsum("pk,abk->pab", selected, head.basis)
+
+    node_values = select(head.node_readout(x), fid)
+    edge_values = select(head.edge_readout(e), fid[pair[0, rows]])
+    diagonal = torch.nonzero(pair[0] == pair[1], as_tuple=True)[0]
+    unsym = (
+        actual.new_zeros(actual.shape)
+        .index_copy(0, diagonal, node_values)
+        .index_add(0, rows, edge_values)
+    )
+    pieces = []
+    for g, size in zip(unsym.split([n * n for n in counts]), counts):
+        square = g.reshape(size, size, 3, 3)
+        pieces.append((square + square.permute(1, 0, 3, 2)).flatten(0, 1) * 0.5)
+    expected = torch.cat(pieces)
+    torch.testing.assert_close(actual, expected)
+    args = (x, e, *head.parameters())
+    probe = torch.randn_like(expected)
+    for a, b in zip(
+        torch.autograd.grad(actual, args, probe),
+        torch.autograd.grad(expected, args, probe),
+    ):
+        torch.testing.assert_close(a, b)
+
+
+@pytest.mark.parametrize("empty", (False, True))
+def test_sparse_hessian_assembly_derivatives(device, empty):
+    # Out-of-order images, a missing reverse edge, repeated diagonals and
+    # isolated atoms. The dense oracle never groups by unordered pair.
+    rows = torch.tensor(
+        [] if empty else [7, 1, 7, 5, 7, 0, 5, 4, 1], device=device, dtype=torch.long
+    )
+    reverse = (rows % 4) * 4 + rows // 4
+    x = torch.randn(
+        len(rows), 3, 3, device=device, dtype=torch.float64, requires_grad=True
+    )
+    probe = torch.randn(16, 3, 3, device=device, dtype=x.dtype, requires_grad=True)
+    direction = torch.randn_like(x)
+    dense = x.new_zeros(16, 3, 3).index_add(0, rows, x).view(4, 4, 3, 3)
+    expected = ((dense + dense.permute(1, 0, 3, 2)) * 0.5).reshape_as(probe)
+    actual = _sparse_symmetric_blocks(x, rows, reverse, 16)
+    torch.testing.assert_close(actual, expected)
+    square = actual.view(4, 4, 3, 3)
+    assert torch.equal(square, square.permute(1, 0, 3, 2))
+
+    def derivatives(y):
+        first = torch.autograd.grad((y.sin() * probe).sum(), x, create_graph=True)[0]
+        return first, torch.autograd.grad(first, (x, probe), direction)
+
+    torch.testing.assert_close(derivatives(actual), derivatives(expected))
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="sparse CUDA readout dispatch"
+)
+def test_large_sparse_hessian_readout_uses_active_rows():
+    device = torch.device("cuda")
+    # Two graphs; unequal fidelity at the ends of a pair; repeated images and
+    # a one-way contribution. The large public dense output itself is required.
+    n = 1024
+    ptr = torch.tensor([0, n, n + 1], device=device)
+    graph = torch.arange(n + 1, device=device).eq(n).long()
+    pair = hessian_pair_indices(ptr)
+    rows = ptr.new_tensor([1, 1, n, 2])
+    fidelity = torch.arange(n + 1, device=device) % 2
+    with torch_default_dtype(torch.float64):
+        head = DirectHessianReadout("2x0e+2x1e+2x2e", "2x0e+2x1e+2x2e", 2, 2).to(device)
+    x = torch.randn(n + 1, 18, dtype=torch.float64, device=device, requires_grad=True)
+    e = torch.randn(len(rows), 18, dtype=x.dtype, device=device, requires_grad=True)
+    with patch(
+        "tace.models.spherical.readout._sparse_symmetric_blocks",
+        wraps=_sparse_symmetric_blocks,
+    ) as assembly:
+        actual = head(x, e, ptr, graph, fidelity, pair, rows)
+    assembly.assert_called_once()
+    diag = head.to_cartesian(head.node_readout(x), fidelity)[-1]
+    edges = head.to_cartesian(head.edge_readout(e), fidelity[pair[0, rows]])
+    block = (edges[0] + edges[1] + edges[2].T) * 0.5
+    expected = torch.stack(
+        (
+            block,
+            block.T,
+            edges[3] * 0.5,
+            edges[3].T * 0.5,
+            torch.zeros_like(block),
+            (diag + diag.T) * 0.5,
+        )
+    )
+    selected = actual[ptr.new_tensor([1, n, 2, 2 * n, 3, n * n])]
+    torch.testing.assert_close(selected, expected)
+    probe = torch.randn_like(expected)
+    args = (x, e, *head.parameters())
+    torch.testing.assert_close(
+        torch.autograd.grad(selected, args, probe),
+        torch.autograd.grad(expected, args, probe),
+    )
 
 
 def check_direct_hessian_training(device, dtype, joint, loss_name, interaction_type):

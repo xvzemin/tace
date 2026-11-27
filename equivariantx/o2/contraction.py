@@ -28,6 +28,9 @@ def contraction_metadata(
     input_dim,
     output_dim,
     channels,
+    shared=False,
+    coupling=coupling_entries,
+    component_layout=None,
 ):
     """Expand analytic coupling paths into scalar monomials with independent weights."""
     correlation = len(paths_by_order)
@@ -46,13 +49,15 @@ def contraction_metadata(
                     continue
                 previous = cache[path.leaves[:order], path.intermediates[:order]]
                 result = [{} for _ in range(path.intermediates[order].dim)]
-                for i, j, k, coefficient in coupling_entries(
+                for i, j, k, coefficient in coupling(
                     path.intermediates[order - 1],
                     irreps_in[leaf],
                     path.intermediates[order],
                 ):
                     for monomial, value in previous[i].items():
                         indices = (*monomial, start + j)
+                        if shared:
+                            indices = tuple(sorted(indices))
                         result[k][indices] = (
                             result[k].get(indices, 0.0) + value * coefficient
                         )
@@ -73,13 +78,18 @@ def contraction_metadata(
                             )
                         )
             weight_index += 1
-    return repr(
-        (
-            channels,
-            (*([input_dim] * correlation), weight_index, output_dim),
-            tuple(rows),
-        )
-    )
+    dims = (*([input_dim] * correlation), weight_index, output_dim)
+    if component_layout is None:
+        return repr((channels, dims, tuple(rows)))
+    inputs, outputs = component_layout
+    strided = []
+    for indices, coefficient in rows:
+        coordinates = [
+            inputs[i] if i >= 0 else (-1, 1) for i in indices[:correlation]
+        ] + [(indices[-2] * channels, 1), outputs[indices[-1]]]
+        offsets, strides = zip(*coordinates)
+        strided.append((offsets, coefficient, channels, strides))
+    return repr((0, tuple(channels * d for d in dims), tuple(strided)))
 
 
 class AsymmetricContraction(torch.nn.Module):
@@ -124,6 +134,8 @@ class AsymmetricContraction(torch.nn.Module):
     >>> contraction((x, y), weight).shape
     torch.Size([5, 4])
     """
+
+    shared_inputs = False
 
     def __init__(
         self,
@@ -237,6 +249,14 @@ class AsymmetricContraction(torch.nn.Module):
             self._path_scales = tuple(
                 tuple(1.0 for _ in paths) for paths in self._paths_by_order
             )
+        if self.shared_inputs:
+            self._path_scales = tuple(
+                tuple(
+                    scale * self.path_normalizations[path.leaves, path.intermediates]
+                    for path, scale in zip(paths, scales)
+                )
+                for paths, scales in zip(self._paths_by_order, self._path_scales)
+            )
 
         order_weight_slices = []
         offset = 0
@@ -247,6 +267,8 @@ class AsymmetricContraction(torch.nn.Module):
         self._order_weight_slices = tuple(order_weight_slices)
         self._base_input_slices = Irreps(self._input_irreps).slices()
         self._base_input_dim = sum(ir.dim for ir in self._input_irreps)
+        self.input_dim = self.irreps_in.dim
+        self.output_dim = self.irreps_out.dim
         self._base_output_slices = Irreps(base_irreps_out.expanded()).slices()
         self.register_buffer(
             "_basis_reference", torch.empty(0, dtype=torch.float64), persistent=False
@@ -264,15 +286,16 @@ class AsymmetricContraction(torch.nn.Module):
         )
         from ..ops.torch.o2.contraction import Contraction
 
-        self.contraction = Contraction(*arguments, self._base_irreps_out.dim).to(
-            self._basis_reference
-        )
+        self.contraction = Contraction(
+            *arguments, self._base_irreps_out.dim, shared=self.shared_inputs
+        ).to(self._basis_reference)
         if self.backend == "cuda":
             self.kernel_metadata = contraction_metadata(
                 *arguments,
                 self._base_input_dim,
                 self._base_irreps_out.dim,
                 self.num_channels,
+                shared=self.shared_inputs,
             )
 
     def set_algorithm(self, algorithm: str) -> None:
@@ -408,16 +431,15 @@ class AsymmetricContraction(torch.nn.Module):
         torch.Tensor
             Contracted features with shape ``(..., irreps_out.dim)``.
         """
-        validate_module_precision(self, (inputs, weight))
+        checked = inputs[:1] if self.shared_inputs else inputs
+        validate_module_precision(self, (checked, weight))
         if len(inputs) != self.correlation:
             raise ValueError(
                 f"Expected {self.correlation} independent inputs, got {len(inputs)}."
             )
-        for features in inputs:
-            if features.ndim < 1 or features.size(-1) != self.irreps_in.dim:
-                raise ValueError(
-                    f"Input trailing dimension must be {self.irreps_in.dim}."
-                )
+        for features in checked:
+            if features.ndim < 1 or features.size(-1) != self.input_dim:
+                raise ValueError(f"Input trailing dimension must be {self.input_dim}.")
             if features.is_complex():
                 raise TypeError("AsymmetricContraction requires real inputs.")
         if weight.ndim < 1 or weight.size(-1) != self.weight_numel:
@@ -425,7 +447,7 @@ class AsymmetricContraction(torch.nn.Module):
         if weight.is_complex():
             raise TypeError("AsymmetricContraction requires real weights.")
         leading_shape = torch.broadcast_shapes(
-            *(features.shape[:-1] for features in inputs), weight.shape[:-1]
+            *(features.shape[:-1] for features in checked), weight.shape[:-1]
         )
         if self.backend == "cuda" and inputs[0].is_cuda:
             from ..ops.cuda.o2.contraction import evaluate
@@ -473,6 +495,8 @@ class SymmetricContraction(AsymmetricContraction):
     torch.Size([5, 2])
     """
 
+    shared_inputs = True
+
     def __init__(
         self,
         irreps_in,
@@ -489,18 +513,10 @@ class SymmetricContraction(AsymmetricContraction):
             irreps_in,
             irreps_out,
             correlation,
-            algorithm="recursive",
+            algorithm=algorithm,
             path_mode=path_mode,
             backend=backend,
         )
-        self._path_scales = tuple(
-            tuple(
-                scale * self.path_normalizations[path.leaves, path.intermediates]
-                for path, scale in zip(paths, scales)
-            )
-            for paths, scales in zip(self._paths_by_order, self._path_scales)
-        )
-        self.set_algorithm(algorithm)
 
     def _enumerate_states(self):
         offsets = []
@@ -577,5 +593,4 @@ class SymmetricContraction(AsymmetricContraction):
         torch.Tensor
             Features of shape ``(..., irreps_out.dim)`` in ``ir_mul`` layout.
         """
-        validate_module_precision(self, (features, weight))
         return super().forward((features,) * self.correlation, weight)

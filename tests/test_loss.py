@@ -140,12 +140,16 @@ def test_shared_step_preprocessing_preserves_raw_batch(
         torch.testing.assert_close(labels.energy, expected)
         seen.append(stage)
 
+    def log(name, value, **kwargs):
+        if name == f"{prefix}/loss":
+            assert kwargs["batch_size"] == batch.num_graphs
+
     monkeypatch.setattr(lit_model, "update_metrics", metrics_update)
     wrapper = SimpleNamespace(
         _process_batch=process,
         skip_controller=None,
         sync_dist=False,
-        log=lambda *args, **kwargs: None,
+        log=log,
         optimizers=lambda: SimpleNamespace(param_groups=[{"lr": 0.01}]),
         loss_property=["energy"],
         **{f"{prefix}_metrics": {}},
@@ -164,6 +168,63 @@ def test_shared_step_preprocessing_preserves_raw_batch(
     torch.testing.assert_close(labels["energy"], expected)
     unlabeled = {"atomic_numbers": batch.atomic_numbers}
     assert shift_energy_labels(unlabeled) is unlabeled
+
+
+def test_skipped_batch_clears_existing_gradient_views(monkeypatch):
+    from tace.lightning import lit_model
+    from tace.lightning.loss_skip import LossSkipController
+
+    p, q = (torch.nn.Parameter(torch.ones(3)) for _ in range(2))
+    bucket = torch.ones(6)
+    view = p.grad = bucket[:3]
+    q.grad = (q * 2).view_as(q)
+    monkeypatch.setenv("TACE_USE_DENS", "0")
+    monkeypatch.setattr(lit_model, "update_metrics", lambda *args: None)
+    wrapper = SimpleNamespace(
+        _process_batch=lambda _: ({}, p.sum()),
+        skip_controller=LossSkipController(manual_threshold=1, start_step=0),
+        device=p.device,
+        current_epoch=0,
+        global_step=1,
+        sync_dist=False,
+        parameters=lambda: iter((p, q)),
+        log=lambda *a, **kw: None,
+        optimizers=lambda: SimpleNamespace(param_groups=[{"lr": 0.01}]),
+        train_metrics={},
+        loss_property=[],
+    )
+    batch = {"ptr": torch.tensor([0, 3])}
+    zero = lit_model.LightningWrapperModel._shared_step(wrapper, batch, 0, "train")
+    assert zero.item() == 0 and p.grad is view and not q.grad.requires_grad
+    zero.backward()
+    torch.testing.assert_close(bucket, torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]))
+    torch.testing.assert_close(q.grad, torch.zeros_like(q))
+
+
+def test_epoch_loss_weights_ignore_unused_cached_fields(monkeypatch):
+    from tace.lightning import lit_model
+
+    monkeypatch.setenv("TACE_USE_U_SHIFT", "0")
+    monkeypatch.setattr(lit_model, "update_metrics", lambda *args: None)
+    weights = []
+    wrapper = SimpleNamespace(
+        _process_batch=lambda b: ({}, b["energy"].mean()),
+        sync_dist=False,
+        log=lambda name, value, **kw: weights.append((value, kw["batch_size"])),
+        val_metrics={},
+        loss_property=["energy", "forces"],
+    )
+    first = {"ptr": torch.tensor([0, 3, 5]), "energy": torch.tensor([1.0, 3.0])}
+    second = {"ptr": torch.tensor([0, 4]), "energy": torch.tensor([8.0])}
+    for batch in (first, {**first, "stress": torch.ones(2, 3, 3)}, second):
+        lit_model.LightningWrapperModel._shared_step(wrapper, batch, 0, "val")
+    assert [n for _, n in weights] == [2, 2, 1]
+    last_loss, last_count = weights[-1]
+    for first_loss, first_count in weights[:2]:
+        epoch_loss = (first_loss * first_count + last_loss * last_count) / (
+            first_count + last_count
+        )
+        assert epoch_loss == 4.0
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
@@ -252,9 +313,10 @@ def test_loss_coordinate_derivatives():
 def test_tensor_loss_missing_labels(loss, voigt, key, prepared):
     reference = torch.arange(1.0, 10.0).reshape(1, 3, 3)
     target = torch.zeros_like(reference)
-    pred = torch.cat([reference, 100 * reference]).requires_grad_()
+    missing = torch.full_like(target, float("nan"))
+    pred = torch.cat([reference, missing]).requires_grad_()
     labels = {
-        key: torch.cat([target, target]),
+        key: torch.cat([target, missing]),
         f"{key}_weight": torch.tensor([1.0, 0.0]),
         "entropy": torch.ones(2),
     }
@@ -265,11 +327,25 @@ def test_tensor_loss_missing_labels(loss, voigt, key, prepared):
         loss,
         voigt=voigt,
     )
-    expected = tensor_loss(
-        {key: reference}, {k: v[:1] for k, v in labels.items()}, key, loss, voigt=voigt
-    )
+    reference = reference.requires_grad_()
+    values = reference.flatten(1)
+    if voigt:
+        values = values[:, [0, 4, 8, 5, 2, 1]]
+    if loss == "mse":
+        expected = values.square().mean()
+    elif loss == "mae":
+        expected = values.abs().mean()
+    elif loss == "huber":
+        expected = torch.nn.functional.huber_loss(
+            values, torch.zeros_like(values), delta=0.01
+        )
+    else:
+        expected = torch.linalg.vector_norm(values)
     torch.testing.assert_close(actual, expected)
     actual.backward()
+    torch.testing.assert_close(
+        pred.grad[:1], torch.autograd.grad(expected, reference)[0]
+    )
     assert torch.isfinite(pred.grad).all() and not pred.grad[1].any()
     labels[f"{key}_weight"].zero_()
     pred.grad = None
@@ -282,10 +358,26 @@ def test_tensor_loss_missing_labels(loss, voigt, key, prepared):
     )
     empty.backward()
     assert empty == 0 and not pred.grad.any()
+    if key == "stress":
+        no_structures = {k: v[:0] for k, v in labels.items()}
+        no_pred = pred.detach()[:0].requires_grad_()
+        no_loss = tensor_loss(
+            {key: no_pred},
+            prepare_tensor_loss_counts(no_structures, [key])
+            if prepared
+            else no_structures,
+            key,
+            loss,
+            voigt=voigt,
+        )
+        assert no_loss == 0 and not torch.autograd.grad(no_loss, no_pred)[0].numel()
 
 
 @pytest.mark.parametrize("prepared", [False, True])
-def test_tensor_loss_distributed_count(monkeypatch, prepared):
+@pytest.mark.parametrize(
+    "kind,voigt,components", [("mse", False, 9), ("mae", True, 6), ("l2mae", True, 1)]
+)
+def test_tensor_loss_distributed_count(monkeypatch, prepared, kind, voigt, components):
     from tace.utils.loss import common
 
     pred = {"stress": torch.ones(2, 3, 3, requires_grad=True)}
@@ -294,18 +386,23 @@ def test_tensor_loss_distributed_count(monkeypatch, prepared):
         "entropy": torch.ones(2),
         "stress_weight": torch.tensor([2.0, 0.0]),
     }
+    single = torch.tensor(2.0 * (6**0.5 if kind == "l2mae" else 1))
     torch.testing.assert_close(
-        tensor_loss(pred, label, "stress", "mse"), torch.tensor(2.0)
+        tensor_loss(pred, label, "stress", kind, voigt=voigt), single
     )
     monkeypatch.setattr(common.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(common.dist, "get_world_size", lambda: 2)
-    monkeypatch.setattr(
-        common.dist, "all_reduce", lambda count, op: count.add_(2 if prepared else 18)
-    )
+
+    def reduce(count, op):
+        units = 1 if prepared else components
+        assert count.item() == units
+        count.add_(2 * units)
+
+    monkeypatch.setattr(common.dist, "all_reduce", reduce)
     if prepared:
         label = prepare_tensor_loss_counts(label, ["stress"])
     torch.testing.assert_close(
-        tensor_loss(pred, label, "stress", "mse"), torch.tensor(36.0 / 27.0)
+        tensor_loss(pred, label, "stress", kind, voigt=voigt), single * (2 / 3)
     )
 
 
@@ -1117,7 +1214,9 @@ def test_optimizer_eqx_parameter_roles(caplog):
 
     from equivariantx import co2, co3, o2
     from equivariantx import o3 as eqx_o3
-    from equivariantx.models.mace.symmetric_contraction import UuuSymmetricContraction
+    from equivariantx_foundation.adapters.mace.symmetric_contraction import (
+        UuuSymmetricContraction,
+    )
     from tace.lightning.optimizer import get_optimizer_param_groups
 
     class Contraction(torch.nn.Module):
@@ -1679,3 +1778,70 @@ def test_global_gradient_clipping(device, scale):
             torch.stack([p.grad.double().norm() for p in parameters[:-1]])
         )
         torch.testing.assert_close(norm, norm.new_tensor(10.0))
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="single-device NVIDIA FP32 Lightning clipping",
+)
+def test_lightning_fp32_gradient_clipping_cuda_replay():
+    from types import SimpleNamespace
+
+    from tace.lightning.lit_model import LightningWrapperModel
+    from tace.lightning.optimizer import clip_gradient_norm
+
+    # Every replay reads the current gradients, including an absent gradient
+    # and a finite norm exceeding even FP32's output range. A D2H scalar
+    # branch inside the clipped step would fail the initial CUDA graph capture.
+    params = [torch.nn.Parameter(torch.zeros(n, device="cuda")) for n in (32, 7, 1)]
+    inputs = [torch.linspace(-1, 1, p.numel(), device=p.device) for p in params[:2]]
+    for p, v in zip(params, inputs):
+        p.grad = v.clone()
+    reference = [torch.nn.Parameter(torch.zeros_like(p)) for p in params]
+    optimizer = torch.optim.SGD(params, lr=0.1)
+
+    def clip():
+        LightningWrapperModel.configure_gradient_clipping(
+            SimpleNamespace(), optimizer, 10.0, "norm"
+        )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        clip()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        clip()
+    for scale in (0.0, 1.0, 100.0, 1e20, 1e38, float("inf"), float("nan")):
+        for p, r, v in zip(params[:2], reference[:2], inputs, strict=True):
+            p.grad.copy_(v * scale)
+            r.grad = p.grad.clone()
+        clip_gradient_norm(reference, 10.0)
+        graph.replay()
+        for p, r in zip(params[:2], reference[:2], strict=True):
+            torch.testing.assert_close(
+                p.grad, r.grad, atol=0, rtol=2e-6, equal_nan=True
+            )
+        assert params[-1].grad is reference[-1].grad is None
+
+
+def test_lightning_gradient_clipping_public_contract():
+    from equivariantx.utils.autograd import clip_gradient_norm
+    from tace.lightning.optimizer import clip_gradient_norm as lightning_clip
+
+    assert lightning_clip is clip_gradient_norm
+    p = torch.nn.Parameter(torch.zeros(4))
+    for return_norm in (False, True):
+        with pytest.raises(ValueError, match="nonnegative"):
+            clip_gradient_norm(iter([p]), -1.0, return_norm=return_norm)
+    assert clip_gradient_norm(iter([p]), 0.0).item() == 0
+    assert clip_gradient_norm(iter([p]), 0.0, return_norm=False) is None
+    for value, dtype in ((1.0, torch.float32), (1e30, torch.float64)):
+        p.grad = torch.full_like(p, value)
+        norm = clip_gradient_norm(iter([p]), 2.0)
+        assert norm.dtype == dtype and norm.isfinite()
+        clipped = p.grad.clone()
+        p.grad.fill_(value)
+        assert clip_gradient_norm(iter([p]), 2.0, return_norm=False) is None
+        torch.testing.assert_close(p.grad, clipped)

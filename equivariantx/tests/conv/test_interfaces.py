@@ -204,6 +204,70 @@ def test_native_cuda_graph_convolution(monkeypatch, implementation, shared):
         cuda_graph._GRAPHS.clear()
 
 
+@pytest.mark.parametrize("erase_tls", [True, False])
+def test_cuda_graph_owner_scope(monkeypatch, erase_tls):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from equivariantx.ops.common.cuda import graph
+
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    if not erase_tls:
+        monkeypatch.setattr(graph, "_REMOVE_TLS", None)
+    outer, inner = {}, {}
+    with ThreadPoolExecutor(1) as worker, graph.retain_constants(outer):
+        constant = graph.capture_constant(object)
+        assert not graph.enabled("product")
+        assert worker.submit(graph.CAPTURE_CONSTANTS.get).result() is None
+        assert worker.submit(graph.enabled, "product").result()
+        with pytest.raises(LookupError):
+            with graph.retain_constants(inner):
+                assert graph.CAPTURE_CONSTANTS.get() is inner
+                assert graph.capture_constant(object) is not constant
+                raise LookupError
+        assert graph.CAPTURE_CONSTANTS.get() is outer
+        assert graph.capture_constant(object) is constant
+    assert graph.enabled("product") and graph.CAPTURE_CONSTANTS.get() is None
+
+
+def test_cuda_graph_owner_on_autograd_worker(monkeypatch):
+    from threading import get_ident
+
+    from equivariantx.ops.common.cuda import graph
+
+    monkeypatch.setenv("EQX_USE_CUDA_GRAPH", "1")
+    caller, owner, observed = get_ident(), {}, []
+
+    class Reentrant(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, depth):
+            ctx.depth = depth
+            return x.clone()
+
+        @staticmethod
+        def backward(ctx, grad):
+            if get_ident() != caller:
+                observed.append(
+                    graph.CAPTURE_CONSTANTS.get() is owner
+                    and graph.capture_constant(object) is constant
+                    and not graph.enabled("product")
+                )
+            elif ctx.depth:
+                with torch.enable_grad():
+                    x = grad.new_ones(()).requires_grad_()
+                    torch.autograd.grad(Reentrant.apply(x, ctx.depth - 1), x)
+            return grad, None
+
+    with graph.retain_constants(owner):
+        constant = graph.capture_constant(object)
+        x = torch.ones((), device="cpu", requires_grad=True)
+        # The CPU engine moves a nested backward to a worker after 60 levels.
+        (grad,) = torch.autograd.grad(Reentrant.apply(x, 65), x)
+    assert grad.item() == 1
+    if not observed:
+        pytest.skip("This autograd engine kept the reentrant backward on the caller")
+    assert all(observed)
+
+
 def test_native_cuda_graph_outer_capture(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is unavailable")

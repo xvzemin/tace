@@ -10,6 +10,7 @@ from e3nn import o3
 from ..ops import resolve_backend
 from ..ops.precision import validate_module_precision
 from ..ops.torch.co3 import basis as torch_basis
+from ..utils.autograd import forward_ad_active
 from .irreps import Irreps
 from .symmetric import SymmetricBasis
 
@@ -216,6 +217,18 @@ class Projector(torch.nn.Module):
         self.groups = tuple(
             (l, tuple(entries)) for l, entries in sorted(groups.items())
         )
+        # Keep contiguous channels in one section. On mixed layouts the
+        # native rank-two map writes selected STF tensors and passes the rest
+        # through, without a gather/cat on either side of its adjoint.
+        sections = []
+        if len(self.groups) == 1 and self.groups[0][0] == 2:
+            for i, _ in self.groups[0][1]:
+                s = self.slices[i]
+                if sections and sections[-1] == s.start:
+                    sections[-1] = s.stop
+                else:
+                    sections.extend((s.start, s.stop))
+        self._rank_two_sections = tuple(sections) if 4 <= len(sections) <= 16 else ()
         self.symmetric_bases = torch.nn.ModuleDict(
             {
                 str(l): SymmetricBasis(l, backend=backend)
@@ -277,6 +290,17 @@ class Projector(torch.nn.Module):
             raise ValueError("The feature dimension does not match irreps_in.")
         if not self.groups:
             return features
+        if (
+            self.backend == "cuda"
+            and features.is_cuda
+            and getattr(self, "_rank_two_sections", ())
+            and type(self).forward_blocks is Projector.forward_blocks
+            and "forward_blocks" not in vars(self)
+            and not forward_ad_active()
+        ):
+            from ..ops.cuda.co3.basis import project_rank_two_layout
+
+            return project_rank_two_layout(features, self._rank_two_sections)
         values = [
             features[..., section].reshape(*features.shape[:-1], mul, ir.dim)
             for (mul, ir), section in zip(self.irreps_in, self.slices)

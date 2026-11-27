@@ -97,7 +97,8 @@ Operator backends and compilation
 When multiple backends are enabled, each operator selects the first supported
 one in **EQX > Luna > OEQ > EQT > CUEQ** order. Install the dependencies for the
 chosen backend. Compilation support depends on the backend and requested
-outputs; LES is not supported by the current compiled model path.
+outputs. Live compilation with ``TACE_USE_COMPILE`` does not support LES.
+For frozen periodic charge-only graph export, see :doc:`les`.
 
 ``enable_acceleration(enable_eqx=True, enable_compile=True)`` and corresponding
 calculator arguments set the relevant flags to ``1``. False arguments leave

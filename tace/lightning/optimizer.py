@@ -89,8 +89,10 @@ NO_WEIGHT_DECAY_PARAMETERS = {
     ),
     EdgeReadOut: ("linear_nonlinearity.weight*",),
     DirectHessianReadout: ("node_readout.weight*",),
-    "equivariantx.models.sevennet.conversion.IrrepsConvolution": ("denominator",),
-    "equivariantx.models.equflash.conversion.FullConv": ("denominator",),
+    "equivariantx_foundation.adapters.sevennet.conversion.IrrepsConvolution": (
+        "denominator",
+    ),
+    "equivariantx_foundation.adapters.equflash.conversion.FullConv": ("denominator",),
     "sevenn.nn.convolution.IrrepsConvolution": ("denominator",),
     "sevenn.nn.convolution.IrrepsScatterGatterFusedConvolution": ("denominator",),
     "GGNN.model.EquFlashV2.nn.convolution.FullConv": ("denominator",),
@@ -211,6 +213,10 @@ PARAMETER_RULES = {
         "weights.*": "batched_matrix",
     },
     "equivariantx.o2.linear.Linear": {"weight": "packed", "bias": "adam"},
+    "equivariantx_foundation.models.tace.tece_oam_rra.model.OrderLinear": {
+        "weight": "packed",
+        "bias": "adam",
+    },
     "equivariantx.co2.linear.Linear": {"weight": "packed", "bias": "adam"},
     "equivariantx.co3.linear.Linear": {"weight": "packed", "bias": "adam"},
     "equivariantx.o2.tensor_product.TensorProduct": {"weight": "packed"},
@@ -223,7 +229,7 @@ PARAMETER_RULES = {
         "weight1": "packed",
         "weight2": "packed",
     },
-    "equivariantx.models.mace.symmetric_contraction.UuuSymmetricContraction": {
+    "equivariantx_foundation.adapters.mace.symmetric_contraction.UuuSymmetricContraction": {
         "weight": "batched_matrix",
         "contractions.*.weights_max": "batched_matrix",
         "contractions.*.weights.*": "batched_matrix",

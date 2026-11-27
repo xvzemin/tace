@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from e3nn import o3
 
-from equivariantx import o3 as eqx_o3
+from equivariantx.o3 import ElementLinear, MoEElementLinear
 from tace.utils.env import acceleration_enabled, get_tace_use_matrix_weight
 
 IndexedFeatures = tuple[tuple[torch.Tensor, torch.Tensor | None], ...]
@@ -480,6 +480,8 @@ class ElementEmbedding(e3nnLinear):
 
 
 class e3nnElementLinear(torch.nn.Module):
+    use_eqx_linear = False
+
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -503,8 +505,8 @@ class e3nnElementLinear(torch.nn.Module):
             shared_weights=False,
         )
         weight_numel = self.linear.weight_numel
-        self.eqx_linear = eqx_o3.ElementLinear(self.linear, backend="cuda")
-        self.torch_linear = eqx_o3.ElementLinear(self.linear, backend="torch")
+        self.eqx_linear = ElementLinear(self.linear, backend="cuda")
+        self.torch_linear = ElementLinear(self.linear, backend="torch")
         self._path_shapes = [tuple(ins.path_shape) for ins in self.linear.instructions]
 
         self._0e_muls = []
@@ -576,7 +578,9 @@ class e3nnElementLinear(torch.nn.Module):
                 weight = weight + _flat_lora_delta(self)
             bias = self.bias
 
-        if x.is_cuda and acceleration_enabled("eqx", kernel="linear"):
+        if x.is_cuda and (
+            self.use_eqx_linear or acceleration_enabled("eqx", kernel="linear")
+        ):
             out = self.eqx_linear(x, weight, node_type)
         else:
             out = self.torch_linear(x, weight, node_type)
@@ -591,6 +595,8 @@ class e3nnElementLinear(torch.nn.Module):
 
 
 class e3nnMoEElementLinear(torch.nn.Module):
+    use_eqx_linear = False
+
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -640,12 +646,8 @@ class e3nnMoEElementLinear(torch.nn.Module):
             mul // self.num_experts for mul, _ in self.irreps_out
         ]
         self._path_shapes = [tuple(ins.path_shape) for ins in self.linear.instructions]
-        self.eqx_linear = eqx_o3.MoEElementLinear(
-            self.linear, num_experts, backend="cuda"
-        )
-        self.torch_linear = eqx_o3.MoEElementLinear(
-            self.linear, num_experts, backend="torch"
-        )
+        self.eqx_linear = MoEElementLinear(self.linear, num_experts, backend="cuda")
+        self.torch_linear = MoEElementLinear(self.linear, num_experts, backend="torch")
 
         if self.use_matrix_weight:
             self.weight = torch.nn.ParameterList(
@@ -693,7 +695,9 @@ class e3nnMoEElementLinear(torch.nn.Module):
             weight = self.weight
             if has_lora(self):
                 weight = weight + _flat_lora_delta(self)
-        if x.is_cuda and acceleration_enabled("eqx", kernel="linear"):
+        if x.is_cuda and (
+            self.use_eqx_linear or acceleration_enabled("eqx", kernel="linear")
+        ):
             out = self.eqx_linear(x, weight, node_type)
         else:
             out = self.torch_linear(x, weight, node_type)

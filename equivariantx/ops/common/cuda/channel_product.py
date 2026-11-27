@@ -5,13 +5,81 @@ from functools import lru_cache
 
 import torch
 
-from ....utils.metadata import channel_product_layout, parse_metadata
+from ....utils.metadata import (
+    channel_product_layout,
+    independent_channel_groups,
+    parse_metadata,
+)
 from ....utils.outputs import channel_product_outputs
 from .runtime import kernels, runtime
 
 
 @lru_cache(maxsize=128)
-def strided_product_source(metadata, dtype, role, required, shared):
+def joint_product_source(metadata, program, dtype):
+    """Fuse all live terms/slots only when the *actual* program has one writer
+    per output coordinate and no holes (including aliased operand mappings).
+    """
+    width, dims, _ = parse_metadata(metadata)
+    groups = independent_channel_groups(metadata)
+    terms = parse_metadata(program)
+    if not groups or len(terms) > 12 or dtype not in (torch.float64, torch.float32):
+        return None
+    owners, sizes, cases, reads = {}, {}, [], set()
+    for group, rows in enumerate(groups):
+        expressions = defaultdict(list)
+        for mapping, role, slot, required in terms:
+            if sizes.setdefault(slot, dims[role]) != dims[role]:
+                return None
+            subtotals = defaultdict(list)
+            for indices, coefficient in rows:
+                offset = indices[role]
+                if offset < 0 or any(
+                    i < 0 and required & (1 << k) for k, i in enumerate(indices)
+                ):
+                    continue
+                factors = []
+                for k, i in enumerate(indices):
+                    if k != role and i >= 0:
+                        p = mapping[k]
+                        reads.add(p)
+                        factors.append(f"p{p}[n*s{p}+({i * width}+c)*t{p}]")
+                product = "*".join(factors) or "scalar(1)"
+                subtotals[offset].append(f"v+=scalar({coefficient:.17g})*({product});")
+            for offset, subtotal in subtotals.items():
+                key = slot, offset
+                if owners.setdefault(key, group) != group:
+                    return None
+                expressions[key].append("".join(subtotal))
+        writes = []
+        for (slot, i), subtotals in expressions.items():
+            adds = "".join(
+                f"{{scalar v=0;{subtotal} sum+=v;}}" for subtotal in subtotals
+            )
+            writes.append(
+                f"{{scalar sum=0;{adds} q{slot}[n*{width * sizes[slot]}+{i * width}+c]=sum;}}"
+            )
+        cases.append(f"case {group}: {{ {''.join(writes)} break; }}")
+    if len(owners) != sum(sizes.values()):
+        return None
+    # Only pass pointers used by a surviving monomial. Program mappings may
+    # also contain empty shape markers or gradients unused at this AD order.
+    inputs = sorted(reads)
+    args = [f"const scalar* p{p},long long s{p},long long t{p}" for p in inputs]
+    args += [f"scalar* q{k}" for k in range(len(sizes))]
+    scalar = "double" if dtype == torch.float64 else "float"
+    tiles = 128 // width
+    source = f"""
+        using scalar={scalar};
+        extern "C" __global__ void run({",".join(args)}) {{
+            long long n=blockIdx.x; int c=threadIdx.x%{width};
+            switch(blockIdx.y*{tiles}+threadIdx.x/{width}) {{ {"".join(cases)} }}
+        }}
+    """
+    return source, inputs, (len(groups) + tiles - 1) // tiles
+
+
+@lru_cache(maxsize=128)
+def strided_product_source(metadata, dtype, role, required, shared, accumulate):
     """Generate contractions for mixed multiplicities and Cartesian layouts."""
     dims, rows = channel_product_layout(metadata)
     groups = defaultdict(list)
@@ -69,7 +137,7 @@ def strided_product_source(metadata, dtype, role, required, shared):
             store = (
                 f"atomicAdd(out+n*{dims[role]}+{offset}+c*{stride},sum);"
                 if atomic
-                else f"out[n*{dims[role]}+{offset}+c*{stride}]+=sum;"
+                else f"out[n*{dims[role]}+{offset}+c*{stride}]{'+=' if accumulate else '='}sum;"
             )
             body = f"""
                 long long i=(long long)blockIdx.x*blockDim.x+threadIdx.x;
@@ -88,7 +156,13 @@ def strided_product_source(metadata, dtype, role, required, shared):
             switch(blockIdx.y) {{ {"".join(cases)} }}
         }}
     """
-    return source, len(groups), max((key[2] for key in groups), default=1)
+    full_write = (
+        not shared[role]
+        and len(counts) == dims[role]
+        and all(n == 1 for n in counts.values())
+        and all(stride != 0 for _, stride, _ in groups)
+    )
+    return source, len(groups), max((key[2] for key in groups), default=1), full_write
 
 
 @lru_cache(maxsize=128)
@@ -177,23 +251,50 @@ def channel_product(
         for output in outputs:
             output.zero_()
         return outputs
-    width = parse_metadata(metadata)[0]
+    width, dims, _ = parse_metadata(metadata)
+    if width and len(dims) == 4 and independent_channel_groups(metadata) is not None:
+        joint = joint_product_source(metadata, program, operands[0].dtype)
+        if joint:
+            source, inputs, grid_y = joint
+            if any(operands[p].size(0) == 0 for p in inputs):
+                raise ValueError(
+                    "Cannot read a zero-row operand in a nonempty channel product."
+                )
+        # Shared inputs/outputs require the general reduction. Empty shape
+        # markers are safe only when the generated kernel doesn't read them.
+        if (
+            joint
+            and all(x.size(0) == nodes for x in outputs)
+            and all(operands[p].size(0) == nodes for p in inputs)
+        ):
+            args = []
+            for p in inputs:
+                args.extend((operands[p].data_ptr(), *operands[p].stride()))
+            args.extend(x.data_ptr() for x in outputs)
+            device = operands[0].device
+            kernel = kernels([source], device)[source]
+            runtime().launch(
+                [(kernel, args, nodes, grid_y, 128, 0)],
+                torch.cuda.current_stream(device).cuda_stream,
+            )
+            return outputs
     jobs = []
     initialized = set()
     for mapping, role, slot, required in parse_metadata(program):
         shared = tuple(operands[k].size(0) == 1 and nodes != 1 for k in mapping)
         accumulate = slot in initialized
-        if (shared[role] or not width) and not accumulate:
-            outputs[slot].zero_()
         if width:
             source, groups = product_source(
                 operands[0].dtype, metadata, role, required, shared, accumulate
             )
             channels = width
+            full_write = not shared[role]
         else:
-            source, groups, channels = strided_product_source(
-                metadata, operands[0].dtype, role, required, shared
+            source, groups, channels, full_write = strided_product_source(
+                metadata, operands[0].dtype, role, required, shared, accumulate
             )
+        if not full_write and not accumulate:
+            outputs[slot].zero_()
         initialized.add(slot)
         if groups:
             args = [operands[k].data_ptr() for k in mapping]

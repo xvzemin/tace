@@ -1,0 +1,1088 @@
+"""Foundation model adapters and fused operations."""
+
+import os
+from collections import OrderedDict
+from copy import deepcopy
+
+import pytest
+import torch
+from e3nn import o3
+
+from equivariantx.utils import copy_model
+from equivariantx_foundation.adapters.convolution import (
+    Convolution,
+    RadialFeatures,
+    RadialInput,
+)
+from equivariantx_foundation.adapters.equflash import convert_equflash_to_eqx
+from equivariantx_foundation.adapters.mace import convert_mace_to_eqx
+from equivariantx_foundation.adapters.nequip import convert_nequip_to_eqx
+from equivariantx_foundation.adapters.prophet import convert_prophet_to_eqx
+from equivariantx_foundation.adapters.sevennet import convert_sevennet_to_eqx
+
+
+def test_frozen_endpoint_adjoint_layout():
+    from equivariantx.utils.frame_program import rotate
+    from equivariantx.utils.metadata import parse_metadata
+    from equivariantx.utils.program import Program
+    from equivariantx_foundation.models.tace.tece_oam_rra.expressions import (
+        packed_layout,
+        paired_features,
+    )
+    from equivariantx_foundation.models.tace.tece_oam_rra.force import adjoint_programs
+    from equivariantx_foundation.models.tace.tece_oam_rra.frame import (
+        ENDPOINT_MATRIX,
+        lower_endpoint,
+        lower_endpoint_matrix,
+    )
+
+    p = Program()
+    p.constant(64, 0.5)
+    s, t = p.input(0, "source", 1600), p.input(0, "target", 1600)
+    w = p.input(5, "edge", 165)
+    x = paired_features(p, s, t, 25, 64)
+    z = rotate(p, packed_layout(5, 4, 128), x, w, 25, 25, packed=True)
+    seed = p.input(2, "edge", 3200)
+    outs = p.adjoint((z,), (seed,), (0, 5))
+    nodes = tuple(p.nodes)
+    new = lower_endpoint(nodes, outs)
+    changed = [i for i, (a, b) in enumerate(zip(nodes, new)) if a != b]
+    assert len(changed) == 1
+    (i,) = changed
+    assert new[i][3][0][2] == ("frozen_endpoint_adjoint",)
+    assert new[i][2][:2] == (seed, w)
+    op, n, args, ids = nodes[i]
+    wrong = (*nodes[:i], (op, n, args, ids[::-1]), *nodes[i + 1 :])
+    assert lower_endpoint(wrong, outs) is wrong
+    (matrix,) = [j for j, slot, kind in outs if (slot, kind) == (5, "edge")]
+    frozen = repr((new, outs))
+    full, tail = adjoint_programs(repr((frozen, frozen)))
+    for spec in (full, tail):
+        lowered, roots = parse_metadata(spec)
+        assert roots == outs
+        assert [j for j, (a, b) in enumerate(zip(new, lowered)) if a != b] == [matrix]
+        assert lowered[matrix][3][0] == ENDPOINT_MATRIX
+    op, n, args, data = new[matrix]
+    wrong = (*new[:matrix], (op, n, args[::-1], data), *new[matrix + 1 :])
+    for unmatched in (nodes, wrong):
+        original = repr((unmatched, outs))
+        assert lower_endpoint_matrix(original) == original
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
+def test_frozen_endpoint_adjoint_values():
+    from equivariantx_foundation.models.tace.tece_oam_rra.frame import (
+        endpoint_adjoint,
+        endpoint_matrix_adjoint,
+    )
+
+    rng = torch.Generator(device="cuda").manual_seed(19)
+    w = torch.randn(17, 330, generator=rng, device="cuda")[:, ::2]
+    x = torch.randn(17, 25, 256, generator=rng, device="cuda")[:, :, ::2]
+    order = [
+        l * l + l + k
+        for m in range(5)
+        for k in ((0,) if m == 0 else (m, -m))
+        for l in range(m, 5)
+    ]
+    y = x[:, torch.tensor(order).argsort()].double()
+    blocks = []
+    for l in range(5):
+        d = 2 * l + 1
+        off = l * (4 * l * l - 1) // 3
+        mat = w[:, off : off + d * d].reshape(-1, d, d).double()
+        blocks.append(mat.mT @ y[:, l * l : (l + 1) ** 2])
+    expected = (
+        torch.cat(blocks, 1).reshape(-1, 25, 2, 64).transpose(1, 2).reshape(17, 3200)
+    )
+    inp = x.flatten(1)
+    out = torch.empty(17, 6400, device="cuda")[:, ::2]
+    assert endpoint_adjoint(inp, w, out) is out
+    torch.testing.assert_close(out.double(), expected, atol=3e-6, rtol=1e-5)
+    assert endpoint_adjoint(inp[:0], w[:0]).shape == (0, 3200)
+    src = torch.randint(7, (17,), device="cuda", generator=rng)
+    dst = torch.randint(7, (17,), device="cuda", generator=rng)
+    for offset in (0, 1):
+        node = torch.randn(
+            7 * 1600 + offset, dtype=torch.float32, device="cuda", generator=rng
+        )[offset:].reshape(7, 25, 64)
+        g = torch.randn(
+            17 * 3200 + offset, dtype=torch.float32, device="cuda", generator=rng
+        )[offset:].reshape(17, 3200)
+        assert node.is_contiguous() and bool(node.data_ptr() % 16) == bool(offset)
+        assert g.is_contiguous() and bool(g.data_ptr() % 16) == bool(offset)
+        pair = torch.cat((node[src], node[dst]), -1).double()
+        D = w.detach().double().requires_grad_()
+        seeds = g.reshape(17, 25, 128)[:, torch.tensor(order).argsort()].double()
+        objective = D.new_zeros(())
+        for l in range(5):
+            d = 2 * l + 1
+            off = l * (4 * l * l - 1) // 3
+            x_l = pair[:, l * l : (l + 1) ** 2]
+            adj = seeds[:, l * l : (l + 1) ** 2]
+            objective = (
+                objective
+                + ((D[:, off : off + d * d].reshape(-1, d, d) @ x_l) * adj).sum()
+            )
+        (ref,) = torch.autograd.grad(objective, D)
+        dest = torch.empty(17, 330, device="cuda", dtype=torch.float32)[:, ::2]
+        assert endpoint_matrix_adjoint(node, g, src, dst, dest) is dest
+        torch.testing.assert_close(dest.double(), ref, atol=1.2e-5, rtol=5e-6)
+        assert endpoint_matrix_adjoint(node, g[:0], src[:0], dst[:0]).shape == (0, 165)
+    with pytest.raises(ValueError):
+        endpoint_matrix_adjoint(node.double(), g, src, dst)
+    with pytest.raises(ValueError):
+        endpoint_matrix_adjoint(node, g, src.int(), dst)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
+def test_frozen_seven_reciprocal_rows_follow_geometry_and_topology():
+    from equivariantx_foundation.models.tace.tace_oam_7m.reciprocal import pair_rows
+
+    # Six unrelated two-way links, two different periodic images, a self image and a one-way link.
+    src = torch.tensor(
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 12, 13, 14, 15], device="cuda"
+    )
+    dst = torch.tensor(
+        [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 13, 12, 14, 16], device="cuda"
+    )
+    types = torch.zeros(17, dtype=torch.long, device="cuda")
+    types[11] = 1
+    rng = torch.Generator(device="cuda").manual_seed(214)
+    f, df = (
+        torch.randn(9, 64, device="cuda", generator=rng).repeat_interleave(2, 0)
+        for _ in range(2)
+    )
+    order = torch.randperm(len(src), device="cuda", generator=rng)
+
+    def validate(ids, inverse, y, dy):
+        assert torch.equal(y[ids][inverse], y)
+        assert torch.equal(dy[ids][inverse], dy)
+        groups = inverse[order.argsort()]
+        return groups[:12:2] == groups[1:12:2]
+
+    for broken in range(3):
+        if broken == 1:
+            f[1, 0] += 1
+        elif broken == 2:
+            df[3, 1] += 1
+        y, dy = (v[order].T.contiguous().T for v in (f, df))
+        ids, inv = pair_rows(src[order], dst[order], types, y, dy)
+        match = validate(ids, inv, y, dy)
+        assert match[:5].sum() == 5 - broken and not match[5]
+        assert inv[order.argsort()][12:].unique().numel() == 6
+
+    # A topology update drops the reverse edge; changing the elements can disable reuse entirely.
+    ids, inv = pair_rows(src[1:], dst[1:], types, f[1:], df[1:])
+    assert torch.equal(f[1:][ids][inv], f[1:])
+    assert (inv == inv[0]).sum() == 1
+    assert (
+        pair_rows(src, dst, torch.arange(len(types), device=src.device), f, df) is None
+    )
+
+
+@pytest.mark.parametrize(
+    "convert",
+    [
+        convert_mace_to_eqx,
+        convert_nequip_to_eqx,
+        convert_sevennet_to_eqx,
+        convert_prophet_to_eqx,
+        convert_equflash_to_eqx,
+    ],
+)
+def test_conversion_rejects_unsupported_inputs(convert):
+    model = torch.nn.Linear(1, 1, device="cpu")
+    with pytest.raises(RuntimeError, match="requires an NVIDIA CUDA device"):
+        convert(model, backend="torch")
+    if not torch.cuda.is_available():
+        return
+    model.cuda()
+    with pytest.raises(ValueError, match="implementation"):
+        convert(model, implementation="invalid", backend="torch")
+    error = TypeError if convert is convert_mace_to_eqx else ValueError
+    with pytest.raises(error, match="MACE model|No supported"):
+        convert(model, backend="torch")
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("residual", [False, True])
+def test_magnetic_mace_recoupling(backend, residual, double_precision, tmp_path):
+    pytest.importorskip("mace")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from mace.modules import blocks
+
+    from equivariantx_foundation.adapters.mace.magnetic import Wigner6jInteraction
+
+    name = (
+        "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock"
+        if residual
+        else "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock"
+    )
+    reference = getattr(blocks, name)(
+        node_attrs_irreps=o3.Irreps("2x0e"),
+        node_feats_irreps=o3.Irreps("2x0e+2x1o"),
+        edge_attrs_irreps=o3.Irreps("0e+1o+2e"),
+        edge_feats_irreps=o3.Irreps("3x0e"),
+        target_irreps=o3.Irreps("2x0e+2x1o+2x2e"),
+        hidden_irreps=o3.Irreps("2x0e+2x1o"),
+        avg_num_neighbors=3.0,
+        radial_MLP=[4],
+        magmom_node_inv_feats_irreps=o3.Irreps("2x0e"),
+        magmom_node_attrs_irreps=o3.Irreps("0e+1o+2e"),
+    ).cuda()
+    converted = Wigner6jInteraction(copy_model(reference), backend)
+    original_parameters = dict(reference.named_parameters())
+    assert original_parameters.keys() == dict(converted.named_parameters()).keys()
+    for name, value in converted.named_parameters():
+        torch.testing.assert_close(value, original_parameters[name])
+    data = dict(
+        node_attrs=torch.eye(2, device="cuda")[[0, 1, 0]],
+        node_feats=torch.randn(3, 8, device="cuda", requires_grad=True),
+        edge_attrs=torch.randn(6, 9, device="cuda", requires_grad=True),
+        edge_feats=torch.randn(6, 3, device="cuda", requires_grad=True),
+        edge_index=torch.tensor(
+            [[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]], device="cuda"
+        ),
+        magmom_node_inv_feats=torch.randn(3, 2, device="cuda", requires_grad=True),
+        magmom_node_attrs=torch.randn(3, 9, device="cuda", requires_grad=True),
+    )
+    results = []
+    for module in (reference, converted):
+        output = tuple(value for value in module(**data) if value is not None)
+        variables = tuple(value for value in data.values() if value.requires_grad)
+        gradients = torch.autograd.grad(
+            sum(value.square().sum() for value in output), variables, create_graph=True
+        )
+        parameter_gradients = torch.autograd.grad(
+            sum(value.square().sum() for value in gradients),
+            tuple(
+                dict(module.named_parameters())[name] for name in original_parameters
+            ),
+        )
+        results.append((*output, *gradients, *parameter_gradients))
+    for actual, expected in zip(results[1], results[0]):
+        torch.testing.assert_close(actual, expected, atol=2e-9, rtol=2e-8)
+    path = tmp_path / "magnetic.model"
+    torch.save(converted.cpu(), path)
+    loaded = torch.load(path, weights_only=False).cuda()
+    assert loaded.conv_tp.recouple is True
+    for actual, expected in zip(loaded(**data), reference(**data)):
+        if expected is not None:
+            torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+@pytest.mark.parametrize("time_reversal", [False, True])
+@pytest.mark.parametrize("stream_radial", [None, True])
+def test_radial_adapter(
+    implementation, device, time_reversal, stream_radial, double_precision
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    if time_reversal and not hasattr(o3.Irrep("0e"), "t"):
+        pytest.skip("Requires time-reversal e3nn")
+    torch.compiler.reset()
+    tp = o3.TensorProduct(
+        "2x0ee+2x1oo" if time_reversal else "2x0e+2x1o",
+        "0e+1o",
+        "2x0ee+2x0eo+2x1oe" if time_reversal else "2x0e+2x1o",
+        [
+            (0, 0, 0, "uvu", True),
+            (1, 1, int(time_reversal), "uvu", True),
+            (0, 1, 1 + int(time_reversal), "uvu", True),
+        ],
+        internal_weights=False,
+        shared_weights=False,
+    )
+    radial = RadialFeatures(
+        OrderedDict(
+            [
+                ("linear", torch.nn.Linear(3, 4)),
+                ("activation", torch.nn.SiLU()),
+            ]
+        ),
+        bias=True,
+        **({} if stream_radial is None else {"stream_radial": stream_radial}),
+    ).to(device)
+    convolution = Convolution(
+        tp,
+        torch.nn.Linear(4, tp.weight_numel),
+        implementation=implementation,
+        radial_mode="full" if stream_radial else "last",
+    ).to(device)
+    harmonics = o3.SphericalHarmonics("0e+1o", True, normalization="component").to(
+        device
+    )
+
+    def evaluate(x, vectors, inputs, cutoff, edges):
+        sh = harmonics(vectors)
+        return convolution(x, sh, radial(inputs) * cutoff, (edges[0], edges[1]))
+
+    compiled = torch.compile(
+        evaluate, backend="aot_eager", fullgraph=True, dynamic=True
+    )
+    parameters = (*radial.parameters(), *convolution.parameters())
+    for num_edges in (9, 0):
+        x = torch.randn(3, 8, device=device, requires_grad=True)
+        vectors = torch.randn(num_edges, 3, device=device, requires_grad=True)
+        inputs = torch.randn(num_edges, 3, device=device, requires_grad=True)
+        cutoff = torch.rand(num_edges, 1, device=device)
+        cutoff[::2] = 0
+        cutoff.requires_grad_()
+        edges = torch.randint(3, (num_edges, 2), device=device).T
+        deferred = radial(inputs)
+        if stream_radial:
+            assert isinstance(deferred, RadialInput) and deferred.features is inputs
+        else:
+            assert not radial.stream_radial
+            assert deferred.shape == (num_edges, 5)
+        actual = compiled(x, vectors, inputs, cutoff, edges)
+        convolution.backend = "torch"
+        convolution.eqx_tp.backend = "torch"
+        radial.stream_radial = False
+        expected = convolution(x, harmonics(vectors), radial(inputs) * cutoff, edges)
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+        variables = (x, vectors, inputs, cutoff, *parameters)
+        for result in (actual, expected):
+            grads = torch.autograd.grad(result.square().sum(), variables)
+            if result is actual:
+                actual_grads = grads
+            else:
+                for a, b in zip(actual_grads, grads):
+                    torch.testing.assert_close(a, b, atol=2e-9, rtol=2e-8)
+        convolution.backend = "cuda"
+        convolution.eqx_tp.backend = "cuda"
+        radial.stream_radial = bool(stream_radial)
+
+
+@pytest.fixture
+def mace_model(double_precision):
+    pytest.importorskip("mace")
+    import e3nn
+    import numpy as np
+    from mace import modules
+
+    defaults = e3nn.get_optimization_defaults()
+    if "jit_mode" in defaults:
+        e3nn.set_optimization_defaults(jit_mode="eager")
+
+    def make(interaction="RealAgnosticResidualInteractionBlock"):
+        return modules.ScaleShiftMACE(
+            r_max=3.0,
+            num_bessel=3,
+            num_polynomial_cutoff=5,
+            max_ell=2,
+            interaction_cls=getattr(modules, interaction),
+            interaction_cls_first=modules.RealAgnosticInteractionBlock,
+            num_interactions=2,
+            num_elements=2,
+            hidden_irreps=o3.Irreps("2x0e+2x1o+2x2e"),
+            MLP_irreps=o3.Irreps("2x0e"),
+            atomic_energies=np.array([0.2, -0.3]),
+            avg_num_neighbors=2.0,
+            atomic_numbers=[1, 8],
+            correlation=2,
+            gate=torch.nn.functional.silu,
+            radial_MLP=[4, 4],
+            atomic_inter_scale=1.2,
+            atomic_inter_shift=-0.4,
+        )
+
+    yield make
+    e3nn.set_optimization_defaults(**defaults)
+
+
+@pytest.fixture
+def mace_data(mace_model, atoms):
+    from mace import data
+    from mace.tools import AtomicNumberTable, torch_geometric
+
+    graph = data.AtomicData.from_config(
+        data.config_from_atoms(atoms),
+        z_table=AtomicNumberTable([1, 8]),
+        cutoff=3.0,
+    )
+    other = deepcopy(graph)
+    other.positions = other.positions * 1.1
+    return atoms, torch_geometric.Batch.from_data_list([graph, other])
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize(
+    "interaction",
+    [
+        "RealAgnosticInteractionBlock",
+        "RealAgnosticResidualInteractionBlock",
+        "RealAgnosticDensityInteractionBlock",
+        "RealAgnosticDensityResidualInteractionBlock",
+        "RealAgnosticAttResidualInteractionBlock",
+        "RealAgnosticResidualNonLinearInteractionBlock",
+    ],
+)
+def test_mace_conversion_training(
+    mace_model, mace_data, interaction, implementation, backend
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    reference = mace_model(interaction).cuda()
+    converted = copy_model(reference)
+    parameters = tuple(converted.parameters())
+    assert (
+        convert_mace_to_eqx(
+            converted, inplace=True, implementation=implementation, backend=backend
+        )
+        is converted
+    )
+    assert set(converted.parameters()) == set(parameters)
+    assert type(converted) is type(reference)
+    assert all(not hasattr(layer, "conv_fusion") for layer in reference.interactions)
+    batch = mace_data[1].cuda()
+    expected = reference(batch.clone().to_dict(), training=True, compute_stress=True)
+    actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
+    for key in ("energy", "forces", "stress", "virials"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
+    # Force and stress losses differentiate through the convolution twice.
+    for output in (actual, expected):
+        loss = sum(output[key].square().sum() for key in ("energy", "forces", "stress"))
+        loss.backward()
+    for actual_param, expected_param in zip(parameters, reference.parameters()):
+        if expected_param.grad is None:
+            assert actual_param.grad is None
+        else:
+            torch.testing.assert_close(
+                actual_param.grad, expected_param.grad, atol=2e-9, rtol=2e-8
+            )
+    projection = converted.interactions[1].conv_tp.projection.weight
+    before = projection.detach().clone()
+    torch.optim.SGD(converted.parameters(), lr=0.01).step()
+    assert not torch.equal(projection, before)
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_mace_conversion_ase_and_checkpoint(
+    mace_model, mace_data, tmp_path, implementation, backend
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from mace.calculators import MACECalculator
+
+    original = mace_model().cuda().eval()
+    original.interactions[0].conv_tp_weights.requires_grad_(False)
+    # Conversion follows the model precision without changing the caller's default.
+    torch.set_default_dtype(torch.float32)
+    converted = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend
+    )
+    assert torch.get_default_dtype() == torch.float32
+    assert not converted.training
+    assert next(converted.parameters()).dtype == torch.float64
+    assert not converted.interactions[0].conv_tp.projection.weight.requires_grad
+    assert converted is not original
+    assert not hasattr(original.interactions[0], "conv_fusion")
+    assert (
+        convert_mace_to_eqx(
+            converted, inplace=True, implementation=implementation, backend=backend
+        )
+        is converted
+    )
+    assert (
+        convert_mace_to_eqx(converted, implementation=implementation, backend=backend)
+        is not converted
+    )
+    checkpoint = tmp_path / "mace-eqx.model"
+    torch.save(converted, checkpoint)
+    restored = torch.load(checkpoint, weights_only=False)
+    reloaded = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend
+    )
+    reloaded.load_state_dict(converted.state_dict(), strict=True)
+    last_only = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend, stream_radial=False
+    )
+    results = []
+    for model in (original, restored, reloaded, last_only):
+        atoms = mace_data[0].copy()
+        atoms.calc = MACECalculator(
+            models=model, device="cuda", default_dtype="float64"
+        )
+        results.append(
+            (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+        )
+    for actual in results[1:]:
+        for value, expected in zip(actual, results[0]):
+            torch.testing.assert_close(
+                torch.as_tensor(value), torch.as_tensor(expected), atol=2e-10, rtol=2e-9
+            )
+
+
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_mace_conversion_solid_harmonics(
+    mace_model, mace_data, implementation, backend
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    original = mace_model().cuda()
+    original.spherical_harmonics.normalize = False
+    converted = convert_mace_to_eqx(
+        original, implementation=implementation, backend=backend
+    )
+    batch = mace_data[1].cuda()
+    expected = original(batch.clone().to_dict(), training=True)
+    actual = converted(batch.clone().to_dict(), training=True)
+    for key in ("energy", "forces"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
+
+
+@pytest.mark.parametrize("layout", ["mul_ir", "ir_mul"])
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_mace_conversion_cueq(mace_model, mace_data, layout, implementation):
+    if not torch.cuda.is_available():
+        pytest.skip("cuEquivariance requires CUDA")
+    pytest.importorskip("cuequivariance_torch")
+    from mace.cli.convert_e3nn_cueq import run
+
+    original = mace_model().cuda()
+    if layout == "ir_mul":
+        converted = convert_mace_to_eqx(
+            original, enable_cueq=True, implementation=implementation
+        )
+    else:
+        converted = convert_mace_to_eqx(
+            run(original, device="cuda", layout=layout), implementation=implementation
+        )
+    assert converted.interactions[0].cueq_config.layout_str == layout
+    batch = mace_data[1].cuda()
+    expected = original(batch.clone().to_dict(), training=True, compute_stress=True)
+    actual = converted(batch.clone().to_dict(), training=True, compute_stress=True)
+    for key in ("energy", "forces", "stress"):
+        torch.testing.assert_close(actual[key], expected[key], atol=2e-10, rtol=2e-9)
+    loss = sum(actual[key].square().sum() for key in ("energy", "forces", "stress"))
+    loss.backward()
+    gradient = converted.interactions[1].conv_tp.projection.weight.grad
+    assert gradient is not None and torch.isfinite(gradient).all()
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize(
+    "backend,stream_radial", [("cuda", True), ("cuda", False), ("torch", True)]
+)
+def test_equflash_fullconv(implementation, backend, stream_radial, double_precision):
+    pytest.importorskip("GGNN")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn import o3
+    from GGNN.model.EquFlashV2.nn.convolution import FullConv
+
+    torch.manual_seed(17)
+    reference = FullConv(
+        o3.Irreps("4x0e+4x1o+4x2e"),
+        o3.Irreps("0e+1o+2e"),
+        o3.Irreps("0e+1o+2e"),
+        [8, 8],
+        4,
+    ).cuda()
+    converted = copy_model(reference)
+    parameters = tuple(p for p in converted.parameters() if p.requires_grad)
+    converted = convert_equflash_to_eqx(
+        converted,
+        implementation=implementation,
+        backend=backend,
+        stream_radial=stream_radial,
+        inplace=True,
+    )
+    assert set(parameters) == {p for p in converted.parameters() if p.requires_grad}
+    x = torch.randn(5, reference.irreps_in.dim, device="cuda", requires_grad=True)
+    vectors = torch.randn(12, 3, device="cuda", requires_grad=True)
+    radial = torch.randn(12, 4, device="cuda", requires_grad=True)
+    edges = torch.randint(5, (2, 12), device="cuda", dtype=torch.int32)
+    harmonics = o3.spherical_harmonics(
+        reference.irreps_filter,
+        vectors,
+        True,
+        normalization="component",
+    )
+    expected = reference(x, edges, radial, harmonics)
+    actual = converted(x, edges, radial, harmonics)
+    torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+    gradients = []
+    for output in (expected, actual):
+        gradients.append(
+            torch.autograd.grad(
+                output.square().mean(),
+                (x, vectors, radial),
+                create_graph=True,
+                retain_graph=True,
+            )
+        )
+    for actual, expected in zip(gradients[1], gradients[0]):
+        torch.testing.assert_close(actual, expected, atol=2e-10, rtol=2e-9)
+    expected_parameters = tuple(p for p in reference.parameters() if p.requires_grad)
+    expected = torch.autograd.grad(
+        gradients[0][1].square().mean(),
+        expected_parameters,
+        retain_graph=True,
+    )
+    actual = torch.autograd.grad(
+        gradients[1][1].square().mean(),
+        parameters,
+    )
+    for a, b in zip(actual, expected):
+        torch.testing.assert_close(a, b, atol=2e-10, rtol=2e-9)
+
+
+def test_equflash_reject_efficient():
+    pytest.importorskip("GGNN")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from e3nn import o3
+    from GGNN.model.EquFlashV2.nn.convolution import EfficientConv
+
+    module = EfficientConv(
+        o3.Irreps("4x0e"),
+        o3.Irreps("0e"),
+        o3.Irreps("4x0e"),
+        [4],
+        2,
+    ).cuda()
+    with pytest.raises(NotImplementedError, match="Only EquFlash FullConv"):
+        convert_equflash_to_eqx(module)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_equflash_pretrained(implementation):
+    path = os.environ.get("EQX_EQUFLASH_CHECKPOINT")
+    if not path or not torch.cuda.is_available():
+        pytest.skip("Requires CUDA and EQX_EQUFLASH_CHECKPOINT")
+    pytest.importorskip("GGNN")
+    from ase.build import bulk
+    from ase.neighborlist import neighbor_list
+    from GGNN.model.EquFlashV2 import EquFlashV2
+
+    torch.set_default_dtype(torch.float32)
+    checkpoint = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
+    config = checkpoint["config"]["model"]
+    assert config["interaction_kwargs"]["conv_type"] == "full"
+    model = EquFlashV2(deepcopy(config))
+    model.load_state_dict(
+        {
+            k.removeprefix("module.model."): v
+            for k, v in checkpoint["state_dict"].items()
+            if k.startswith("module.model.") and not k.endswith("z_to_onehot_tensor")
+        }
+    )
+    del checkpoint
+    model.cuda().eval()
+    atoms = bulk("Fe", "bcc", a=2.87, cubic=True)
+    atoms.positions[1] += [0.05, -0.03, 0.02]
+    i, j, vectors = neighbor_list("ijD", atoms, config["cutoff"])
+    data = {
+        "atomic_numbers": torch.as_tensor(atoms.numbers, device="cuda"),
+        "edge_index": torch.stack(
+            [torch.as_tensor(k, device="cuda", dtype=torch.int32) for k in (i, j)]
+        ),
+        "edge_vec": torch.as_tensor(vectors, device="cuda", dtype=torch.float32),
+        "cell": torch.as_tensor(atoms.cell.array, device="cuda", dtype=torch.float32)[
+            None
+        ],
+        "batch": torch.zeros(len(atoms), dtype=torch.long, device="cuda"),
+        "natoms": torch.tensor([len(atoms)], device="cuda"),
+    }
+
+    def predict(layer):
+        out = layer({k: v.clone() for k, v in data.items()})
+        return tuple(out[k].detach() for k in ("energy", "forces", "stress"))
+
+    expected = predict(model)
+    converted = convert_equflash_to_eqx(
+        model,
+        implementation=implementation,
+        inplace=True,
+        backend="cuda",
+        stream_radial=True,
+    )
+    actual = predict(converted)
+    errors = [(a - b).abs().max().item() for a, b in zip(actual, expected)]
+    print(f"EquFlashV2 {implementation}: max |delta E,F,S| = {errors}")
+    torch.testing.assert_close(actual, expected, atol=5e-5, rtol=2e-5)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_nequip_package(implementation, atoms):
+    path = os.environ.get("EQX_NEQUIP_CHECKPOINT")
+    if not path:
+        pytest.skip("Set EQX_NEQUIP_CHECKPOINT to validate a packaged checkpoint")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    pytest.importorskip("nequip")
+    from nequip.data.transforms import (
+        ChemicalSpeciesToAtomTypeMapper,
+        NeighborListTransform,
+    )
+    from nequip.integrations.ase import NequIPCalculator
+    from nequip.model import ModelFromPackage
+    from nequip.utils.global_state import set_global_state
+
+    set_global_state()
+    model = ModelFromPackage(path)["sole_model"].cuda().eval()
+    reference = []
+    for convert in (False, True):
+        if convert:
+            parameters = {id(p) for p in model.parameters()}
+            model = convert_nequip_to_eqx(
+                model, implementation=implementation, inplace=True
+            )
+            assert {id(p) for p in model.parameters()} == parameters
+        atoms.calc = NequIPCalculator(
+            model,
+            device="cuda",
+            transforms=[
+                ChemicalSpeciesToAtomTypeMapper(model_type_names=model.type_names),
+                NeighborListTransform(r_max=float(model.metadata["r_max"])),
+            ],
+        )
+        reference.append(
+            (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+        )
+    for expected, actual in zip(*reference):
+        torch.testing.assert_close(
+            torch.as_tensor(actual), torch.as_tensor(expected), atol=5e-5, rtol=2e-5
+        )
+
+
+@pytest.fixture
+def atoms():
+    from ase import Atoms
+
+    return Atoms(
+        "OH2",
+        positions=[[0.2, 0.4, 0.1], [1.1, 0.2, 0.3], [-0.1, 1.3, 0.5]],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+
+
+@pytest.fixture(params=["nequip", "sevennet", "prophet"])
+def model_case(request, double_precision, atoms):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    import e3nn
+    from ase.neighborlist import neighbor_list
+
+    defaults = e3nn.get_optimization_defaults()
+
+    source, target, shift = neighbor_list("ijS", atoms, 3.0)
+    edge_index = torch.tensor([source.tolist(), target.tolist()], device="cuda")
+    positions = torch.tensor(atoms.positions, device="cuda")
+    cell = torch.tensor(atoms.cell.array[None], device="cuda")
+    shifts = torch.tensor(shift, device="cuda", dtype=torch.float64)
+    species = torch.tensor([1, 0, 0], device="cuda")
+
+    if request.param == "nequip":
+        pytest.importorskip("nequip")
+        from nequip.model import NequIPGNNModel
+        from nequip.utils.global_state import set_global_state
+
+        set_global_state()
+        model = NequIPGNNModel(
+            seed=12,
+            model_dtype="float64",
+            type_names=["H", "O"],
+            r_max=3.0,
+            num_layers=2,
+            l_max=2,
+            parity=True,
+            num_features=2,
+            radial_mlp_depth=2,
+            radial_mlp_width=4,
+            avg_num_neighbors=2.0,
+            per_type_energy_shifts=0.0,
+            per_type_energy_scales=1.0,
+            compile_mode="eager",
+        ).cuda()
+        data = dict(
+            pos=positions,
+            cell=cell,
+            edge_index=edge_index,
+            edge_cell_shift=shifts,
+            atom_types=species[:, None],
+        )
+
+        def evaluate(module):
+            output = module({key: value.clone() for key, value in data.items()})
+            return tuple(output[key] for key in ("total_energy", "forces", "stress"))
+
+        convert = convert_nequip_to_eqx
+    elif request.param == "sevennet":
+        pytest.importorskip("sevenn")
+        from sevenn.atom_graph_data import AtomGraphData
+        from sevenn.model_build import build_E3_equivariant_model
+        from sevenn.train.dataload import unlabeled_atoms_to_graph
+        from sevenn.util import chemical_species_preprocess
+
+        config = dict(
+            cutoff=3.0,
+            channel=2,
+            radial_basis={"radial_basis_name": "bessel"},
+            cutoff_function={"cutoff_function_name": "poly_cut"},
+            interaction_type="nequip",
+            lmax=2,
+            is_parity=True,
+            num_convolution_layer=2,
+            weight_nn_hidden_neurons=[4, 4],
+            act_radial="silu",
+            act_scalar={"e": "silu", "o": "tanh"},
+            act_gate={"e": "silu", "o": "tanh"},
+            conv_denominator=2.0,
+            train_denominator=True,
+            self_connection_type="nequip",
+            shift=0.0,
+            scale=1.0,
+            train_shift_scale=False,
+            irreps_manual=False,
+            lmax_edge=-1,
+            lmax_node=-1,
+            readout_as_fcn=False,
+            use_bias_in_linear=False,
+            _normalize_sph=True,
+        )
+        config.update(chemical_species_preprocess(["H", "O"]))
+        # SevenNet's native one-hot embedding explicitly produces float32.
+        torch.set_default_dtype(torch.float32)
+        model = build_E3_equivariant_model(config).cuda()
+        model.set_is_batch_data(False)
+        data = AtomGraphData.from_numpy_dict(
+            unlabeled_atoms_to_graph(atoms, 3.0)
+        ).cuda()
+
+        def evaluate(module):
+            output = module(data.clone())
+            return tuple(
+                output[key]
+                for key in (
+                    "inferred_total_energy",
+                    "inferred_force",
+                    "inferred_stress",
+                )
+            )
+
+        convert = convert_sevennet_to_eqx
+    else:
+        pytest.importorskip("prophet")
+        from prophet.model import Prophet
+
+        model = Prophet(
+            n_species=2,
+            lmax=2,
+            hidden_irreps="2x0e+2x1o+2x2e",
+            n_layers=2,
+            radial_basis_size=3,
+            radial_mlp_size=4,
+            radial_mlp_layers=2,
+            mlp_init_scale=1.0,
+            avg_n_neighbors=2.0,
+            cutoffs=[1.2, 3.0],
+            atom_energies=[0.0, 0.0],
+            kernel=False,
+        ).cuda()
+
+        def evaluate(module):
+            return module(
+                species,
+                positions.clone(),
+                shifts,
+                edge_index,
+                cell,
+                torch.tensor([3], device="cuda"),
+                torch.tensor([edge_index.size(1)], device="cuda"),
+                torch.zeros(3, dtype=torch.long, device="cuda"),
+            )
+
+        convert = convert_prophet_to_eqx
+    yield model, convert, evaluate
+    e3nn.set_optimization_defaults(**defaults)
+
+
+@pytest.fixture
+def tolerance(model_case):
+    if next(model_case[0].parameters()).dtype == torch.float32:
+        return dict(atol=2e-6, rtol=2e-5)
+    return dict(atol=2e-9, rtol=2e-8)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+@pytest.mark.parametrize(
+    "backend,stream_radial", [("cuda", True), ("cuda", False), ("torch", True)]
+)
+def test_conversion_training(
+    model_case, implementation, backend, stream_radial, tolerance
+):
+    reference, convert, evaluate = model_case
+    converted = copy_model(reference)
+    parameters = tuple(converted.parameters())
+    assert (
+        convert(
+            converted,
+            inplace=True,
+            implementation=implementation,
+            backend=backend,
+            stream_radial=stream_radial,
+        )
+        is converted
+    )
+    assert set(converted.parameters()) == set(parameters)
+    assert type(converted) is type(reference)
+    if convert is convert_prophet_to_eqx:
+        for layer in converted.layers:
+            for convolution in layer.tpconv:
+                assert isinstance(convolution.sort, torch.nn.Identity)
+                assert (
+                    convolution.tp_conv.irreps_out
+                    == convolution.tp_conv.irreps_out.sort().irreps
+                )
+    expected, actual = evaluate(reference), evaluate(converted)
+    for a, b in zip(actual, expected):
+        torch.testing.assert_close(a, b, **tolerance)
+    for output in (actual, expected):
+        sum(value.square().sum() for value in output).backward()
+    for a, b in zip(parameters, reference.parameters()):
+        if b.grad is None:
+            assert a.grad is None
+        else:
+            torch.testing.assert_close(a.grad, b.grad, **tolerance)
+    before = [p.detach().clone() for p in parameters]
+    torch.optim.SGD(converted.parameters(), lr=0.01).step()
+    assert any(not torch.equal(a, b) for a, b in zip(parameters, before))
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_conversion_checkpoint(model_case, implementation, tmp_path, tolerance):
+    reference, convert, evaluate = model_case
+    reference.eval()
+    converted = convert(reference, implementation=implementation)
+    assert converted is not reference
+    assert not converted.training
+    assert convert(converted, implementation=implementation, inplace=True) is converted
+    torch.save(converted.state_dict(), tmp_path / "state.pt")
+    restored = convert(reference, implementation=implementation)
+    restored.load_state_dict(torch.load(tmp_path / "state.pt", weights_only=True))
+    for a, b in zip(evaluate(restored), evaluate(reference)):
+        torch.testing.assert_close(a, b, **tolerance)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_conversion_ase(model_case, implementation, atoms, monkeypatch, tolerance):
+    reference, convert, _ = model_case
+    reference.eval()
+    if convert is convert_prophet_to_eqx:
+        # The upstream ASE graph builder fixes its floating-point data to float32.
+        reference.float()
+        torch.set_default_dtype(torch.float32)
+        tolerance = dict(atol=2e-6, rtol=2e-5)
+    converted = convert(reference, implementation=implementation)
+    results = []
+    for model in (reference, converted):
+        if convert is convert_nequip_to_eqx:
+            from nequip.data.transforms import (
+                ChemicalSpeciesToAtomTypeMapper,
+                NeighborListTransform,
+            )
+            from nequip.integrations.ase import NequIPCalculator
+
+            calculator = NequIPCalculator(
+                model,
+                device="cuda",
+                transforms=[
+                    ChemicalSpeciesToAtomTypeMapper(model_type_names=model.type_names),
+                    NeighborListTransform(r_max=float(model.metadata["r_max"])),
+                ],
+            )
+        elif convert is convert_sevennet_to_eqx:
+            from sevenn.calculator import SevenNetCalculator
+
+            calculator = SevenNetCalculator(
+                model=model, file_type="model_instance", device="cuda"
+            )
+        else:
+            import prophet.calculator
+
+            # Exercise ASE independently of Prophet's JSON/checkpoint loader.
+            monkeypatch.setattr(
+                prophet.calculator,
+                "load_model",
+                lambda *args, **kwargs: (
+                    model,
+                    {"atomic_numbers": [1, 8], "cutoffs": [1.2, 3.0]},
+                ),
+            )
+            calculator = prophet.calculator.KairosCalculator(
+                "unused",
+                use_kernel=False,
+                use_compile=False,
+                device="cuda",
+            )
+        atoms.calc = calculator
+        results.append(
+            (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+        )
+    for a, b in zip(*results):
+        torch.testing.assert_close(torch.as_tensor(a), torch.as_tensor(b), **tolerance)
+
+
+@pytest.mark.parametrize("implementation", ["o3", "o2"])
+def test_sevennet_pretrained(implementation):
+    path = os.environ.get("EQX_SEVENNET_CHECKPOINT")
+    if not path:
+        pytest.skip("Set EQX_SEVENNET_CHECKPOINT to validate a pretrained checkpoint")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    pytest.importorskip("sevenn")
+    from ase.build import bulk
+    from sevenn.calculator import SevenNetCalculator
+    from sevenn.util import load_checkpoint
+
+    torch.set_default_dtype(torch.float32)
+    original = (
+        load_checkpoint(path)
+        .build_model(
+            enable_cueq=False,
+            enable_flash=False,
+            enable_oeq=False,
+        )
+        .cuda()
+        .eval()
+    )
+    converted = convert_sevennet_to_eqx(original, implementation=implementation)
+    atoms = bulk("Fe", "bcc", a=2.87, cubic=True)
+    atoms.positions[1] += [0.05, -0.03, 0.02]
+    for modal in original.modal_map or (None,):
+        results = []
+        for model in (original, converted):
+            atoms.calc = SevenNetCalculator(
+                model=model, file_type="model_instance", device="cuda", modal=modal
+            )
+            results.append(
+                (atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+            )
+        errors = []
+        for a, b in zip(*results):
+            a, b = torch.as_tensor(a), torch.as_tensor(b)
+            errors.append((a - b).abs().max().item())
+            torch.testing.assert_close(a, b, atol=5e-5, rtol=2e-5)
+        print(
+            f"SevenNet {implementation} {modal or 'single head'}: "
+            f"max |delta E,F,S| = {errors}"
+        )

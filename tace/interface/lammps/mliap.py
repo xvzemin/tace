@@ -118,13 +118,13 @@ class TACELammpsCalc(MLIAPUnified):
     def _prepare_batch(self, data, nlocal, nghosts, species):
         if data.npairs:
             edge_vector = torch.as_tensor(data.rij).to(self.device, torch.float64)
-            edge_index = torch.stack(
-                [
-                    torch.as_tensor(data.pair_j, dtype=torch.int64).to(self.device),
-                    torch.as_tensor(data.pair_i, dtype=torch.int64).to(self.device),
-                ],
-                dim=0,
+            edge_index = torch.empty(
+                (2, data.npairs), dtype=torch.int64, device=self.device
             )
+            # Kokkos exposes separate int32 arrays. Widen into the final COO
+            # rows without first materializing two full-width temporaries.
+            edge_index[0].copy_(torch.as_tensor(data.pair_j))
+            edge_index[1].copy_(torch.as_tensor(data.pair_i))
         else:
             # ML-IAP exposes null edge arrays when there are no neighbors.
             edge_vector = torch.empty(0, 3, dtype=torch.float64, device=self.device)
@@ -143,11 +143,25 @@ class TACELammpsCalc(MLIAPUnified):
     @staticmethod
     @torch.no_grad()
     def _update_lammps_data(data, node_energy, pair_forces, nlocal):
+        skip_energy = getattr(data, "eflag", None) == 0
+        needs_conversion = (
+            pair_forces.dtype != torch.float64 or not pair_forces.is_contiguous()
+        )
         pair_forces = pair_forces.to(dtype=torch.float64).contiguous()
-        node_energy = node_energy.to(dtype=torch.float64).contiguous()
-        eatoms = torch.as_tensor(data.eatoms)
-        eatoms.copy_(node_energy[:nlocal])
-        data.energy = node_energy[:nlocal].sum().item()
+        if pair_forces.is_neg():
+            # ML-IAP consumes data_ptr(), which does not carry PyTorch's sign bit.
+            pair_forces = pair_forces.resolve_neg()
+            needs_conversion = True
+        if not skip_energy:
+            # Unknown APIs and any global/per-atom request retain both tallies.
+            node_energy = node_energy.to(dtype=torch.float64).contiguous()
+            eatoms = torch.as_tensor(data.eatoms)
+            eatoms.copy_(node_energy[:nlocal])
+            data.energy = node_energy[:nlocal].sum().item()
+        elif needs_conversion and pair_forces.is_cuda and pair_forces.numel():
+            # The model has already synchronized, but the bridge conversion
+            # above can enqueue additional work after that barrier.
+            torch.cuda.current_stream(pair_forces.device).synchronize()
         if pair_forces.numel():
             data.update_pair_forces(pair_forces)
 

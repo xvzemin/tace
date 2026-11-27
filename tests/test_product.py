@@ -33,6 +33,208 @@ from tace.utils.env import EQX_KERNELS, acceleration_enabled
 pytestmark = pytest.mark.usefixtures("double_precision")
 
 
+def test_cartesian_stage_requires_stf_projection():
+    from equivariantx import co3
+    from equivariantx_foundation.models.tace.nonlinear_ace import build_product
+
+    product = co3.TensorProduct(
+        "1o", "1o", "2e", [(0, 0, 0, "uuu", False)], backend="torch"
+    )
+    x = torch.tensor([[1.0, 0.0, 0.0]])
+    torch.testing.assert_close(
+        product(x, x).reshape(3, 3), torch.diag(x.new_tensor([2, -1, -1])) / 3
+    )
+    with pytest.raises(ValueError, match="STF projection"):
+        build_product(product)
+
+
+def test_cartesian_high_rank_keeps_factored_projector(monkeypatch):
+    from equivariantx_foundation.models.tace.nonlinear_ace import projector_matrix
+    from tace.models.cartesian.prod import NonlinearIctdACE
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    module = NonlinearIctdACE(
+        layer=0,
+        num_layers=2,
+        num_elements=1,
+        Lmax=3,
+        lmax=3,
+        num_channel=1,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o+2e+3o"),
+        irreps_in=o3.Irreps("0e+1o+2e+3o"),
+        correlation=[2, 2],
+        l1l2=None,
+        bias=False,
+        nonlinear=None,
+        parity=True,
+    )
+    assert any(
+        stage.tp.irreps_out[i].ir.l == 3
+        for stage in module.aces
+        for i in stage.tp.projection_indices
+    )
+    assert not hasattr(module, "eqx_metadata") and not hasattr(module, "eqx_products")
+    with pytest.raises(ValueError, match="factored ICTD projector"):
+        projector_matrix(3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="native CUDA ICTD stages")
+@pytest.mark.parametrize("correlation", [2, 3])
+def test_cartesian_compiled_training_product_stages(monkeypatch, correlation):
+    from contextlib import ExitStack
+
+    from equivariantx import co3
+    from tace.models.cartesian.prod import NonlinearIctdACE
+
+    torch.manual_seed(5)
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    cfg = dict(
+        layer=0,
+        num_layers=2,
+        num_elements=2,
+        Lmax=2,
+        lmax=2,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o+2e"),
+        irreps_in=o3.Irreps("2x0e+2x1o+2x2e"),
+        correlation=[correlation] * 2,
+        l1l2=None,
+        bias=False,
+        nonlinear=None,
+        parity=True,
+    )
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    reference = NonlinearIctdACE(**cfg).cuda().train()
+    # A signal from the first-order coefficient must not mask a broken
+    # recurrence. Only the final order contributes in either model.
+    with torch.no_grad():
+        for coefficient in reference.coefs[:-1]:
+            for p in coefficient.parameters():
+                p.zero_()
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    module = NonlinearIctdACE(**cfg).cuda().train()
+    assert hasattr(module, "eqx_metadata") and not hasattr(module, "eqx_products")
+    assert all(
+        stage.tp.backend == "cuda" and stage.tp.kernel_metadata is not None
+        for stage in module.aces
+    )
+    module.load_state_dict(reference.state_dict(), strict=True)
+    x = (
+        co3.Projector(module.irreps_in, backend="torch")
+        .cuda()(torch.randn(3, module.irreps_in.dim, device="cuda"))
+        .detach()
+        .requires_grad_()
+    )
+    types = torch.tensor([1, 0, 1], device="cuda")
+    batch = torch.zeros_like(types)
+
+    def evaluate(m):
+        stages = []
+        with ExitStack() as hooks:
+            for stage in m.aces:
+                hooks.enter_context(
+                    stage.tp.register_forward_hook(
+                        lambda _m, _a, out: stages.append(out)
+                    )
+                )
+            y = m(x, types, None, batch)
+        assert len(stages) == correlation - 1
+        params = (x, *m.parameters())
+        loss = y.square().sum()
+        upstream = torch.autograd.grad(loss, stages, retain_graph=True)
+        for stage, grad in zip(m.aces, upstream):
+            slices = stage.tp.irreps_out.slices()
+            assert any(
+                grad[:, slices[i]].abs().max() > 0 for i in stage.tp.projection_indices
+            )
+        first = torch.autograd.grad(loss, params, create_graph=True)
+        mixed = torch.autograd.grad(first[0].square().sum(), params, allow_unused=True)
+        return (y, *stages, *first, *mixed)
+
+    expected, actual = evaluate(reference), evaluate(module)
+    for a, b in zip(actual, expected, strict=True):
+        if b is None:
+            assert a is None
+        else:
+            torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-8)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA joint ICTD training graph"
+)
+def test_joint_cartesian_nonlinear_training_efs(monkeypatch):
+    from tace.lightning.torch_model import create_model
+    from tace.models.adapter import TensorModel
+    from tace.models.compile.aot import synthetic_graph_sample
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+    from tace.utils.loss.normal import NormalLoss
+
+    torch.manual_seed(17)
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    monkeypatch.setenv("TACE_USE_COMPILE", "0")
+    config = deepcopy(DEFAULT_MODEL_CONFIG)
+    config.update(
+        _target_="tace.models.CartesianTACE",
+        num_layers=2,
+        num_channel=2,
+        Lmax=2,
+        lmax=2,
+        mmax=2,
+        cutoff=4.0,
+    )
+    config["product_basis"].update(type="nonlinear_ictd", correlation=3)
+    config["radial_basis"].update(hidden=[4], apply_cutoff=False)
+    config["readout_emlp"]["hidden"] = [4]
+    config["scale_shift"]["enable"] = False
+    keys = ["energy", "forces", "stress"]
+    config["target_property"] = keys
+    stats = [dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)]
+    ref = create_model(deepcopy(config), stats, keys, []).cuda().train()
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    model = create_model(deepcopy(config), stats, keys, []).cuda().train()
+    model.load_state_dict(ref.state_dict(), strict=True)
+    model.readout_fn.compile_backend = "inductor"
+    loss_fn = NormalLoss(
+        keys,
+        ["mae_energy_per_atom", "l2mae_forces", "mae_voigt_stress"],
+        [1.0, 2.0, 3.0],
+    ).cuda()
+    data = synthetic_graph_sample(model)
+    data["entropy"] = data["positions"].new_ones(2)
+    for key, shape in (("energy", (2,)), ("forces", (4, 3)), ("stress", (2, 3, 3))):
+        data[key] = data["positions"].new_full(shape, 0.1)
+        data[key + "_weight"] = data["positions"].new_ones(2)
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    expected = TensorModel.forward(ref, dict(data))
+    target = loss_fn(expected, data)
+    gradients = torch.autograd.grad(target, tuple(ref.parameters()), allow_unused=True)
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    actual, loss = model.forward_loss(dict(data), loss_fn)
+    assert len(model._compiled_cache) == 1
+    loss.backward()
+    for k in keys:
+        torch.testing.assert_close(actual[k], expected[k], atol=2e-9, rtol=5e-8)
+    torch.testing.assert_close(loss, target, atol=2e-9, rtol=5e-8)
+    active_high_order = False
+    for (name, p), other, g in zip(
+        model.named_parameters(), ref.parameters(), gradients, strict=True
+    ):
+        assert p.shape == other.shape and (g is None) == (p.grad is None)
+        if g is not None:
+            torch.testing.assert_close(p.grad, g, atol=2e-9, rtol=5e-8)
+            if ".coefs.2." in name and g.abs().max() > 0:
+                active_high_order = True
+    assert active_high_order
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize(
     "kind,full",
@@ -377,7 +579,9 @@ def test_element_linear_indexed(moe, matrix_weight, num_nodes):
         if expected_grad is None:
             assert actual_grad is None
         else:
-            torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-12, atol=1e-12)
+            torch.testing.assert_close(
+                actual_grad, expected_grad, rtol=1e-12, atol=1e-12
+            )
 
 
 def product_irreps(irreps_in1, irreps_in2, lmax):
@@ -538,7 +742,10 @@ def fused_nonlinear_product(module, features, types, batch, *, programs=1):
         calls = 0
 
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-            if str(func) in ("eqx.edge_program.default", "eqx.local_channel_product.default"):
+            if str(func) in (
+                "eqx.edge_program.default",
+                "eqx.local_channel_product.default",
+            ):
                 self.calls += 1
             return func(*args, **(kwargs or {}))
 
@@ -546,6 +753,99 @@ def fused_nonlinear_product(module, features, types, batch, *, programs=1):
         output = module(features, types, None, batch)
     assert dispatch.calls == (programs if features.is_cuda else 0)
     return output
+
+
+def test_nonlinear_product_without_eqx(monkeypatch):
+    """Native product setup does not prepare fusion metadata."""
+    import tace.models.spherical.prod as prod
+    from tace.models.cartesian.layers import cartesian_modules
+
+    def unexpected(*args):
+        pytest.fail("native product setup attempted to prepare a Foundation program")
+
+    monkeypatch.setenv("TACE_USE_EQX", "0")
+    monkeypatch.setenv("TACE_USE_EQT", "0")
+    monkeypatch.setattr(prod.NonlinearCgtpACE, "build_eqx", unexpected)
+    module = prod.NonlinearCgtpACE(
+        layer=0,
+        num_layers=1,
+        num_elements=1,
+        Lmax=1,
+        lmax=1,
+        num_channel=2,
+        num_expert=None,
+        num_channel_per_expert=None,
+        target_irreps=o3.Irreps("0e+1o"),
+        irreps_in=o3.Irreps("2x0e+2x1o"),
+        correlation=[2],
+        l1l2=None,
+        parity=True,
+    )
+    names = ("eqx_metadata", "eqx_products", "eqx_bindings")
+    assert not any(hasattr(module, name) for name in names)
+    # A previously prepared or deserialized spherical program is not valid
+    # in Cartesian storage. It must not survive conversion when fusion is off.
+    for name in names:
+        setattr(module, name, ("old spherical program",))
+    cartesian_modules(module)
+    assert not any(hasattr(module, name) for name in names)
+
+
+@pytest.mark.parametrize("product", ["nonlinear_cgtp", "tace"])
+def test_native_full_model_trains_on_cpu(tmp_path, monkeypatch, product):
+    """A native model prepared for CUDA retains its CPU training path."""
+    from ase import Atoms
+    from torch_geometric.data import Batch
+
+    from tace.dataset.graph import from_atoms
+    from tace.dataset.quantity import KeySpecification
+    from tace.lightning import create_model, load_tace
+    from tace.models.spherical.default import DEFAULT_MODEL_CONFIG
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    cfg = deepcopy(DEFAULT_MODEL_CONFIG)
+    cfg.update(
+        num_layers=2, num_channel=2, Lmax=1, lmax=1, mmax=1, cutoff=3.0, parity=False
+    )
+    cfg["atomic_basis"].update(type=["cgtp", "so2"], num_head=1, edge_ace_hidden=2)
+    cfg["product_basis"].update(type=product, correlation=2)
+    cfg["scale_shift"]["enable"] = False
+    stats = [dict(atomic_numbers=[1], atomic_energy={1: 0.0}, avg_num_neighbors=2.0)]
+    host = create_model(cfg, stats, ["energy", "forces"], [])
+    assert any(hasattr(p, "eqx_metadata") for p in host.modules())
+    assert host.readout_fn.representation.interactions[-1].use_eqx
+    assert not any(
+        type(p).__module__.startswith("equivariantx_foundation") for p in host.modules()
+    )
+    path = tmp_path / "standard.pt"
+    torch.save(host, path)
+
+    device = "cpu"
+    graph = from_atoms(
+        host.get_torch_element(),
+        Atoms("H3", positions=[[0, 0, 0], [0.9, 0, 0], [0.3, 0.7, 0]]),
+        host.get_cutoff(),
+        max_neighbors=None,
+        keyspec=KeySpecification(),
+        target_property=["energy", "forces"],
+        embedding_property=[],
+        training=False,
+        neighborlist_backend="ase",
+    )
+    data = Batch.from_data_list([graph]).to(device).to_dict()
+
+    def step(eqx):
+        monkeypatch.setenv("TACE_USE_EQX", str(int(eqx)))
+        model = load_tace(path, device=device).train()
+        pred = model(dict(data))
+        loss = pred["energy"].square().mean() + pred["forces"].square().mean()
+        loss.backward()
+        params = tuple(model.parameters())
+        torch.optim.Adam(params, lr=1e-3).step()
+        return pred["energy"], pred["forces"], tuple(p.grad for p in params), params
+
+    expected = step(False)
+    torch.testing.assert_close(step(True), expected, rtol=1e-6, atol=1e-8)
 
 
 @pytest.mark.parametrize("asymmetric", [False, True])
@@ -592,17 +892,20 @@ def test_nonlinear_product(
     )
     monkeypatch.setenv("TACE_USE_EQX", "0")
     reference = cls(**kwargs).to(device=device, dtype=dtype)
+    assert not hasattr(reference, "eqx_metadata")
     with torch.no_grad():
         for name, parameter in reference.named_parameters():
             if name.endswith("bias"):
                 parameter.normal_(std=0.2)
     monkeypatch.setenv("TACE_USE_EQX", "1")
     module = cls(**kwargs).to(device=device, dtype=dtype)
+    assert hasattr(module, "eqx_metadata")
     module.load_state_dict(reference.state_dict(), strict=True)
     assert module.state_dict().keys() == reference.state_dict().keys()
-    assert dict(module.named_parameters()).keys() == dict(
-        reference.named_parameters()
-    ).keys()
+    assert (
+        dict(module.named_parameters()).keys()
+        == dict(reference.named_parameters()).keys()
+    )
     assert isinstance(module.linear_up, e3nnLinear)
     assert module.linear_up.irreps_out == module.linear_up.irreps_out.regroup()
     irreps_up = (
@@ -626,7 +929,10 @@ def test_nonlinear_product(
         monkeypatch.setenv("TACE_USE_EQX", "1" if product is module else "0")
         value = (
             fused_nonlinear_product(
-                product, x, types, batch,
+                product,
+                x,
+                types,
+                batch,
                 programs=correlation - 1 if compiled_training else 1,
             )
             if product is module
@@ -636,9 +942,7 @@ def test_nonlinear_product(
         first = torch.autograd.grad(
             value.square().sum(), inputs, create_graph=True, allow_unused=True
         )
-        second = torch.autograd.grad(
-            first[0].square().sum(), inputs, allow_unused=True
-        )
+        second = torch.autograd.grad(first[0].square().sum(), inputs, allow_unused=True)
         values.append(value)
         gradients.append((*first, *second))
     tolerance = 5e-5 if dtype == torch.float32 else 1e-8
@@ -800,8 +1104,10 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
     if correlation == 2 and asymmetric and dtype == torch.float64:
         converted = deepcopy(reference).cpu()
         original = dict(converted.named_parameters(remove_duplicate=False))
+        converted.eqx_products = ("stale spherical channel rows",)
         rng = torch.random.get_rng_state()
         cartesian_modules(converted)
+        assert not hasattr(converted, "eqx_products")
         metadata = converted.eqx_metadata
         indices = converted.factor_index.clone()
         converted.build_eqx()
@@ -843,9 +1149,7 @@ def test_nonlinear_ictd_product(monkeypatch, correlation, asymmetric, dtype):
         first = torch.autograd.grad(
             output.square().sum(), inputs, create_graph=True, allow_unused=True
         )
-        second = torch.autograd.grad(
-            first[0].square().sum(), inputs, allow_unused=True
-        )
+        second = torch.autograd.grad(first[0].square().sum(), inputs, allow_unused=True)
         gradients.append((*first, *second))
     for expected, actual in zip(*gradients):
         if expected is None:
@@ -1244,7 +1548,12 @@ def test_time_reversal_labels_preserved(monkeypatch):
         assert ace.instructions
         assert all(ir.t == (-1) ** nu for _, ir in ace.irreps_out)
     features = torch.randn(3, model.irreps_in.dim, requires_grad=True)
-    out = model(features, torch.zeros(3, dtype=torch.long), None, torch.zeros(3, dtype=torch.long))
+    out = model(
+        features,
+        torch.zeros(3, dtype=torch.long),
+        None,
+        torch.zeros(3, dtype=torch.long),
+    )
     assert torch.isfinite(torch.autograd.grad(out.square().sum(), features)[0]).all()
 
 

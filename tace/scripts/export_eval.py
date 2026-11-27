@@ -5,18 +5,20 @@
 
 import argparse
 import logging
+from itertools import islice
 from pathlib import Path
 from typing import Dict, Union
 
 import ase.io
 import torch
-from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch
 
 from tace.dataset.graph import from_atoms
 from tace.dataset.quantity import KEYS, KeySpecification, update_keyspec_from_kwargs
 from tace.foundations import tace_foundations
 from tace.lightning import export_tace, load_tace
 from tace.models.compile import export_aotinductor
+from tace.models.compile.wrapper import _LES_FIELD_OR_SPIN_KEYS, _loading_frozen_graph
 from tace.utils.env import enable_acceleration
 
 ALLOWED_BACKEND = ["state_dict", "full_model", "aoti"]
@@ -72,6 +74,11 @@ def parse_args():
         help="ASE index expression for --sample",
     )
     parser.add_argument(
+        "--fixed-shapes",
+        action="store_true",
+        help="Specialize an AOTI package for the exact graph input shapes in --sample",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=2,
@@ -84,7 +91,10 @@ def parse_args():
         choices=["ase", "matscipy", "vesin", "alchemiops"],
         help="Neighbor-list backend for --sample",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.fixed_shapes and (args.backend != "aoti" or not args.sample):
+        parser.error("--fixed-shapes requires --backend aoti and --sample")
+    return args
 
 
 def _default_aoti_output_path(model_path: str) -> str:
@@ -112,12 +122,8 @@ def _build_sample_data(
     nl_backend: str,
     device: Union[str, torch.device],
 ) -> Dict[str, torch.Tensor]:
-    atoms_list = ase.io.read(sample_path, index=sample_index)
-    if not isinstance(atoms_list, list):
-        atoms_list = [atoms_list]
-    if not atoms_list:
-        raise ValueError(f"No structures were read from {sample_path!r}.")
-
+    limit = max(1, batch_size)
+    index = slice(0, limit) if sample_index == ":" else sample_index
     key_spec = KeySpecification()
     update_keyspec_from_kwargs(key_spec, KEYS)
     embedding_property = model.get_embedding_property()
@@ -126,27 +132,33 @@ def _build_sample_data(
         and "initial_noncollinear_magmoms" not in embedding_property
     ):
         embedding_property.append("initial_noncollinear_magmoms")
-    dataset = [
-        from_atoms(
-            model.get_torch_element(),
-            atoms,
-            model.get_cutoff(),
-            max_neighbors=model.get_max_neighbors(),
-            keyspec=key_spec,
-            target_property=model.get_target_property(),
-            embedding_property=embedding_property,
-            training=False,
-            neighborlist_backend=nl_backend,
+    readout = getattr(model, "readout_fn", None)
+    les = isinstance(readout, torch.nn.Module) and hasattr(readout, "les")
+    dataset = []
+    for atoms in islice(ase.io.iread(sample_path, index=index), limit):
+        if les and (
+            _LES_FIELD_OR_SPIN_KEYS.intersection(atoms.info)
+            or _LES_FIELD_OR_SPIN_KEYS.intersection(atoms.arrays)
+        ):
+            raise ValueError(
+                "Frozen LES graph inference does not accept external fields or spin inputs."
+            )
+        dataset.append(
+            from_atoms(
+                model.get_torch_element(),
+                atoms,
+                model.get_cutoff(),
+                max_neighbors=model.get_max_neighbors(),
+                keyspec=key_spec,
+                target_property=model.get_target_property(),
+                embedding_property=embedding_property,
+                training=False,
+                neighborlist_backend=nl_backend,
+            )
         )
-        for atoms in atoms_list[: max(1, batch_size)]
-    ]
-    dataloader = DataLoader(
-        dataset,
-        batch_size=max(1, min(batch_size, len(dataset))),
-        shuffle=False,
-        drop_last=False,
-    )
-    batch = next(iter(dataloader)).to(device)
+    if not dataset:
+        raise ValueError(f"No structures were read from {sample_path!r}.")
+    batch = Batch.from_data_list(dataset).to(device)
     return {key: batch[key] for key in batch.keys()}
 
 
@@ -160,13 +172,17 @@ def main():
     )
     if args.backend == "aoti":
         enable_acceleration(enable_compile=True)
-    model = load_tace(
-        args.model,
-        args.device,
-        strict=True,
-        use_ema=True,
-        dtype=args.dtype,
-    )
+    graph_load = _loading_frozen_graph.set(args.backend == "aoti")
+    try:
+        model = load_tace(
+            args.model,
+            args.device,
+            strict=True,
+            use_ema=True,
+            dtype=args.dtype,
+        )
+    finally:
+        _loading_frozen_graph.reset(graph_load)
     model.reset_fidelity_idx(args.fidelity_idx)
     model.eval()
     for param in model.parameters():
@@ -193,7 +209,9 @@ def main():
         print(f"[Done] full_model saved to: {output_path}")
     elif args.backend == "aoti":
         output_path = args.output or _default_aoti_output_path(args.model)
-        output_path = export_aotinductor(model, output_path, sample_data=sample_data)
+        output_path = export_aotinductor(
+            model, output_path, sample_data=sample_data, fixed_shapes=args.fixed_shapes
+        )
         print(f"[Done] AOTInductor graph model saved to: {output_path}")
     else:
         raise ValueError(

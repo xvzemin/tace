@@ -15,12 +15,9 @@ Standard workflow
 .. figure:: ../_static/acceleration.svg
    :width: 100%
 
-Install EQX build dependencies from the TACE source directory and provide a 
-CUDA toolkit:
-
-.. code-block:: bash
-
-   pip install '.[eqx]'
+EQX and EquivariantX Foundation are included with TACE. EQX's PyTorch operators
+need no CUDA toolchain. Its native CUDA kernels require a compatible CUDA
+toolkit and C++ compiler. Foundation execution requires an NVIDIA CUDA device.
 
 Training
 ~~~~~~~~
@@ -48,7 +45,50 @@ External CUDA operators may still initialize or compile their own kernels.
 
 Joint training uses ``NormalLoss`` or ``UncertaintyLoss``, without autocast.
 It requires PyTorch's explicit dynamic-shape and standalone Inductor APIs.
-Unsupported settings raise an error.
+With a custom or replaced loss function, ``tace-train`` runs the model
+and loss with ordinary autograd instead of reusing a compiled training graph.
+Other unsupported joint settings raise an error.
+
+Model-specific training with Foundation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On a CUDA device, run the fast entry with the same training YAML:
+
+.. code-block:: bash
+
+   tace-fast-train -cn YOUR_CONFIG
+
+The fast route selects a compatible whole-model schedule where available,
+otherwise matching regions. The loss, optimizer, scheduler,
+EMA and checkpoint format stay with TACE. Validation during fit uses the same
+plan. For generic EQX+AOTInductor training use ``tace-train`` as above,
+not ``TACE_USE_COMPILE=1`` with the eager Foundation plan.
+
+Supported strategies are single-device, PyTorch DDP and
+``tace.utils.strategy.SimpleDDPStrategy`` with true FP32 or FP64.
+The latter broadcasts initial parameters and buffers, then averages gradients
+at each accumulation boundary without wrapping the force calculation. Use
+PyTorch DDP if buffers must be broadcast on each forward pass.
+To select an operator backend explicitly, configure the
+:ref:`Foundation training callback <foundation-lightning-training>` with
+``backend: torch`` or ``backend: cuda``. If only existing host operators match,
+use ``tace-train`` unless supplying an explicit joint training package.
+Installed plans must preserve checkpoint keys, parameter order and optimizer roles.
+For the separate XL-v2 capture schedule use
+``tace-fast-train -cn omat.yaml +fast_schedule=oam_v2``.
+
+For TECE rotary attention, explicit regional CUDA can stream the radial MLP
+and attention without materializing the full edge update. It uses the model's
+existing local frames. In mixed CGTP/rotary stacks, compatible O(3)
+convolutions also stream their directed radial weights and consume the
+spherical harmonics already computed by TACE. Set ``TACE_MEMORY_FIRST=0``
+before planning to retain the host rotary interaction; streaming can reduce
+peak memory but need not reduce training step time.
+
+For single-GPU, fully labelled E/F/S MSE training, a compatible directed
+CGTP/TECE-rotary stack can instead use a regional CUDA Graph bucket.
+Call ``supports_training_buckets`` on the prepared model. Capture reserves
+additional GPU memory; measure replay time and peak reserved memory separately.
 
 Inference
 ~~~~~~~~~
@@ -74,12 +114,18 @@ see :ref:`tace-export-tutorial` for loading instructions.
 The AOTI export commands enable the compilation path automatically.
 Exporting with ``state_dict`` or ``full_model`` does **not** compile the model.
 
+By default the graph package supports changing atom and edge counts. For a
+fixed-size workload, pass ``--fixed-shapes --sample frame.extxyz --batch-size 1``
+with ``--backend aoti``. Coordinates, elements and connectivity may change,
+but **all** graph input shapes must stay the same, including neighbor and
+reciprocal-pair counts. Use the default for MD trajectories with varying counts.
+
 Alternative backends
 --------------------
 
 Backend adapters are grouped under ``tace.models.backends`` as
 ``cuequivariance``, ``openequivariance``, ``equitorch`` and ``lunaequivariance``.
-EQX operators are provided by the independent ``equivariantx`` package.
+EQX operators are provided by the bundled ``equivariantx`` package.
 
 In either workflow, ``TACE_USE_EQX=1`` can be replaced by the backend flags
 below for supported operators. This changes operator implementations, not the
@@ -178,11 +224,11 @@ EQX in TACE
    * - ``uv_o2`` / ``uv_o2_mag``
      - ``equivariantx.conv.UvO2TensorProductConv``
    * - TECE-OAM-RRA ``so2``
-     - ``equivariantx.models.tace.tece_oam_rra``
+     - ``equivariantx_foundation.models.tace.tece_oam_rra``
    * - Standard / gated bilinear ACE
      - ``equivariantx.mbe.ace.UuuFullyConnectedSymmetricContraction`` / ``equivariantx.mbe.ace.BilinearContraction``
    * - Nonlinear CGTP / ICTD ACE
-     - ``equivariantx.models.tace.nonlinear_ace``
+     - ``equivariantx_foundation.models.tace.nonlinear_ace``
 
 Supported EQX-backed convolutions stream the complete radial MLP by default.
 Set ``TACE_MEMORY_FIRST=0`` to fuse only its final projection in convolutions
@@ -292,7 +338,9 @@ precision. ``tace-compile`` aliases ``tace-export-eval``.
 
    AOTI export requires PyTorch >= 2.13. If using OEQ, use OEQ >= 0.6.4.
    Supported outputs include energy, forces, stress, virials, charges, and
-   noncollinear magnetic forces. LES is not supported by this compilation path.
+   noncollinear magnetic forces. For TACE-LES, this CLI exports frozen graph
+   inference with the periodic, field-free charge solver. For the separate
+   single-rank CUDA joint training package see :doc:`les`.
 
 ASE and TorchSim
 ~~~~~~~~~~~~~~~~
@@ -359,7 +407,7 @@ single-rank FP32 CUDA ML-IAP loader:
 
 .. code-block:: bash
 
-   tace-export-lammps -m TACE-OAM-L.pt --device cuda --backend eqx-oam-l \
+   tace-export-lammps -m TACE-OAM-L.pt --device cuda --backend eqx-foundation \
      -o oam-l-mliap.pt
 
 Use ``oam-l-mliap.pt`` with ``pair_style mliap/kk unified`` as above.
@@ -367,14 +415,14 @@ The capacity loader selects a compiled force graph or receiver tiles
 using the pair count and available device memory. If the whole-system
 node states no longer fit, it can recompute them or split the atomic
 energies into domains. The throughput-only loader uses
-``--backend eqx-oam-l-throughput``. Both use LAMMPS periodic image
+``--backend eqx-foundation-throughput``. Both use LAMMPS periodic image
 vectors and require **one MPI rank**. See :doc:`lammps` for deployment.
 
 For direct PyTorch use, convert the canonical loaded adapter:
 
 .. code-block:: python
 
-   from equivariantx.models.tace.tace_oam_l import optimize_oam_l
+   from equivariantx_foundation.models.tace.tace_oam_l import optimize_oam_l
    from tace.lightning import load_tace
 
    ref = load_tace("TACE-OAM-L.pt", device="cuda", dtype="float32")
@@ -393,7 +441,7 @@ Graph workspaces. Set maximum real atom and directed-edge counts per bucket:
 
 .. code-block:: python
 
-   from equivariantx.models.tace.training import MultiBucketEFSTrainingStep
+   from equivariantx_foundation.models.tace.training import MultiBucketEFSTrainingStep
 
    step = MultiBucketEFSTrainingStep(
        model, optimizer, capacities, share_workspace=True, native_product=True
@@ -405,12 +453,12 @@ the architecture-specific differentiable model before creating the optimizer:
 
 .. code-block:: python
 
-   from equivariantx.models.tace.foundation import optimize_foundation
+   from equivariantx_foundation import optimize
    from tace.lightning import load_tace
 
    ref = load_tace("TACE-OAM-7M.pt", device="cuda", dtype="float32",
                    target_property=["energy", "forces", "stress"])
-   model = optimize_foundation(ref).train()
+   model = optimize(ref, family="tace").train()
    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, fused=True)
    step = MultiBucketEFSTrainingStep(model, optimizer, capacities, share_workspace=True)
    step.prepare_all(example_batches)

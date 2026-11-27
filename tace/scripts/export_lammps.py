@@ -14,7 +14,8 @@ from tace.models.compile import export_lammps_aotinductor
 from tace.utils.env import enable_acceleration
 
 FOUNDATION_BACKENDS = ("eqx-foundation", "eqx-foundation-throughput")
-ALLOWED_BACKEND = ["mliap", "aoti", "eqx-oam-l", "eqx-oam-l-throughput", *FOUNDATION_BACKENDS]
+REGIONAL_MPI = "eqx-regional-mpi"
+ALLOWED_BACKEND = ["mliap", "aoti", REGIONAL_MPI, *FOUNDATION_BACKENDS]
 
 
 def parse_args():
@@ -84,9 +85,15 @@ def main():
         datefmt="%H:%M:%S",
         force=True,
     )
-    if args.backend in ("eqx-oam-l", "eqx-oam-l-throughput", *FOUNDATION_BACKENDS):
+    if args.backend == REGIONAL_MPI and args.aoti_package is not None:
+        raise ValueError(
+            "The regional MPI loader is eager and does not produce a .pt2 package."
+        )
+    if args.backend in FOUNDATION_BACKENDS:
         if torch.device(args.device).type != "cuda" or args.dtype == "float64":
-            raise ValueError("The single-rank EQX foundation package requires FP32 on CUDA.")
+            raise ValueError(
+                "The single-rank EQX foundation package requires FP32 on CUDA."
+            )
         args.dtype = "float32"
         enable_acceleration(enable_eqx=True, enable_compile=True, force=True)
     elif args.backend == "aoti":
@@ -103,73 +110,38 @@ def main():
     for param in model.parameters():
         param.requires_grad = False
 
+    if args.backend == REGIONAL_MPI:
+        from equivariantx_foundation.targets.lammps import export_distributed
+
+        path = export_distributed(
+            model, args.output or f"{args.model}-{REGIONAL_MPI}.pt"
+        )
+        print(f"[Done] Distributed EQX ML-IAP loader saved to: {path}")
+        return
+
+    if args.backend in FOUNDATION_BACKENDS:
+        from equivariantx_foundation.targets.lammps import export
+
+        path = export(
+            model,
+            args.output or f"{args.model}-{args.backend}.pt",
+            capacity=args.backend == "eqx-foundation",
+            aoti_package=args.aoti_package,
+        )
+        print(f"[Done] Single-rank EQX ML-IAP loader saved to: {path}")
+        return
+
     try:
         from tace.interface.lammps import TACEAOTILammpsCalc, TACELammpsCalc
     except ImportError as exc:
         raise RuntimeError("LAMMPS export requires the LAMMPS Python package.") from exc
 
-    if args.backend in FOUNDATION_BACKENDS:
-        from equivariantx.models.tace.foundation import foundation_architecture
-
-        capacity = args.backend == "eqx-foundation"
-        arch = foundation_architecture(model)
-        args.output = args.output or f"{args.model}-{args.backend}.pt"
-        if arch == "l":
-            args.backend = "eqx-oam-l" if capacity else "eqx-oam-l-throughput"
-        else:
-            if arch == "7m":
-                from equivariantx.models.tace.tace_oam_7m.lammps import export_lammps
-            else:
-                from equivariantx.models.tace.tece_oam_rra.lammps import export_lammps
-            path = export_lammps(
-                model, args.output, capacity=capacity, aoti_package=args.aoti_package
-            )
-            print(f"[Done] Single-rank EQX ML-IAP loader saved to: {path}")
-            return
     if args.backend == "mliap":
         model.lmp = True
         lammps_model = TACELammpsCalc(model)
         output_path = args.output or _default_mliap_output_path(args.model)
         torch.save(lammps_model, output_path)
         print(f"[Done] LAMMPS MLIAP model saved to: {output_path}")
-    elif args.backend == "eqx-oam-l":
-        from equivariantx.models.tace.tace_oam_l import optimize_oam_l
-        from equivariantx.models.tace.tace_oam_l.receiver import CapacityOAMLammpsCalc
-        from equivariantx.models.tace.tace_oam_l.tangent import frozen_tangent_model
-
-        output = Path(args.output or f"{args.model}-eqx-oam-l.pt")
-        streamed = Path(args.aoti_package or output.with_suffix(".pt2"))
-        if streamed.suffix != ".pt2":
-            streamed = Path(str(streamed) + ".pt2")
-        compact = streamed.with_name(streamed.stem + "-compact.pt2")
-        if output.resolve() in (streamed.resolve(), compact.resolve()):
-            raise ValueError("Use distinct paths for the ML-IAP loader and its .pt2 packages.")
-        lowered = frozen_tangent_model(model)
-        export_lammps_aotinductor(lowered, streamed, local_owners=True)
-        del lowered
-        lowered = optimize_oam_l(
-            model, memory_mode="recompute", fused_geometry=True,
-            fused_projection=False, grouped_coefficients=False,
-        )
-        export_lammps_aotinductor(lowered, compact, local_owners=True)
-        del lowered
-        loader = CapacityOAMLammpsCalc.from_packages(
-            streamed,
-            compact,
-            model.get_atomic_numbers(),
-            model.get_cutoff(),
-            model.get_model_dtype(),
-        ).attach_receiver(model)
-        loader.receiver_tangent = True
-        loader.domain_receiver_tangent = True
-        torch.save(loader, output, pickle_protocol=5)
-        print(f"[Done] Single-rank OAM-L ML-IAP loader saved to: {output}")
-    elif args.backend == "eqx-oam-l-throughput":
-        from equivariantx.models.tace.tace_oam_l.tangent import export_tangent_lammps
-
-        output = args.output or f"{args.model}-eqx-oam-l-throughput.pt"
-        path = export_tangent_lammps(model, output, aoti_package=args.aoti_package)
-        print(f"[Done] Single-rank OAM-L ML-IAP loader saved to: {path}")
     elif args.backend == "aoti":
         package_path = args.aoti_package or _default_aoti_package_path(args.model)
         package_path = export_lammps_aotinductor(model, package_path)

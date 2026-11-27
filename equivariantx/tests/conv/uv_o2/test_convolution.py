@@ -38,7 +38,7 @@ class RadialConvolution(torch.nn.Module):
             torch.nn.Linear(8, self.conv.weight_numel),
         )
 
-    def forward(self, features, vectors, index):
+    def forward(self, features, vectors, index, *, num_nodes=None):
         radius = vectors.norm(dim=-1, keepdim=True)
         basis = torch.cat((radius, radius.sin(), radius.cos()), dim=-1)
         return self.conv(
@@ -52,6 +52,7 @@ class RadialConvolution(torch.nn.Module):
             (self.up.weight, self.up.bias, self.down.weight, self.down.bias),
             vectors=vectors,
             radial_network=self.radial,
+            num_nodes=num_nodes,
         )
 
 
@@ -69,6 +70,115 @@ def test_program_cache_releases_module():
     assert owner() is None
 
 
+def test_equal_receivers_share_feature_gradient(double_precision):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    module = RadialConvolution("torch", channels=1)
+    index = torch.tensor([[4, 0, 3, 2, 1, 1], [0, 1, 4, 3, 2, 0]])
+    x = torch.randn(5, module.conv.input_dim, requires_grad=True)
+    vectors = torch.randn(index.shape[1], 3)
+
+    def gradient(owners):
+        def joint(x):
+            y = module(x, vectors, index, num_nodes=owners)
+            return torch.autograd.grad(y.square().sum(), x)[0]
+
+        graph = make_fx(joint)(x)
+        # Full-table gradients must not need a separate prefix slice backward
+        # and addition when equality is statically known.
+        ops = [
+            n.target
+            for n in graph.graph.nodes
+            if n.op == "call_function"
+            and isinstance(n.meta.get("val"), torch.Tensor)
+            and n.meta["val"].shape == x.shape
+        ]
+        return joint(x), ops
+
+    default, default_ops = gradient(None)
+    explicit, explicit_ops = gradient(x.shape[0])
+    assert explicit_ops == default_ops
+    torch.testing.assert_close(explicit, default)
+
+
+@pytest.mark.parametrize(
+    "device,backend,reference",
+    [
+        ("cpu", "torch", True),
+        ("cpu", "torch", False),
+        ("cuda", "torch", False),
+        ("cuda", "cuda", False),
+    ],
+)
+@pytest.mark.parametrize("geometry", ["vectors", "packed", "dense"])
+def test_bipartite_uv_o2(
+    device, backend, reference, geometry, monkeypatch, double_precision
+):
+    """Both branches read the same node table; only the destination is compact."""
+    from equivariantx.ops import config
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    model = RadialConvolution(backend, "full").to(device)
+    oracle = RadialConvolution("torch", "full").to(device)
+    oracle.load_state_dict(model.state_dict())
+    index = torch.tensor([[6, 5, 6, 0, 1, 3], [0, 0, 1, 2, 2, 1]], device=device)
+
+    def rand(*dims):
+        return torch.randn(*dims, device=device, requires_grad=True)
+
+    x = rand(7, model.conv.input_dim)
+    src, dst = rand(7, 1), rand(7, 1)
+    vectors = rand(index.shape[1], 3)
+
+    def run(layer, local, rows, idx):
+        v = vectors[: idx.shape[1]]
+        radius = v.square().sum(-1, keepdim=True)
+        wigner, inverse = None, None
+        if geometry == "dense":
+            wigner, inverse = layer.conv.wigner(v)
+            inverse = (
+                inverse * 1.01
+            )  # an independently supplied matrix is authoritative
+        if geometry == "packed":
+            wigner = layer.conv.wigner.forward_packed(v)
+        output = layer.conv(
+            x,
+            None,
+            ((radius, "edge"), (src, "source"), (dst, "target")),
+            idx,
+            wigner,
+            inverse,
+            radius.sigmoid(),
+            (layer.up.weight, layer.up.bias, layer.down.weight, layer.down.bias),
+            vectors=v if geometry == "vectors" else None,
+            radial_network=layer.radial,
+            num_nodes=rows if local else None,
+        )
+        return output if local else output[:rows]
+
+    # Also exercise the optimized whole-program Torch Wigner execution on CUDA.
+    monkeypatch.setattr(config, "TORCH_EDGE_TILE_BYTES", 144)
+    results = []
+    for layer, compact, ref in ((model, True, reference), (oracle, False, True)):
+        monkeypatch.setattr(config, "TORCH_REFERENCE", ref)
+        y = run(layer, compact, 4, index)
+        assert y.shape == (4, model.conv.output_dim) and not y[3].count_nonzero()
+        variables = (x, vectors, src, dst, *layer.parameters())
+        first = torch.autograd.grad(y.square().sum(), variables, create_graph=True)
+        assert first[0][6].abs().sum() > 0
+        assert first[2][6].abs().sum() > 0 and not first[3][4:].count_nonzero()
+        mixed = torch.autograd.grad(first[1].square().sum(), variables)
+        results.append((y, first, mixed))
+        for owners in (0, 4):
+            empty = run(layer, compact, owners, index[:, :0])
+            assert (
+                empty.shape == (owners, model.conv.output_dim)
+                and not empty.count_nonzero()
+            )
+    torch.testing.assert_close(*results, rtol=2e-8, atol=2e-8)
+
+
 @pytest.mark.parametrize("backend", ["torch", "cuda"])
 @pytest.mark.parametrize("radial_mode", ["last", "full"])
 def test_transverse_functional(backend, radial_mode, monkeypatch, double_precision):
@@ -76,15 +186,15 @@ def test_transverse_functional(backend, radial_mode, monkeypatch, double_precisi
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     module = RadialConvolution(backend, radial_mode).to(device)
-    index = torch.tensor([[0, 1, 1, 2, 0], [1, 2, 0, 1, 0]], device=device)
+    index = torch.tensor([[4, 1, 1, 3, 0], [1, 2, 0, 1, 0]], device=device)
     inputs = (
-        torch.randn(3, module.conv.input_dim, device=device),
+        torch.randn(5, module.conv.input_dim, device=device),
         torch.randn(5, 3, device=device),
     )
     directions = tuple(torch.randn_like(value) for value in inputs)
 
     def function(x, v):
-        return module(x, v, index)
+        return module(x, v, index, num_nodes=3)
 
     actual = torch.func.jvp(function, inputs, directions)
     batched = tuple(torch.stack((value, value * 0.9)) for value in inputs)
@@ -94,11 +204,15 @@ def test_transverse_functional(backend, radial_mode, monkeypatch, double_precisi
         if frame is not None:
             frame.backend = "torch"
     monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+
+    def padded(x, v):
+        return module(x, v, index)[:3]
+
     torch.testing.assert_close(
-        actual, torch.func.jvp(function, inputs, directions), atol=2e-10, rtol=2e-10
+        actual, torch.func.jvp(padded, inputs, directions), atol=2e-10, rtol=2e-10
     )
     torch.testing.assert_close(
-        batch_actual, torch.vmap(function)(*batched), atol=2e-10, rtol=2e-10
+        batch_actual, torch.vmap(padded)(*batched), atol=2e-10, rtol=2e-10
     )
 
 
@@ -177,6 +291,103 @@ for case in torch.load(sys.argv[2], weights_only=True):
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA tiled compilation")
+def test_bipartite_uv_o2_dynamic_aoti(
+    tmp_path, monkeypatch, double_precision, aoti_threads
+):
+    from torch.fx.experimental.dynamic_spec import (
+        ParamsSpec,
+        ShapesSpec,
+        ShapeVar,
+        TensorSpec,
+    )
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    from equivariantx.ops import config
+
+    layer = RadialConvolution("cuda", channels=1).cuda()
+    oracle = RadialConvolution("torch", channels=1).cuda()
+    oracle.load_state_dict(layer.state_dict())
+
+    def run(m, compact, x, owned, v, idx):
+        radius = v.norm(dim=-1, keepdim=True)
+        y = m.conv(
+            x,
+            None,
+            torch.cat((radius, radius.sin(), radius.cos()), dim=1),
+            idx,
+            None,
+            None,
+            radius.sigmoid(),
+            (m.up.weight, m.up.bias, m.down.weight, m.down.bias),
+            vectors=v,
+            radial_network=m.radial,
+            num_nodes=owned.shape[0] if compact else None,
+        )
+        if not compact:
+            y = y[: owned.shape[0]]
+        dx, force = torch.autograd.grad(y.square().sum(), (x, v), create_graph=True)
+        (mixed,) = torch.autograd.grad(force.square().sum(), (x,))
+        return y, dx, force, mixed
+
+    def joint(x, owned, v, idx):
+        return run(layer, True, x, owned, v, idx)
+
+    def inputs(n, r, e):
+        ids = torch.arange(e, device="cuda")
+        return (
+            torch.randn(n, layer.conv.input_dim, device="cuda").requires_grad_(),
+            torch.empty(r, device="cuda"),
+            torch.randn(e, 3, device="cuda").requires_grad_(),
+            torch.stack(((ids + n - 1) % n, ids % r)),
+        )
+
+    # The example has no ghosts; equality of the hints is not proof that the
+    # independently declared source and receiver dimensions are always equal.
+    values = inputs(7, 7, 11)
+    dimensions = (("senders", 7, 15, 7), ("owners", 2, 7, 7), ("edges", 8, 30, 11))
+    n, r, e = [
+        ShapeVar(name, min=lo, max=hi, optimization_hint=hint)
+        for name, lo, hi, hint in dimensions
+    ]
+    shape = ShapesSpec(
+        ParamsSpec(
+            {
+                "x": TensorSpec([n, None]),
+                "owned": TensorSpec([r]),
+                "v": TensorSpec([e, None]),
+                "idx": TensorSpec([None, e]),
+            }
+        )
+    )
+    graph = make_fx(
+        joint, tracing_mode="fake", _allow_non_fake_inputs=True, dynamic_shapes=shape
+    )(*values)
+    assert (
+        sum(
+            node.target == torch.ops.eqx.edge_program.default
+            for node in graph.graph.nodes
+        )
+        >= 3
+    )
+    n, r, e = [torch.export.Dim(name, min=lo, max=hi) for name, lo, hi, _ in dimensions]
+    exported = torch.export.export(
+        graph,
+        tuple(z.detach() for z in values),
+        strict=True,
+        dynamic_shapes=({0: n}, {0: r}, {0: e}, {1: e}),
+    )
+    package = compile_and_package(
+        exported, package_path=str(tmp_path / "bipartite.pt2")
+    )
+    runner = torch._inductor.aoti_load_package(package)
+    monkeypatch.setattr(config, "TORCH_REFERENCE", True)
+    for vals in (values, inputs(12, 5, 18)):
+        expected = run(oracle, False, *vals)
+        actual = runner(*(v.detach() for v in vals))
+        torch.testing.assert_close(actual, expected, atol=2e-8, rtol=2e-8)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA tiled compilation")
@@ -328,9 +539,18 @@ def test_uv_o2_transverse(
         def rand(*shape):
             return (torch.randn(*shape, device=device) * 0.3).requires_grad_()
 
-        index = torch.randint(4, (2, edges), device=device)
+        # Exercise optional edge (e.g. magnetic) feature slots with halo-node
+        # input, independently of the receiver count and edge count.
+        owners = 4 if magnetic and depth == 1 else None
+        senders = 6 if owners is not None else 4
+        index = torch.stack(
+            (
+                torch.randint(senders, (edges,), device=device),
+                torch.randint(4, (edges,), device=device),
+            )
+        )
         x, extra = (
-            rand(4, frame.input_dim),
+            rand(senders, frame.input_dim),
             rand(edges, frame.input_dim) if magnetic else None,
         )
         vectors = (
@@ -393,6 +613,7 @@ def test_uv_o2_transverse(
                 cutoff,
                 parameters,
                 vectors=vectors if transverse else None,
+                num_nodes=owners,
             )
             torch.testing.assert_close(actual, expected, atol=3e-11, rtol=3e-10)
             if backend == "torch" and reference:

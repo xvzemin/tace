@@ -115,7 +115,7 @@ but its first derivative need not be. The graph cutoff envelope still acts
 on the physical distance :math:`r`.
 
 Both bases support ``cgtp``, its Cartesian and edge-aligned equivalents,
-and CGTP in ``tace-train-oamv2``. OAMv2 streams degree-specific radial heads
+and CGTP in the OAM-v2 fast training schedule. OAM-v2 streams degree-specific radial heads
 through the EQX convolution by default. Set ``TACE_MEMORY_FIRST=0`` to
 evaluate them in batches instead.
 
@@ -189,7 +189,7 @@ Soft-capped RMS normalization
 -----------------------------
 
 Use ``soft_cap_rms_norm`` for ``pre_norm_type``, ``final_norm_type`` or both,
-including with ``tace-train-oamv2``. With the model defaults this maps
+including with the OAM-v2 fast training schedule. With the model defaults this maps
 :math:`x\mapsto x/\sqrt{1+v}`, where :math:`v` is the merged mean square of
 the irrep blocks in one sample. There is no learned scale or bias.
 

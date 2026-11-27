@@ -240,6 +240,15 @@ class O3CgtpInteraction(Interaction):
         element=None,
         edge_pairs=None,
     ) -> torch.Tensor:
+        # ML-IAP gathers from owned and ghost atoms, but pair_i only indexes
+        # owned receivers. Other convolution providers keep their own contract.
+        receiver = (
+            {"num_nodes": graph.lmp_natoms[0]}
+            if graph is not None
+            and graph.lmp_data is not None
+            and getattr(self.rejector, "supports_receiver_count", False)
+            else {}
+        )
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(
                 edge_feats, element, edge_pairs
@@ -264,12 +273,17 @@ class O3CgtpInteraction(Interaction):
                 if graph is not None and not reuse_attrs
                 else None,
                 radial_network=radial_network,
-                edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,
+                edge_pairs=None
+                if element is not None and isinstance(element[0], tuple)
+                else edge_pairs,
+                **receiver,
             )
         conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
         if edge_cutoff is not None:
             conv_weights = conv_weights * edge_cutoff
-        return self.rejector(node_feats, edge_attrs, conv_weights, edge_index)
+        return self.rejector(
+            node_feats, edge_attrs, conv_weights, edge_index, **receiver
+        )
 
     def forward(
         self,
@@ -297,6 +311,7 @@ class O3CgtpInteraction(Interaction):
         lmp_data = graph.lmp_data
         lmp_natoms = graph.lmp_natoms
         nlocal = lmp_natoms[0] if lmp_data is not None else None
+        num_receivers = nlocal if nlocal is not None else node_types.size(0)
 
         # The reference last-layer path expects dense inputs; full streaming
         # retains the partitions until each edge tile is evaluated.
@@ -349,7 +364,7 @@ class O3CgtpInteraction(Interaction):
         if isinstance(self.scatter_norm, CutoffScatterNorm):
             if message_cutoff is None:
                 message_cutoff = self.scatter_norm.edge_weights(
-                    edge_cutoff, edge_index[1], node_types.size(0)
+                    edge_cutoff, edge_index[1], num_receivers
                 )
         else:
             message_cutoff = edge_cutoff
@@ -381,7 +396,7 @@ class O3CgtpInteraction(Interaction):
             edge_feats,
             edge_index,
             edge_cutoff,
-            node_types.size(0),
+            num_receivers,
             edge_pairs=edge_pairs,
         )
 
@@ -481,7 +496,9 @@ class O2CgtpInteraction(O3CgtpInteraction):
                 edge_cutoff,
                 graph,
                 radial_network=radial_network,
-                edge_pairs=None if element is not None and isinstance(element[0], tuple) else edge_pairs,
+                edge_pairs=None
+                if element is not None and isinstance(element[0], tuple)
+                else edge_pairs,
             )
         conv_weights = self._conv_weights(edge_feats, element, edge_pairs)
         if edge_cutoff is not None:
@@ -538,6 +555,8 @@ class UvO2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         radial_network=None,
         edge_pairs=None,
+        *,
+        num_nodes=None,
     ) -> torch.Tensor:
         return self.rejector(
             node_feats,
@@ -548,6 +567,7 @@ class UvO2Interaction(O3CgtpInteraction):
             edge_cutoff=edge_cutoff,
             radial_network=radial_network,
             edge_pairs=edge_pairs,
+            **({"num_nodes": num_nodes} if num_nodes is not None else {}),
         )
 
     def _prepare_setup(self) -> None:
@@ -600,6 +620,18 @@ class UvO2Interaction(O3CgtpInteraction):
             if edge_pairs is not None:
                 conv_weights = edge_pairs.expand(conv_weights)
                 edge_pairs = None
+        # Magnetic and custom interaction hooks have distinct call contracts.
+        # Do not pass a new keyword unless the original hook and a receiver-
+        # aware provider are both installed (Cartesian UV uses another map).
+        receiver = (
+            {"num_nodes": graph.lmp_natoms[0]}
+            if getattr(graph, "lmp_data", None) is not None
+            and type(self)._apply_rejector is UvO2Interaction._apply_rejector
+            and "_apply_rejector" not in vars(self)
+            and "supports_receiver_count" in type(self.rejector).__dict__
+            and self.rejector.supports_receiver_count
+            else {}
+        )
         return self._apply_rejector(
             node_feats,
             magnetic_node_info,
@@ -612,6 +644,7 @@ class UvO2Interaction(O3CgtpInteraction):
             edge_cutoff,
             radial_network=radial_network,
             edge_pairs=edge_pairs,
+            **receiver,
         )
 
 
@@ -656,6 +689,16 @@ class UuO2Interaction(O3CgtpInteraction):
         edge_pairs=None,
         element=None,
     ) -> torch.Tensor:
+        # Gather from the complete owner+ghost source table. Only the built-in
+        # spherical map (or an explicitly opted-in provider) has a separate
+        # receiver extent; Cartesian and third-party rejectors keep their ABI.
+        receiver = (
+            {"num_nodes": graph.lmp_natoms[0]}
+            if getattr(graph, "lmp_data", None) is not None
+            and "supports_receiver_count" in type(self.rejector).__dict__
+            and self.rejector.supports_receiver_count
+            else {}
+        )
         if element is not None:
             weights = self._conv_weights(edge_feats, element, edge_pairs)
             if self.use_eqx:
@@ -667,6 +710,7 @@ class UuO2Interaction(O3CgtpInteraction):
                     edge_wigner,
                     edge_cutoff,
                     graph,
+                    **receiver,
                 )
             return self.rejector(
                 node_feats,
@@ -675,6 +719,7 @@ class UuO2Interaction(O3CgtpInteraction):
                 edge_wigner,
                 edge_wigner_inv,
                 edge_cutoff,
+                **receiver,
             )
         if self.use_eqx:
             radial, projection, radial_network = self._radial_projection(edge_feats)
@@ -688,6 +733,7 @@ class UuO2Interaction(O3CgtpInteraction):
                 graph,
                 radial_network=radial_network,
                 edge_pairs=edge_pairs,
+                **receiver,
             )
         conv_weights = self.edge_info(edge_feats)
         return self.rejector(
@@ -697,6 +743,7 @@ class UuO2Interaction(O3CgtpInteraction):
             edge_wigner,
             edge_wigner_inv,
             edge_cutoff,
+            **receiver,
         )
 
 

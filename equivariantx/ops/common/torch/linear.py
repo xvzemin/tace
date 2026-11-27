@@ -459,6 +459,13 @@ def element_linear(
         and features.is_cuda
         and (dense_table or not capture)
     ):
+        if statically_known_true(weight.shape[0] == 1):
+            # Every sample uses the same matrix. Keep the element lookup in
+            # the result (including under capture) without sorting/packing rows.
+            result = element_linear_blocks(
+                features.unsqueeze(0), weight, paths, output_dim, layout
+            )
+            return result[node_type, torch.arange(nodes, device=node_type.device)]
         if isinstance(nodes, torch.SymInt):
             return element_linear_grouped(
                 features, weight, node_type, paths, output_dim, layout

@@ -135,6 +135,65 @@ def test_element_linear(backend, device, mode, dtype, expand_weights):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU element schedules")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize(
+    "space,experts,mode", [("o3", 1, "single"), ("o3", 2, "pair"), ("o2", 1, "pair")]
+)
+def test_single_table_element_linear(dtype, space, experts, mode):
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    if space == "o3":
+        ir_in, ir_out = "3x0e+2x1o", "2x0e+0e+3x1o+2e"
+        linear_cls = o3.Linear
+        cls = eqx_o3.ElementLinear if experts == 1 else eqx_o3.MoEElementLinear
+    else:
+        ir_in, ir_out = "3x0e+2x1m", "2x0e+0e+3x1m+2m"
+        linear_cls, cls = o2.Linear, o2.ElementLinear
+    linear = linear_cls(ir_in, ir_out, internal_weights=False, shared_weights=False)
+    module = cls(
+        linear,
+        backend="torch",
+        element_mode=mode,
+        **({} if experts == 1 else {"num_experts": experts}),
+    )
+    oracle = copy_model(module)
+    oracle.expand_weights = True
+    shape = (1,) if mode == "single" else (1, 1)
+    w = torch.randn(
+        *shape, experts, module.weight_numel, device="cuda", dtype=dtype
+    ).requires_grad_()
+
+    def joint(f, x, w, *ids):
+        y = f(x, w, *ids)
+        g = torch.autograd.grad(y.sin().sum(), (x, w), create_graph=True)
+        h = torch.autograd.grad(sum(v.square().sum() for v in g), (x, w))
+        return y, g, h
+
+    traced = None
+    # Keep the example row count distinct from all static dimensions: legacy
+    # symbolic make_fx duck-sizes equal extents (the O(2) input width is 7).
+    for n in (17, 23):
+        x = torch.randn(
+            module.input_dim, n, device="cuda", dtype=dtype
+        ).T.requires_grad_()
+        source = -(torch.arange(n, device="cuda") % 2)  # both legal indices: 0, -1
+        ids = (source,) if mode == "single" else (source, source.flip(0))
+        if traced is None:
+            traced = make_fx(module, tracing_mode="symbolic")(x, w, *ids)
+            assert torch.ops.aten.sort.default not in {
+                n.target for n in traced.graph.nodes
+            }
+        expected = joint(oracle, x, w, *ids)
+        for f in (module, traced):
+            torch.testing.assert_close(
+                joint(f, x, w, *ids),
+                expected,
+                atol=1e-4 if dtype == torch.float32 else 2e-11,
+                rtol=1e-5 if dtype == torch.float32 else 2e-11,
+            )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU element schedules")
 @pytest.mark.parametrize("experts", [1, 2])
 def test_sparse_pair_table(experts, double_precision, monkeypatch):
     linear = o3.Linear(

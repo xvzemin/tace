@@ -51,12 +51,12 @@ def create_model(
     embedding_property: List[str],
     prune_removed_keys: bool = False,
 ) -> torch.nn.Module:
-    from tace.models import CartesianTACE, SphericalTACE
+    from tace.models import SphericalTACE
 
     # === model cls ===
     model_path = model_config.get("_target_", "tace.models.SphericalTACE")
     MODEL_CLS = select_wrapper(model_path)
-    is_tace_model = MODEL_CLS in (SphericalTACE, CartesianTACE)
+    is_tace_model = isinstance(MODEL_CLS, type) and issubclass(MODEL_CLS, SphericalTACE)
     wrapper_config = model_config.get("wrapper") or {}
     wrapper_path = wrapper_config.get("_target_", "tace.models.TensorModel")
 
@@ -65,7 +65,15 @@ def create_model(
         and is_tace_model
         and wrapper_path == "tace.models.TensorModel"
     ):
-        wrapper_path = "tace.models.CompileTensorModel"
+        from tace.models.compile.wrapper import _loading_frozen_graph
+
+        # Only a frozen graph exporter can load a native LES host here.
+        # Its readout is validated by export_aotinductor, not enabled for fit.
+        if not (
+            _loading_frozen_graph.get()
+            and model_config.get("long_range", {}).get("les", {}).get("enable", False)
+        ):
+            wrapper_path = "tace.models.CompileTensorModel"
 
     # === wrapper cls ===
     WRAPPER_CLS = select_wrapper(wrapper_path)
@@ -86,6 +94,8 @@ def create_model(
                 **model_config,
             )
         )
+    except ModuleNotFoundError:
+        raise
     except Exception as e:
         raise RuntimeError(
             "Failed to instantiate the model using the provided configuration.\n"

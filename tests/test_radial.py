@@ -612,9 +612,11 @@ def test_radial_spectral_defaults():
 def test_space_spectral_threshold():
     data = pytest.importorskip("physical_basis").PhysicalBasis()
     limit = data.return_eigenvalue(7, 0)
-    for R in (5., 8.):
+    for R in (5.0, 8.0):
         assert RadialBasis(R, radial_basis="spb", lmax=3).widths == (8, 7, 6, 6)
-        assert RadialBasis(R, radial_basis="spb", lmax=3, max_eigenvalue=36.).widths == (3, 2, 1, 1)
+        assert RadialBasis(
+            R, radial_basis="spb", lmax=3, max_eigenvalue=36.0
+        ).widths == (3, 2, 1, 1)
     for value, n in ((limit, 8), (math.nextafter(limit, 0.0), 7)):
         assert RadialBasis(radial_basis="spb", max_eigenvalue=value).num_basis == n
 
@@ -635,7 +637,13 @@ def test_space_spectral_threshold():
 )
 def test_radial_spectral_errors(name, counts, limit, match):
     with pytest.raises(ValueError, match=match):
-        RadialBasis(radial_basis=name, lmax=1, num_basis=counts, max_eigenvalue=limit, atomic_numbers=[1])
+        RadialBasis(
+            radial_basis=name,
+            lmax=1,
+            num_basis=counts,
+            max_eigenvalue=limit,
+            atomic_numbers=[1],
+        )
 
 
 @pytest.mark.parametrize("name", ["j-1", "j1.5", "jx"])

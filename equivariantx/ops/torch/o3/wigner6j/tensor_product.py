@@ -463,7 +463,7 @@ def recoupled(module, values):
         v.expand(shape + (v.shape[-1],)).reshape(count, v.shape[-1]) for v in values[:3]
     ]
     weight = (
-        module.combine_weights(weight1, weight2)
+        module.combine_weights(weight1, weight2, backend="torch")
         .expand(shape + (module.tp132.weight_numel,))
         .reshape(count, module.tp132.weight_numel)
     )

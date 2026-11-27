@@ -27,6 +27,7 @@ from ..linear import (
     e3nnMoEElementLinear,
 )
 from ..spherical.basis_change import _SymmetricRankTwoBasisChange
+from ..spherical.edge_inter import _RowwisePairProduct
 from ..spherical.fused import (
     O3TensorProductConv,
     UuO2TensorProductConv,
@@ -97,11 +98,16 @@ def cartesian_tensor_product(module, *, project=True):
 class CartesianTensorProductConvLayer(torch.nn.Module):
     """Contract Cartesian edge tensors and aggregate before STF projection.
 
+    For a local/ghost graph, ``num_nodes`` sizes only the receiver output;
+    sender features still include ghost rows.
+
     Parameters
     ----------
     tensor_product : o3.TensorProduct
         Weighted ``uvu`` paths and their normalization.
     """
+
+    supports_receiver_count = True
 
     def __init__(self, tensor_product):
         super().__init__()
@@ -118,9 +124,14 @@ class CartesianTensorProductConvLayer(torch.nn.Module):
             compact_output=True,
         )
 
-    def forward(self, features, edge_attrs, weights, edge_index):
+    def forward(self, features, edge_attrs, weights, edge_index, num_nodes=None):
         messages = self.tp(features[edge_index[0]], edge_attrs, weights)
-        output = scatter_sum(messages, edge_index[1], dim=0, dim_size=features.shape[0])
+        output = scatter_sum(
+            messages,
+            edge_index[1],
+            dim=0,
+            dim_size=features.size(0) if num_nodes is None else num_nodes,
+        )
         return (
             output.index_select(-1, self.eqx_tp.output_pack_index)
             if self.compact_output
@@ -138,6 +149,7 @@ class CartesianTensorProductConvLayer(torch.nn.Module):
         edge_vector=None,
         radial_network=None,
         edge_pairs=None,
+        num_nodes=None,
     ):
         """Fuse the radial network, tensor contractions and graph reduction."""
         if edge_cutoff is not None and edge_vector is None:
@@ -148,6 +160,7 @@ class CartesianTensorProductConvLayer(torch.nn.Module):
             radial,
             projection,
             edge_index,
+            num_nodes=num_nodes,
             vectors=edge_vector,
             amplitudes=edge_cutoff,
             radial_network=radial_network,
@@ -312,6 +325,13 @@ def cartesian_modules(module):
         conv.eqx_tp.radial_mode = module.eqx_tp.radial_mode
         return conv
     if isinstance(module, (UuuTensorProduct, UvuTensorProduct)):
+        if isinstance(module, _RowwisePairProduct):
+            # Its CUDA program and permutation indices describe spherical
+            # storage (2l+1), not the Cartesian tensors (3**l) below.
+            module._cg_load_hook.remove()
+            del module._cg_load_hook, module._cg_certificate
+            del module.contraction, module.to_channels_last, module.to_mul_ir
+            module.__class__ = UvuTensorProduct
         module.tp = cartesian_tensor_product(module.tp)
         module.irreps_in1 = module.tp.irreps_in1
         module.irreps_in2 = module.tp.irreps_in2
@@ -409,7 +429,7 @@ def cartesian_modules(module):
                 torch.tensor(indices, dtype=torch.long, device=device),
                 persistent=False,
             )
-        module.build_eqx()
+        module._configure_eqx()
     if isinstance(module, (ProjectDown, ProjectUp)):
         irreps_in, irreps_out = module.irreps_in, module.irreps_out
         if isinstance(module, ProjectDown):

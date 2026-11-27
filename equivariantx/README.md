@@ -5,16 +5,16 @@ using PyTorch, with optional fused CUDA implementations.
 
 ## Installation
 
-Install from source without installing TACE:
+EQX and EquivariantX Foundation are included in the TACE distribution:
 
 ```bash
 git clone https://github.com/xvzemin/tace.git
-pip install ./tace/equivariantx
+pip install ./tace
 ```
 
 Requires Python >= 3.10, PyTorch >= 2.4, e3nn >= 0.4.4, and SciPy >= 1.15.
-For fused kernels, install `pip install './tace/equivariantx[cuda]'` and provide a CUDA
-toolkit. Kernels compile on first use and are cached.
+For fused kernels, provide a compatible CUDA toolkit and C++ compiler.
+Kernels compile on first use and are cached.
 
 The default `backend=None` uses `equivariantx.ops.config.DEFAULT_BACKEND`,
 set once at import to CUDA when available and optimized PyTorch otherwise.
@@ -58,8 +58,8 @@ CG table. `o2` and `co2` support time-reversal labels directly. Time-odd
 Built-in modules: [neural network modules](https://tace.readthedocs.io/en/latest/equivariantx/api/nn.html),
 [convolutions](https://tace.readthedocs.io/en/latest/equivariantx/api/convolutions.html),
 and [many-body expansions](https://tace.readthedocs.io/en/latest/equivariantx/api/mbe.html).
-[Model adapters](https://tace.readthedocs.io/en/latest/equivariantx/api/models.html)
-convert supported pretrained architectures.
+Model adapters and specialized execution are in the bundled
+[EquivariantX Foundation](../equivariantx_foundation/README.md) package.
 
 Spherical O(2) uses flattened `ir_mul` storage; Cartesian operators use `mul_ir`.
 See the API for parameters and examples.
@@ -69,12 +69,12 @@ See the API for parameters and examples.
 From the repository root:
 
 ```bash
-pip install -e './equivariantx[dev]'
+pip install -e '.[dev]'
 pytest equivariantx/tests
 ```
 
-CUDA tests require a GPU and CUDA build dependencies. Model integration tests
-require the corresponding model packages. EQX tests do not require TACE.
+CUDA tests require a GPU and CUDA build dependencies. EQX tests do not require
+TACE or EquivariantX Foundation.
 
 ## License
 

@@ -31,6 +31,45 @@ def test_inline_work_counts_vectorized_batches():
     assert polynomial_work("channel", metadata, program) == 3
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Capture CUDA polynomial dispatch"
+)
+@pytest.mark.parametrize("inline", [True, False])
+def test_joint_channel_capture_preserves_inline_scope(monkeypatch, inline):
+    from equivariantx.ops import config
+    from equivariantx.ops.common.channel_product import channel_product
+
+    monkeypatch.setattr(config, "POLYNOMIAL_INLINE", inline)
+    monkeypatch.setattr(config, "COMPILE_MAX_INLINE_WORK", 10000)
+    paths = (((0, -1, 0, 0), 1.0), ((-1, 0, 1, 1), 1.0))
+    for width, shared, terms, matched in (
+        (32, False, 1, True),
+        (16, False, 1, False),
+        (32, True, 1, False),
+        (32, False, 13, False),
+    ):
+        meta = repr((width, (1, 1, 2, 2), paths))
+        program = repr((((0, 1, 2, 3), 3, 0, 0),) * terms)
+
+        def f(s, t, w):
+            return channel_product(
+                meta, program, [s, t, w, s.new_empty((0, 2 * width))]
+            )[0]
+
+        s, t = (
+            torch.randn(4, width, device="cuda"),
+            torch.randn(4, width, device="cuda"),
+        )
+        w = torch.randn(1 if shared else 4, 2 * width, device="cuda")
+        graph = make_fx(f)(s, t, w)
+        opaque = any(
+            n.target == torch.ops.eqx.local_channel_product.default
+            for n in graph.graph.nodes
+        )
+        assert opaque == (matched or not inline)
+        torch.testing.assert_close(graph(s, t, w), f(s, t, w))
+
+
 def test_inline_budget(monkeypatch):
     from equivariantx.mbe.ace.symmetric_contraction import make_metadata
     from equivariantx.ops import config

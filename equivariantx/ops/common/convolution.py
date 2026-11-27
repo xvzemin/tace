@@ -28,12 +28,12 @@ def edge_indices(edge_index):
     return edge_index[0], edge_index[1]
 
 
-def radial_input(program, inputs, radial, network=None):
+def radial_input(program, inputs, radial, network=None, *, num_targets=None):
     """Append partitioned radial inputs and optional network parameters."""
     from .radial import radial_parts, radial_program
 
     values = []
-    for tensor, storage in radial_parts(radial):
+    for tensor, storage in radial_parts(radial, num_targets=num_targets):
         values.append(
             program.input(len(inputs), storage, static_dimensions(tensor, (-1,))[0])
         )
@@ -282,7 +282,7 @@ def convolve(
     x = program.input(0, "source" if indexed else "edge", input_dim)
     attrs = program.input(1, "shared" if attributes.shape[0] == 1 else "edge", attr_dim)
     matrix = program.input(2, "shared", prod(projection_shape))
-    radial = radial_input(program, inputs, radial, network)
+    radial = radial_input(program, inputs, radial, network, num_targets=num_nodes)
     if projection.numel():
         width = program.size(radial)
         bias = width + 1 == projection.shape[0]

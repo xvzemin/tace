@@ -55,25 +55,29 @@ class Gate(E3nnGate):
         self.backend = backend
         self.input_dim = self.irreps_in.dim
         self.output_dim = self.irreps_out.dim
-        self.metadata = None
-        if not self.irreps_out.dim:
-            return
+        self.metadata = self.expression(self)
+
+    @staticmethod
+    def expression(gate: E3nnGate) -> str | None:
+        """Encode the cut, normalized activations and product of an existing gate."""
+        if not gate.irreps_out.dim:
+            return None
 
         from ..utils.program import Program, activate
 
         program = Program()
-        features = program.input(0, "edge", self.irreps_in.dim)
-        slices = self.sc.cut.irreps_in.slices()
+        features = program.input(0, "edge", gate.irreps_in.dim)
+        slices = gate.sc.cut.irreps_in.slices()
         extracted = [
             program.gather(
                 features,
                 [k for i in indices for k in range(slices[i].start, slices[i].stop)],
             )
-            for indices in self.sc.cut.instructions
+            for indices in gate.sc.cut.instructions
         ]
         activated = []
         try:
-            for values, module in zip(extracted, (self.act_scalars, self.act_gates)):
+            for values, module in zip(extracted, (gate.act_scalars, gate.act_gates)):
                 parts = []
                 for (mul, _), s, act in zip(
                     module.irreps_in, module.irreps_in.slices(), module.acts
@@ -83,12 +87,12 @@ class Gate(E3nnGate):
                     )
                 activated.append(program.concatenate(parts))
         except NotImplementedError:
-            return
+            return None
         outputs = [activated[0]]
-        for ins in self.mul.instructions:
-            mul, ir = self.mul.irreps_in1[ins.i_in1]
-            s = self.mul.irreps_in1.slices()[ins.i_in1]
-            t = self.mul.irreps_in2.slices()[ins.i_in2]
+        for ins in gate.mul.instructions:
+            mul, ir = gate.mul.irreps_in1[ins.i_in1]
+            s = gate.mul.irreps_in1.slices()[ins.i_in1]
+            t = gate.mul.irreps_in2.slices()[ins.i_in2]
             values = program.slice(extracted[2], s.start, mul * ir.dim)
             gates = program.gather(
                 activated[1], [t.start + u for u in range(mul) for _ in range(ir.dim)]
@@ -100,7 +104,7 @@ class Gate(E3nnGate):
                 )
             )
         output = program.concatenate(outputs)
-        self.metadata = repr((tuple(program.nodes), ((output, 0, "edge"),)))
+        return repr((tuple(program.nodes), ((output, 0, "edge"),)))
 
     def forward(self, features):
         """Return gated features with shape ``(..., irreps_out.dim)``."""

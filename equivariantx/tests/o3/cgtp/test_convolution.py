@@ -18,6 +18,101 @@ from equivariantx.tests.conv.testing import (
 )
 
 
+@pytest.mark.parametrize("backend", ["torch", "cuda"])
+@pytest.mark.parametrize("num_nodes", [0, 1, 4])
+def test_bipartite_direct_weights_and_attributes(backend, num_nodes, double_precision):
+    if backend == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    device = "cuda" if backend == "cuda" else "cpu"
+    tp = tensor_product().to(device)
+    conv = eqx_conv.O3TensorProductConv(tp, backend=backend).to(device)
+    # Two different periodic images share a halo source and receiver; owner 3
+    # has no neighbors. Halo source 6 must still receive both adjoints.
+    edges = torch.tensor([[6, 4, 6, 1, 6, 0], [2, 0, 2, 0, 1, 2]], device=device)
+    edges = edges[:, edges[1] < num_nodes].contiguous()
+    vector = torch.randn(edges.size(1), 3, device=device, requires_grad=True)
+    x = torch.randn(7, tp.irreps_in1.dim, device=device, requires_grad=True)
+    attrs = layout(
+        o3.spherical_harmonics(tp.irreps_in2, vector, True, "component"), tp.irreps_in2
+    )
+    w = torch.randn(edges.size(1), tp.weight_numel, device=device, requires_grad=True)
+    projection = w.new_empty(0, tp.weight_numel)
+    actual = conv(x, attrs, w, projection, edges, num_nodes=num_nodes)
+    expected = reference(tp, x, attrs, w, projection, edges)[:num_nodes]
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    for _ in range(2 if num_nodes else 1):
+        seed = torch.randn_like(actual)
+        gradients = [
+            torch.autograd.grad(
+                (v.sin() * seed).sum(), (x, vector, w), create_graph=True
+            )
+            for v in (actual, expected)
+        ]
+        torch.testing.assert_close(*gradients, atol=1e-9, rtol=1e-9)
+        actual, expected = [torch.cat([g.flatten() for g in gs]) for gs in gradients]
+
+
+@pytest.mark.parametrize("invalid", [0, -1, 1.5, True])
+def test_projection_workspace_validation(invalid):
+    tp = tensor_product()
+    with pytest.raises(ValueError, match="projection_workspace_bytes"):
+        eqx_conv.O3TensorProductConv(tp, projection_workspace_bytes=invalid)
+    conv = eqx_conv.O3TensorProductConv(tp)
+    with pytest.raises(ValueError, match="projection_workspace_bytes"):
+        conv(None, None, None, None, None, projection_workspace_bytes=invalid)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA projection workspace")
+def test_projection_workspace_per_call(monkeypatch, double_precision):
+    from equivariantx.ops.common.cuda.o3 import convolution as kernel
+
+    # Make the uncapped provider use the wide-primal GEMM shortcut. Capped
+    # calls must instead tile both that projection and its mixed adjoints.
+    monkeypatch.setattr(config, "RADIAL_PROJECT_MIN_WIDTH", 1)
+    tp = tensor_product().cuda()
+    layer = eqx_conv.O3TensorProductConv(
+        tp, backend="cuda", projection_workspace_bytes=256
+    ).cuda()
+    default = eqx_conv.O3TensorProductConv(tp, backend="cuda").cuda()
+    index = torch.randint(5, (2, 27), device="cuda")
+    values = tuple(
+        torch.randn(shape, device="cuda", requires_grad=True)
+        for shape in (
+            (5, tp.irreps_in1.dim),
+            (27, tp.irreps_in2.dim),
+            (27, 5),
+            (5, tp.weight_numel),
+        )
+    )
+    budget_log = []
+    project = kernel.project
+
+    def observe(*args, **kwargs):
+        budget_log.append(kwargs["workspace_bytes"])
+        return project(*args, **kwargs)
+
+    monkeypatch.setattr(kernel, "project", observe)
+    a = layer(*values, index)
+    b = layer(*values, index, projection_workspace_bytes=512)
+    c = default(*values, index)
+    assert budget_log == [256, 512]
+    # Reverse in a different order while all three forward graphs are live.
+    for y, budget in ((b, 512), (c, None), (a, 256)):
+        expected = reference(tp, *values, index)
+        torch.testing.assert_close(y, expected, atol=1e-10, rtol=1e-10)
+        budget_log.clear()
+        g, ref_g = [
+            torch.autograd.grad(t.square().mean(), values[1], create_graph=True)[0]
+            for t in (y, expected)
+        ]
+        torch.testing.assert_close(g, ref_g, atol=1e-10, rtol=1e-10)
+        assert set(budget_log) == ({budget} if budget is not None else set())
+        budget_log.clear()
+        second = [torch.autograd.grad(t.square().mean(), values) for t in (g, ref_g)]
+        torch.testing.assert_close(*second, atol=1e-10, rtol=1e-10)
+        assert set(budget_log) == ({budget} if budget is not None else set())
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Torch GPU contraction")
 @pytest.mark.parametrize("mode", ["last", "full"])
 def test_shared_angular_matrices_preserve_paths(mode, double_precision):

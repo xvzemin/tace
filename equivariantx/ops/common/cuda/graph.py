@@ -3,7 +3,6 @@
 import os
 from collections import OrderedDict
 from contextlib import contextmanager
-from contextvars import ContextVar
 from functools import lru_cache
 from threading import RLock
 
@@ -25,10 +24,38 @@ MIN_ROWS = 64
 MAX_GRAPHS = 128
 MAX_BYTES = 12 << 30
 CONVOLUTION_GRAPH_MIN_CALLS = 3
-CAPTURE_CONSTANTS = ContextVar("eqx_cuda_capture_constants", default=None)
 _GRAPHS = OrderedDict()
 _CANDIDATES = OrderedDict()
 _LOCK = RLock()
+
+_TLS_KEY = "equivariantx.cuda.capture_constants"
+_REMOVE_TLS = getattr(torch._C, "_remove_obj_from_tls", None)
+
+
+class _CaptureConstants:
+    """Access the graph owner inherited by PyTorch autograd workers."""
+
+    def get(self):
+        if torch._C._is_key_in_tls(_TLS_KEY):
+            return torch._C._get_obj_in_tls(_TLS_KEY)
+        return None
+
+
+CAPTURE_CONSTANTS = _CaptureConstants()
+
+
+@contextmanager
+def retain_constants(constants):
+    """Keep lookup tensors with the outer CUDA graph during warmup and capture."""
+    previous = CAPTURE_CONSTANTS.get()
+    torch._C._stash_obj_in_tls(_TLS_KEY, constants)
+    try:
+        yield
+    finally:
+        if previous is None and _REMOVE_TLS is not None:
+            _REMOVE_TLS(_TLS_KEY)
+        else:
+            torch._C._stash_obj_in_tls(_TLS_KEY, previous)
 
 
 @lru_cache(maxsize=64)
@@ -37,30 +64,25 @@ def capture_pool(device, stream):
     return torch.cuda.graph_pool_handle(), torch.cuda.Stream(device=device)
 
 
-@contextmanager
-def retain_constants(constants):
-    token = CAPTURE_CONSTANTS.set(constants)
-    try:
-        yield
-    finally:
-        CAPTURE_CONSTANTS.reset(token)
-
-
 def capture_constant(factory, *args):
     """Retain a native kernel's lookup tensors for the lifetime of its CUDA Graph."""
     retained = CAPTURE_CONSTANTS.get()
     if retained is None:
         return factory(*args)
     key = (factory, *args)
-    if key not in retained:
-        retained[key] = factory(*args)
-    return retained[key]
+    if key in retained:
+        return retained[key]
+    return retained.setdefault(key, factory(*args))
 
 
 def enabled(name):
     """Return whether native graph replay is enabled for this operator."""
     default = "1" if name == "product" else "0"
-    return os.environ.get("EQX_USE_CUDA_GRAPH", default) == "1" and ENABLED[name]
+    return (
+        os.environ.get("EQX_USE_CUDA_GRAPH", default) == "1"
+        and ENABLED[name]
+        and CAPTURE_CONSTANTS.get() is None
+    )
 
 
 def execute(name, key, function, inputs, outputs, shapes=None, fills=None, read=None):

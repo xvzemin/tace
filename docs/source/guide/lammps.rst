@@ -102,11 +102,45 @@ For AOTI deployment:
    export TACE_USE_OEQ=1
    tace-export-lammps -m model.pt --backend aoti --device cuda
 
+For eager multi-rank execution, export an ordinary model with the
+rank-local adapter. It supports eligible spherical CGTP, Uu/Uv O(2),
+TECE rotary-attention and Cartesian ICTD convolutions, and compatible products
+on owned nodes. TACE retains the standard forward and reverse halo exchanges:
+
+.. code-block:: bash
+
+   tace-export-lammps -m model.pt --backend eqx-regional-mpi --device cpu -o mpi.pt
+
+Load ``mpi.pt`` using the usual ML-IAP input. Each MPI rank selects its
+own CUDA device at runtime. This path requires TACE and EquivariantX
+Foundation on every rank. It does not use the single-rank receiver tiling
+or generate an AOTI package. The scheduled spherical CGTP and Cartesian
+ICTD reductions read both owned and ghost senders but allocate output only
+for owned receivers. This reduces temporary storage without discarding
+the force contributions from ghost senders. The spherical Uu and Uv O(2)
+layers also support owned receivers. In Uv, the source input still includes
+ghosts while the target input uses the owned prefix of the same features.
+The regional local-frame kernels keep the model's original rotations.
+TECE attention also normalizes over all incoming edges of each owned receiver,
+including edges from ghost senders. The softmax statistics and the output have
+one row per owned receiver. Cutoff and learned density normalizations accumulate
+over the same receiver rows.
+
+In memory-first mode (the default), eligible spherical CGTP layers stream
+the directed radial MLP using the original edge harmonics, without storing
+the full ``[num_edges, num_weights]`` tensor. With ``TACE_MEMORY_FIRST=0``,
+these layers precompute small weight tensors. For large, wide FP32
+projections they instead store the narrower hidden features and fuse only
+the last linear map. The choice uses the edge count on the current rank.
+Eligible TECE rotary layers stream their radial network and attention in
+memory-first mode; speed-first retains the host rotary implementation.
+Cartesian layers retain their own contraction path.
+
 For the released TACE-OAM-L architecture on **one MPI rank and one CUDA GPU**:
 
 .. code-block:: bash
 
-   tace-export-lammps -m TACE-OAM-L --backend eqx-oam-l -o oam-l.pt
+   tace-export-lammps -m TACE-OAM-L --backend eqx-foundation -o oam-l.pt
 
 For a single isolated atom with no neighbors, use the eager backend to retain
 the released checkpoint's isolated-atom energy convention.
@@ -126,13 +160,13 @@ onto the GPU. Install ``mpi4py`` for the MPI implementation linked to LAMMPS.
 Use the regular ``aoti`` backend for multiple MPI ranks or other models.
 
 For the single-rank FP32 radial-tangent force program, select
-``--backend eqx-oam-l-throughput``. It compiles the radial distance derivative
+``--backend eqx-foundation-throughput``. It compiles the radial distance derivative
 into the convolution and evaluates quadratic products in native layout.
 Deep interactions may reuse projected radial weights for the force calculation
 within one step. The combined cache budget is at most 16 GiB or one quarter of
 the export GPU's memory, whichever is smaller. Larger lists revert to streamed
 projections. Small inputs use CUDA Graph replay. This backend does not switch
-to receiver tiling. Use ``eqx-oam-l`` for the largest systems.
+to receiver tiling. Use ``eqx-foundation`` for the largest systems.
 
 For TACE-7M, TACE-L and TECE-RRA-1.0, the following backends select the
 single-rank FP32 implementation from the loaded architecture. Both OAM and

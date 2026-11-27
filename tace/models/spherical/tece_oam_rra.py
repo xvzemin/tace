@@ -11,12 +11,15 @@ from e3nn import o3
 
 from equivariantx import o2
 from equivariantx.mbe.ace import BilinearContraction
-from equivariantx.models.tace.tece_oam_rra import LocalSplit
 from equivariantx.nn import graph_softmax
 from equivariantx.o2.clebsch_gordan import clebsch_gordan_product
+from equivariantx.ops import config as eqx_config
 from equivariantx.ops.common.channel_product import local_product
 from equivariantx.ops.common.rotation import rotate
-from tace.utils.env import acceleration_enabled, select_acceleration
+from tace.utils.env import (
+    acceleration_enabled,
+    select_acceleration,
+)
 
 from ..lammps import Graph
 from ..layout import LayoutTransform
@@ -69,6 +72,8 @@ class Convolution(torch.nn.Module):
 
     use_radial_rotary_attention = True
 
+    supports_receiver_count = True
+
     def __init__(
         self,
         mmax,
@@ -120,21 +125,6 @@ class Convolution(torch.nn.Module):
             backend="cuda"
             if acceleration_enabled("eqx", kernel="product")
             else "torch",
-        )
-        expand = [
-            j
-            for m in range(mmax + 1)
-            for _ in range(1 if m == 0 else 2)
-            for j in range(
-                sum(n - k for k in range(m)), sum(n - k for k in range(m + 1))
-            )
-        ]
-        self._eqx_weight_metadata = repr(
-            (
-                2 * num_channel,
-                (len(expand), self.num_components, len(expand)),
-                tuple(((i, j, i), 1.0) for i, j in enumerate(expand)),
-            )
         )
         self.num_gates = (
             sum(mul for ir, mul in self.irreps_hidden if gate_m0 or ir.m) // hidden
@@ -191,16 +181,6 @@ class Convolution(torch.nn.Module):
             (0, self.num_gates * hidden),
             (self.num_gates * hidden, n * hidden),
         )
-        rows = []
-        for role, (start, size) in enumerate(self.projection_slices, 1):
-            for i in range(size // hidden):
-                indices = [start // hidden + i, -1, -1]
-                indices[role] = i
-                rows.append((tuple(indices), 1.0))
-        self._eqx_split_metadata = repr(
-            (hidden, (offset, self.num_gates, n), tuple(rows))
-        )
-
         if use_asymmetric_contraction:
             instructions = []
             for m, ir in enumerate(orders):
@@ -236,6 +216,74 @@ class Convolution(torch.nn.Module):
                 if acceleration_enabled("eqx", kernel="linear")
                 else "torch",
             )
+        if self.use_radial_rotary_attention:
+            self.query_proj = o2.Linear(
+                node_irreps,
+                node_irreps,
+                biases=use_bias,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
+            )
+            self.key_proj = o2.Linear(
+                node_irreps,
+                node_irreps,
+                biases=use_bias,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
+            )
+            self.radial_proj = o2.Linear(
+                [(o2.Irrep(0, 1), num_radial_basis)],
+                [(o2.Irrep(0, 1), 2 * num_head)],
+                biases=use_bias,
+                backend="cuda"
+                if acceleration_enabled("eqx", kernel="linear")
+                else "torch",
+            )
+            torch.nn.init.zeros_(self.radial_proj.weight)
+            self.attention_scale = (
+                self.num_channel_per_head * (self.irreps_hidden.dim // hidden)
+            ) ** -0.5
+            self.temperature_min, self.temperature_max = 0.25, 4.0
+            self.temperature_logit = torch.nn.Parameter(
+                torch.full((num_head,), math.log(0.75 / 3.0))
+            )
+        self._eqx_weight_metadata = None
+        self._eqx_metadata = None
+        if acceleration_enabled("eqx", kernel="conv"):
+            self.prepare_eqx()
+
+    def prepare_eqx(self):
+        """Prepare the local convolution program for fused execution."""
+        if self._eqx_weight_metadata is not None:
+            return
+        mmax, n = self.mmax, self.lmax + 1
+        num_channel, gate_m0 = self.num_channel, self.gate_m0
+        hidden = (
+            self.edge_ace_hidden if self.use_asymmetric_contraction else num_channel
+        )
+        offset = self.linear_up.irreps_out.dim // hidden
+        orders = [ir for ir, _ in self.irreps_hidden]
+        reshape_in, reshape_out = self.reshape_in, self.reshape_out
+        expand = [
+            j
+            for m in range(mmax + 1)
+            for _ in range(1 if m == 0 else 2)
+            for j in range(
+                sum(n - k for k in range(m)), sum(n - k for k in range(m + 1))
+            )
+        ]
+        self._eqx_weight_metadata = repr(
+            (
+                2 * num_channel,
+                (len(expand), self.num_components, len(expand)),
+                tuple(((i, j, i), 1.0) for i, j in enumerate(expand)),
+            )
+        )
+        if self.use_asymmetric_contraction:
+            first = self.feature_indices.tolist()
+            second = self.product_indices.tolist()
             rows = []
             for i, index in enumerate(first):
                 rows.append(((index, -1, -1, -1, -1, i), 1.0))
@@ -300,39 +348,6 @@ class Convolution(torch.nn.Module):
                 )
             )
 
-        if self.use_radial_rotary_attention:
-            self.query_proj = o2.Linear(
-                node_irreps,
-                node_irreps,
-                biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
-            )
-            self.key_proj = o2.Linear(
-                node_irreps,
-                node_irreps,
-                biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
-            )
-            self.radial_proj = o2.Linear(
-                [(o2.Irrep(0, 1), num_radial_basis)],
-                [(o2.Irrep(0, 1), 2 * num_head)],
-                biases=use_bias,
-                backend="cuda"
-                if acceleration_enabled("eqx", kernel="linear")
-                else "torch",
-            )
-            torch.nn.init.zeros_(self.radial_proj.weight)
-            self.attention_scale = (
-                self.num_channel_per_head * (self.irreps_hidden.dim // hidden)
-            ) ** -0.5
-            self.temperature_min, self.temperature_max = 0.25, 4.0
-            self.temperature_logit = torch.nn.Parameter(
-                torch.full((num_head,), math.log(0.75 / 3.0))
-            )
         local_degrees = tuple(
             ell
             for m in range(mmax + 1)
@@ -353,9 +368,19 @@ class Convolution(torch.nn.Module):
                     tuple(ir.l for _, ir in reshape_out.irreps for _ in range(ir.dim)),
                 )
             )
-        from equivariantx.models.tace.tece_oam_rra.program import metadata
+        from equivariantx_foundation.models.tace.tece_oam_rra.program import metadata
 
         self._eqx_metadata = metadata(self)
+        if self._eqx_metadata is not None:
+            rows = []
+            for role, (start, size) in enumerate(self.projection_slices, 1):
+                for i in range(size // hidden):
+                    indices = [start // hidden + i, -1, -1]
+                    indices[role] = i
+                    rows.append((tuple(indices), 1.0))
+            self._eqx_split_metadata = repr(
+                (hidden, (offset, self.num_gates, n), tuple(rows))
+            )
 
     def _load_from_state_dict(
         self,
@@ -481,6 +506,8 @@ class Convolution(torch.nn.Module):
         radial_basis,
         stage="",
         fused=False,
+        *,
+        num_nodes=None,
     ):
         """Rotate, update and aggregate node features along the supplied edges.
 
@@ -489,10 +516,20 @@ class Convolution(torch.nn.Module):
         for streaming attention; the default returns aggregated node features.
         ``fused`` selects equivalent CUDA implementations where available.
         """
-        nodes, edges = x.shape[0], edge_index.shape[1]
+        # Both endpoints index the complete feature table; only per-receiver
+        # softmax and accumulation use the owned extent.
+        nodes = x.shape[0] if num_nodes is None else num_nodes
+        edges = edge_index.shape[1]
         x = self.reshape_in(x)
         message = torch.cat((x[edge_index[0]], x[edge_index[1]]), dim=-1)
-        fused = fused and x.is_cuda and x.dtype in (torch.float32, torch.float64)
+        fused = (
+            fused
+            and x.is_cuda
+            and eqx_config.DEFAULT_BACKEND == "cuda"
+            and x.dtype in (torch.float32, torch.float64)
+        )
+        if fused and self._eqx_weight_metadata is None:
+            self.prepare_eqx()
         sparse_rotation = (
             fused
             and self._eqx_rotation_in is not None
@@ -507,11 +544,10 @@ class Convolution(torch.nn.Module):
                 message[..., self.num_channel :].flatten(1)
             ).view_as(key)
             score = self.rotary_score(query, key, radial_basis, fused)
-        message = (
-            local_product(self._eqx_weight_metadata, message, conv_weights)
-            if fused
-            else self.radial_product(message.flatten(1), conv_weights)
-        )
+        if fused:
+            message = local_product(self._eqx_weight_metadata, message, conv_weights)
+        else:
+            message = self.radial_product(message.flatten(1), conv_weights)
         packed = self.linear_up(message)
         hidden = (
             self.edge_ace_hidden
@@ -522,13 +558,16 @@ class Convolution(torch.nn.Module):
             coefs = self.scalar_act(
                 self.linear_coefs(message[:, : self.irreps_in[0].mul])
             )
-        gate, scalar = (
-            LocalSplit.apply(packed, self.projection_slices, self._eqx_split_metadata)
-            if fused
-            else tuple(
+        if fused and self._eqx_metadata is not None:
+            from equivariantx_foundation.models.tace.tece_oam_rra import LocalSplit
+
+            gate, scalar = LocalSplit.apply(
+                packed, self.projection_slices, self._eqx_split_metadata
+            )
+        else:
+            gate, scalar = tuple(
                 packed.narrow(1, start, size) for start, size in self.projection_slices
             )
-        )
         if fused and self.use_asymmetric_contraction:
             message = local_product(
                 self._eqx_update_metadata,
@@ -585,19 +624,15 @@ class Convolution(torch.nn.Module):
 
     def align(self, features, wigner, fused):
         """Express gathered features in the local representation."""
-        return (
-            rotate(features, wigner, self._eqx_rotation_in)
-            if fused
-            else torch.bmm(wigner, features)
-        )
+        if fused:
+            return rotate(features, wigner, self._eqx_rotation_in)
+        return torch.bmm(wigner, features)
 
     def unalign(self, features, wigner_inv, fused):
         """Return edge messages to the node representation."""
-        return (
-            rotate(features, wigner_inv, self._eqx_rotation_out)
-            if fused
-            else torch.bmm(wigner_inv, features)
-        )
+        if fused:
+            return rotate(features, wigner_inv, self._eqx_rotation_out)
+        return torch.bmm(wigner_inv, features)
 
 
 class UvSO2Interaction(O3CgtpInteraction):
@@ -609,12 +644,15 @@ class UvSO2Interaction(O3CgtpInteraction):
     """
 
     use_radial_rotary_attention = True
+    supports_receiver_count = True
 
     @property
     def use_eqx(self) -> bool:
-        return self.rejector._eqx_metadata is not None and bool(
-            acceleration_enabled("eqx", kernel="conv")
-        )
+        if not acceleration_enabled("eqx", kernel="conv"):
+            return False
+        if self.rejector._eqx_weight_metadata is None:
+            self.rejector.prepare_eqx()
+        return self.rejector._eqx_metadata is not None
 
     def _prepare_setup(self) -> None:
         super()._prepare_setup()
@@ -673,6 +711,22 @@ class UvSO2Interaction(O3CgtpInteraction):
     def _linear_down_irreps_in(self) -> o3.Irreps:
         return o3.Irreps([(self.num_channel, ir) for _, ir in self.irreps_out])
 
+    def _convolution_radial(self, edge_features):
+        radial, layers = convolution_radial(self.edge_info, edge_features)
+        hidden = layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
+        return radial, layers[-1], hidden
+
+    def _rotary_radial(self, features, edge_features, edge_index):
+        if (
+            features.is_cuda
+            and eqx_config.DEFAULT_BACKEND == "cuda"
+            and self.use_radial_rotary_attention
+            and self.use_eqx
+            and acceleration_enabled("eqx", kernel="conv")
+        ):
+            return self._convolution_radial(edge_features)
+        return None
+
     def _compute_messages(
         self,
         node_feats: torch.Tensor,
@@ -684,22 +738,28 @@ class UvSO2Interaction(O3CgtpInteraction):
         edge_cutoff: Union[torch.Tensor, None],
         edge_wigner: Union[torch.Tensor, None] = None,
         edge_wigner_inv: Union[torch.Tensor, None] = None,
-        magnetic_node_info: Union[
-            tuple[torch.Tensor, torch.Tensor], None
-        ] = None,
+        magnetic_node_info: Union[tuple[torch.Tensor, torch.Tensor], None] = None,
         magnetic_edge_attrs: Union[torch.Tensor, None] = None,
         graph: Union[Graph, None] = None,
     ) -> torch.Tensor:
-        if (
-            node_feats.is_cuda
-            and self.use_radial_rotary_attention
-            and self.use_eqx
-            and acceleration_enabled("eqx", kernel="conv")
-        ):
-            from equivariantx.models.tace.tece_oam_rra.interaction import stream
+        # Subclasses (including whole-model schedules or Cartesian rejectors)
+        # retain the original forward ABI unless both participants opt in.
+        receiver = (
+            {"num_nodes": graph.lmp_natoms[0]}
+            if getattr(graph, "lmp_data", None) is not None
+            and type(self).__dict__.get("supports_receiver_count", False)
+            and "supports_receiver_count" in type(self.rejector).__dict__
+            and self.rejector.supports_receiver_count
+            and "forward" not in vars(self.rejector)
+            else {}
+        )
+        prepared = self._rotary_radial(node_feats, edge_feats, edge_index)
+        if prepared is not None:
+            from equivariantx_foundation.models.tace.tece_oam_rra.interaction import (
+                stream,
+            )
 
-            radial, layers = convolution_radial(self.edge_info, edge_feats)
-            last = layers[-1]
+            radial, last, hidden = prepared
             return stream(
                 self.rejector,
                 node_feats,
@@ -711,9 +771,8 @@ class UvSO2Interaction(O3CgtpInteraction):
                 edge_wigner,
                 edge_wigner_inv,
                 edge_radial_basis,
-                radial_network=(
-                    layers[:-1] if len(layers) > 1 or isinstance(radial, tuple) else None
-                ),
+                radial_network=hidden,
+                **receiver,
             )
         return self.rejector(
             node_feats,
@@ -724,6 +783,7 @@ class UvSO2Interaction(O3CgtpInteraction):
             edge_wigner_inv,
             edge_radial_basis,
             fused=acceleration_enabled("eqx", kernel="conv"),
+            **receiver,
         )
 
 
@@ -891,9 +951,7 @@ class BilinearMoEACE(Product):
     ) -> torch.Tensor:
         return (grouped + shared) * self.scale
 
-    def _bilinear_coefficients(
-        self, kernel, coef, features, base, gates, node_type
-    ):
+    def _bilinear_coefficients(self, kernel, coef, features, base, gates, node_type):
         elements = getattr(coef, "num_elements", 1)
         experts = getattr(coef, "num_experts", 1)
         weight = (
@@ -913,11 +971,15 @@ class BilinearMoEACE(Product):
         if shared is not None:
             shared_weight = (
                 torch.cat([w.flatten() for w in shared.weight])
-                if shared.use_matrix_weight else shared.weight
+                if shared.use_matrix_weight
+                else shared.weight
             )
         output = kernel(features, base, gates, weight, types, shared_weight)
         if shared is not None and shared.bias is not None:
-            output = output + shared.bias.index_select(-1, shared._bias_index) * shared._bias_mask
+            output = (
+                output
+                + shared.bias.index_select(-1, shared._bias_index) * shared._bias_mask
+            )
         if coef.bias is None:
             return output
         if hasattr(coef, "num_experts"):

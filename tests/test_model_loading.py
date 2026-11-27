@@ -408,6 +408,593 @@ def save_checkpoint(model, path):
     )
 
 
+def test_foundation_replay_loader_capacity():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from torch.utils.data import BatchSampler
+    from torch_geometric.loader import DataLoader
+
+    from tace.dataset.dataloader import EpochDataLoader
+    from tace.dataset.datamodule import GraphDataModule
+    from tace.lightning.foundation import FoundationTrainingCallback
+
+    dm = GraphDataModule.__new__(GraphDataModule)
+    trainer = SimpleNamespace(datamodule=dm, train_dataloader=None)
+    cb = FoundationTrainingCallback(replay_bucket=(8, 100))
+    step = Mock(capacity=cb.replay_bucket)
+    cb._step = (None, step)
+
+    def check(loader, expected):
+        before = step.capacity
+        step.clear.reset_mock()
+        trainer.train_dataloader = loader
+        cb.on_train_epoch_start(trainer, None)
+        assert step.capacity == expected
+        assert step.clear.call_count == int(before != expected)
+
+    for cls in (DataLoader, EpochDataLoader):
+        check(cls(range(5), batch_size=3), (8, 100, 3))
+        check(cls(range(5), batch_size=3), (8, 100, 3))
+        check(cls(range(5), batch_size=2), (8, 100, 2))
+    loader = DataLoader(range(5), batch_size=3)
+    loader.collate_fn = list
+    check(loader, (8, 100))
+    for loader in (
+        None,
+        DataLoader(range(5), batch_size=1),
+        DataLoader(range(5), batch_size=9),
+        DataLoader(range(5), batch_size=3, drop_last=True),
+        DataLoader(range(5), batch_sampler=BatchSampler(range(5), 3, False)),
+        DataLoader(range(5), batch_size=3, exclude_keys=["forces"]),
+    ):
+        check(loader, (8, 100))
+    trainer.datamodule = None
+    check(DataLoader(range(5), batch_size=3), (8, 100))
+    for cap in ((8, 100, 4), ((8, 100, 4), (12, 125, 5))):
+        cb = FoundationTrainingCallback(replay_bucket=cap)
+        cb._step = None, step
+        step.capacity = cap
+        trainer.datamodule = dm
+        check(DataLoader(range(5), batch_size=3), cap)
+
+
+def test_lightning_training_routes(tmp_path, monkeypatch):
+    """Execution is chosen by the entry point, not host flags or a checkpoint."""
+    import pickle
+
+    from tace.lightning.foundation import FoundationTrainingCallback
+    from tace.lightning.trainer import build_trainer
+
+    cfg = {
+        "callbacks": {
+            "save": {"_target_": "lightning.pytorch.callbacks.ModelCheckpoint"}
+        },
+        "trainer": {
+            "_target_": "lightning.Trainer",
+            "accelerator": "cpu",
+            "devices": 1,
+            "default_root_dir": str(tmp_path),
+        },
+        "resume_from_model": "previous.ckpt",
+    }
+
+    def providers(**kwargs):
+        return [
+            cb
+            for cb in build_trainer(cfg, **kwargs).callbacks
+            if isinstance(cb, FoundationTrainingCallback)
+        ]
+
+    monkeypatch.setenv("TACE_USE_EQX", "1")
+    monkeypatch.setenv("TACE_USE_COMPILE", "1")
+    assert not providers()
+    monkeypatch.setenv("TACE_USE_COMPILE", "0")
+    (automatic,) = providers(fast=True)
+    assert automatic.backend is None and automatic.training_package is None
+    cfg["callbacks"]["explicit"] = automatic
+    with pytest.raises(ValueError, match="tace-fast-train"):
+        providers()
+    assert providers(fast=True) == [automatic]
+    cb = {
+        "_target_": "tace.utils.callbacks.FoundationTrainingCallback",
+        "backend": "torch",
+        "training_package": "local.pt2",
+    }
+    cfg["callbacks"]["explicit"] = cb
+    with pytest.raises(ValueError, match="tace-fast-train"):
+        providers()
+    from tace.scripts import train as entry
+
+    monkeypatch.setattr(entry, "build", lambda *_: pytest.fail("started building data"))
+    with pytest.raises(ValueError, match="tace-fast-train"):
+        entry.train_from_config(cfg)
+    misplaced = dict(cfg, trainer={**cfg["trainer"], "callbacks": [cb]})
+    for fast in (False, True):
+        with pytest.raises(ValueError, match="top-level callbacks"):
+            entry.train_from_config(misplaced, fast=fast)
+        for key, value in (
+            ("training_package", "joint.pt2"),
+            ("replay_bucket", [24, 700]),
+        ):
+            missing_target = dict(cfg, callbacks={"integration": {key: value}})
+            with pytest.raises(ValueError, match=f"{key} requires _target_"):
+                entry.train_from_config(missing_target, fast=fast)
+    with pytest.raises(ValueError, match="either replay_bucket or training_package"):
+        FoundationTrainingCallback(
+            training_package="train.pt2", replay_bucket=[24, 700]
+        )
+    for bad in (
+        (0, 4),
+        (2, -1),
+        [4],
+        (True, 10),
+        (24, 0, 0),
+        (24, 0, True),
+        (2, 1, 1, 1),
+        [],
+        [[8, 20], [24, 700, 4]],
+        [[8, 20, 1], [24, 700, False]],
+        "24",
+    ):
+        with pytest.raises(ValueError, match="replay_bucket"):
+            FoundationTrainingCallback(replay_bucket=bad)
+    for capacity in ((24, 0), (24, 0, 4), ((8, 20, 1), (24, 700, 4))):
+        cfg["callbacks"]["explicit"] = {
+            "_target_": cb["_target_"],
+            "replay_bucket": list(capacity),
+        }
+        (bucket_callback,) = providers(fast=True)
+        assert bucket_callback.replay_bucket == capacity
+    crossing = [[40, 80, 2], [4, 90, 2], [40, 80, 2]]
+    assert FoundationTrainingCallback(replay_bucket=crossing).replay_bucket == (
+        (4, 90, 2),
+        (40, 80, 2),
+    )
+    cfg["callbacks"]["explicit"] = cb
+    (configured,) = providers(fast=True)
+    # A DDP-spawn worker receives the settings, not a parent's runner/fit state.
+    restored = pickle.loads(pickle.dumps(configured))
+    assert (restored.backend, restored.training_package, restored._step) == (
+        "torch",
+        "local.pt2",
+        None,
+    )
+    cfg["callbacks"]["other"] = dict(
+        cb, _target_="tace.lightning.foundation.FoundationTrainingCallback"
+    )
+    with pytest.raises(ValueError, match="at most one"):
+        providers(fast=True)
+    from tace.lightning.oamv2 import OAMLightningModule
+
+    del cfg["callbacks"]["other"]
+    with pytest.raises(ValueError, match="specialized fast schedule"):
+        providers(fast=True, module_type=OAMLightningModule)
+    del cfg["callbacks"]["explicit"]
+    assert not providers(fast=True, module_type=OAMLightningModule)
+
+
+@pytest.mark.parametrize("keep_programs", [False, True])
+def test_oam_validation_capture_lifetime(monkeypatch, keep_programs):
+    from types import SimpleNamespace
+    from weakref import ref
+
+    from tace.lightning.oamv2 import GradientWorkspace, OAMLightningModule
+
+    model = torch.nn.Linear(3, 2)
+    module = OAMLightningModule(
+        {
+            "misc": {},
+            "loss": {
+                "_target_": "tace.utils.loss.normal.NormalLoss",
+                "loss_property": ["energy"],
+                "loss_function_name": ["mse_energy_per_atom"],
+                "loss_property_weights": [1.0],
+            },
+        },
+        model,
+        ["energy"],
+        [],
+        {},
+        capture_limit=2,
+    )
+    object.__setattr__(module, "canonical_model", model)
+    module.training_loss = module.loss_fn
+    calls = []
+    stream_device = torch.device("cuda:2")
+    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+    module.workspace = GradientWorkspace(model.parameters())
+    allocation = ref(module.workspace.buffers[0])
+    model.weight.grad = module.workspace.views[0]
+    external = torch.zeros_like(model.bias)
+    model.bias.grad = external
+    adapter = model.adapter = SimpleNamespace(
+        _compiled_cache={"evaluation": "independent"}
+    )
+    cases = {
+        key: SimpleNamespace(artifact_info={"status": status})
+        for key, status in (
+            ("old", "saved"),
+            ("one", "hit"),
+            ("two", "saved"),
+            ("fallback", "unsupported"),
+        )
+    }
+    programs = module._training_programs()
+    programs.update(cases)
+    module.captured_training = SimpleNamespace(
+        stream=SimpleNamespace(device=stream_device), programs=programs
+    )
+    if keep_programs:
+        module.release_training_capture(keep_programs=True)
+    else:
+        module.release_training_capture()
+    assert calls == [stream_device, "empty"]
+    assert model.weight.grad is None and model.bias.grad is external
+    assert module.workspace is module.captured_training is None and allocation() is None
+    if keep_programs:
+        assert module._training_programs() is programs
+        assert list(programs) == ["one", "two"]
+        assert all(programs[k] is cases[k] for k in programs)
+        # Neither a different adapter nor changed trainability can reuse these runners.
+        model.adapter = SimpleNamespace(_compiled_cache={})
+        assert not module._training_programs()
+        model.adapter = adapter
+        assert module._training_programs() is programs
+        model.bias.requires_grad_(False)
+        assert not module._training_programs()
+        module.release_training_capture()  # drop plans even with no active graph
+    assert adapter._compiled_cache == {"evaluation": "independent"}
+
+
+def test_fast_training_requires_a_plan_or_training_package(monkeypatch):
+    from equivariantx_foundation.models.tace import planner
+    from tace.lightning.foundation import FoundationTrainingCallback
+
+    source = torch.nn.Linear(1, 1)
+    wrapper = torch.nn.Module()
+    wrapper.model = source
+    monkeypatch.setattr(
+        planner, "shared_parameter_copy", lambda *_: pytest.fail("no-op copied model")
+    )
+    for provider, scope in (
+        ("eqx_torch", "representation"),
+        ("eqx_cuda", "representation"),
+        ("cueq", "representation"),
+        (None, "representation"),
+        ("eqx_torch", "readout_fn"),
+    ):
+        report = planner.ExecutionPlan(
+            "training",
+            "torch",
+            "regional",
+            (
+                planner.Region(
+                    "products.0",
+                    "native",
+                    "host",
+                    provenance="host_selected",
+                    provider=provider,
+                    scope=scope,
+                ),
+            ),
+        )
+        monkeypatch.setattr(planner, "plan", lambda *a, **kw: report)
+        with pytest.raises(ValueError, match="Use tace-train"):
+            FoundationTrainingCallback()._install(wrapper, source)
+        assert not FoundationTrainingCallback(training_package="joint.pt2")._install(
+            wrapper, source
+        )
+        assert wrapper.model is source
+
+
+@pytest.mark.parametrize(
+    "package, replace_weights, expected",
+    [(None, False, [False]), (None, True, [False, True]), ("joint.pt2", False, [True])],
+)
+def test_fast_training_prefers_checkpoint_compatible_whole_plan(
+    monkeypatch, package, replace_weights, expected
+):
+    from copy import copy, deepcopy
+    from types import SimpleNamespace
+
+    from equivariantx_foundation.models.tace import planner
+    from tace.lightning.foundation import FoundationTrainingCallback
+
+    source = torch.nn.Linear(3, 2)
+    source.readout_fn = torch.nn.Module()
+    source.readout_fn.representation = torch.nn.Module()
+    source.readout_fn.representation.interactions = torch.nn.ModuleList(
+        [torch.nn.Identity()]
+    )
+    wrapper = torch.nn.Module()
+    wrapper.model = source
+    attempts = []
+
+    def plan(model, *, backend, task, regional_only):
+        assert model is source and task == "training"
+        attempts.append(regional_only)
+        return planner.ExecutionPlan(
+            task,
+            "torch",
+            "regional" if regional_only else "whole",
+            (planner.Region("interactions.0", "torch", "test", lower=copy),),
+        )
+
+    def whole(model):
+        assert model is source
+        return deepcopy(model) if replace_weights else copy(model)
+
+    monkeypatch.setattr(planner, "plan", plan)
+    monkeypatch.setattr(
+        planner, "import_module", lambda name, package: SimpleNamespace(optimize=whole)
+    )
+    assert FoundationTrainingCallback(training_package=package)._install(
+        wrapper, source
+    )
+    assert attempts == expected
+    assert wrapper.model is not source and wrapper.model.weight is source.weight
+
+
+def test_packaged_training_loss_preserves_accumulation_and_unused_parameters(
+    monkeypatch,
+):
+    from equivariantx_foundation.targets import aoti
+    from tace.lightning.foundation import _packaged_loss
+
+    model = torch.nn.Linear(1, 1, dtype=torch.float64)
+    objective = torch.nn.Linear(1, 1, bias=False, dtype=torch.float64)
+    params = {
+        "model.weight": model.weight,
+        "model.bias": model.bias,
+        "loss_fn.weight": objective.weight,
+    }
+    validations = []
+
+    def run(data, parameters, buffers):
+        assert parameters is params
+        data = data["label"]
+        return (
+            {},
+            data.sum(),
+            {
+                name: None if name == "model.bias" else torch.full_like(p, data.item())
+                for name, p in params.items()
+            },
+        )
+
+    monkeypatch.setattr(aoti, "load_training", lambda *args, **kw: run)
+    monkeypatch.setattr(aoti, "training_inputs", lambda m, o, data: (data, params, {}))
+    monkeypatch.setattr(aoti, "training_batch", lambda m, o, data: data)
+    monkeypatch.setattr(
+        aoti, "validate_training_model", lambda *args: validations.append(args)
+    )
+    compute = _packaged_loss("train.pt2", model, objective, torch.device("cpu"))
+    for value in (1.0, 5.0):
+        _, loss = compute(
+            {"label": torch.tensor(value, dtype=torch.float64)}, objective
+        )
+        (loss / 2).backward()
+    assert len(validations) == 1 and validations[0][:3] == (run, model, objective)
+    torch.testing.assert_close(model.weight.grad, torch.full_like(model.weight, 3))
+    torch.testing.assert_close(
+        objective.weight.grad, torch.full_like(objective.weight, 3)
+    )
+    assert model.bias.grad is None
+    with pytest.raises(ValueError, match="original loss module"):
+        compute({"label": torch.tensor(1.0)}, torch.nn.Identity())
+    with pytest.raises(ValueError, match="batch tensor fields"):
+        compute({"label": torch.tensor(1.0), "new_input": torch.zeros(2)}, objective)
+    objective.weight.requires_grad_(False)
+    with pytest.raises(ValueError, match="Trainable parameters changed"):
+        compute({"label": torch.tensor(1.0)}, objective)
+
+
+def test_packaged_fit_owns_only_its_instance_loss(monkeypatch):
+    from types import SimpleNamespace
+
+    from tace.lightning import foundation
+
+    model = torch.nn.Linear(1, 1)
+    other = torch.nn.Linear(1, 1)
+    wrapper = SimpleNamespace(model=model, loss_fn=object(), device=torch.device("cpu"))
+    callback = foundation.FoundationTrainingCallback(training_package="test.pt2")
+
+    def step(data, loss_fn):
+        return data, loss_fn
+
+    loader = Mock(return_value=step)
+    monkeypatch.setattr(foundation, "_packaged_loss", loader)
+    model.forward_loss = object()
+    with pytest.raises(ValueError, match="existing model.forward_loss"):
+        callback.on_fit_start(None, wrapper)
+    loader.assert_not_called()
+    del model.forward_loss
+    original_keys = tuple(model.state_dict())
+    callback.on_fit_start(None, wrapper)
+    assert model.forward_loss(3, wrapper.loss_fn) == (3, wrapper.loss_fn)
+    assert tuple(model.state_dict()) == original_keys and not hasattr(
+        other, "forward_loss"
+    )
+    wrapper.model = other  # Another exception handler already restored its model.
+    callback.on_exception(None, wrapper, RuntimeError("interrupted"))
+    assert not hasattr(model, "forward_loss")
+    # Fit-time rebindings by other user callbacks do not belong to this hook.
+    wrapper.model = model
+    callback.on_fit_start(None, wrapper)
+    replacement = object()
+    model.forward_loss = replacement
+    callback.teardown(None, wrapper, "fit")
+    assert model.forward_loss is replacement
+
+
+def test_foundation_callback_ordinary_fit_and_native_load(precision_model, tmp_path):
+    """Exercise real E/F/S training, EMA evaluation and native checkpoint loading."""
+    import lightning as L
+    from torch.utils.data import DataLoader
+
+    from tace.utils.callbacks import EMACallback, FoundationTrainingCallback
+
+    model = precision_model.train()
+    device = next(model.parameters()).device
+    props = model.get_target_property()
+    cfg = dict(
+        model={"config": model.readout_fn.model_config},
+        dtype=dict(
+            model=str(model.get_model_dtype()).split(".")[-1],
+            autocast=None,
+            matmul="ieee",
+        ),
+        misc={},
+        optimizer={"_target_": "torch.optim.AdamW", "lr": 1e-4},
+        loss={
+            "_target_": "tace.utils.loss.uncertainty.UncertaintyLoss",
+            "loss_property": props,
+            "loss_function_name": ["mse_energy_per_atom", "mse_forces", "mse_stress"],
+            "loss_property_weights": [0.2, 1.5, 0.3],
+        },
+    )
+    wrapped = LightningWrapperModel(cfg, model, props, [], model.readout_fn.statistics)
+    ema = EMACallback(decay=0.5, use_num_updates=False)
+    path = tmp_path / "regional.ckpt"
+    names = list(dict(model.named_parameters()))
+
+    class Audit(L.Callback):
+        def on_fit_start(self, trainer, mod):
+            assert (
+                mod.model is not model
+                and mod.model.readout_fn.representation._foundation_regional
+            )
+            assert all(
+                a is b
+                for a, b in zip(model.parameters(), mod.model.parameters(), strict=True)
+            )
+            assert {
+                id(p)
+                for group in trainer.optimizers[0].param_groups
+                for p in group["params"]
+            } == {id(p) for p in mod.parameters() if p.requires_grad}
+
+        def on_train_epoch_end(self, trainer, mod):
+            trainer.save_checkpoint(path)
+
+    trainer = L.Trainer(
+        accelerator=device.type,
+        devices=1,
+        max_epochs=1,
+        inference_mode=False,
+        callbacks=[FoundationTrainingCallback(), ema, Audit()],
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        num_sanity_val_steps=1,
+        default_root_dir=tmp_path,
+    )
+    from tace.models.compile import CompileTensorModel
+    from tace.utils.strategy import SimpleDDPStrategy
+
+    if device.type == "cpu":
+        with pytest.raises(RuntimeError, match="requires an NVIDIA CUDA device"):
+            FoundationTrainingCallback().setup(trainer, wrapped, "fit")
+        return
+    simple = Mock(
+        strategy=SimpleDDPStrategy(parallel_devices=[device]),
+        precision_plugin=trainer.precision_plugin,
+    )
+    deferred = FoundationTrainingCallback()
+    with pytest.raises(ValueError, match="single-device CUDA"):
+        FoundationTrainingCallback(replay_bucket=[24, 700]).setup(
+            simple, wrapped, "fit"
+        )
+    from lightning.pytorch.strategies import DDPStrategy
+
+    gpu = [torch.device("cuda:0"), torch.device("cuda:1")]
+    ddp = Mock(
+        strategy=DDPStrategy(parallel_devices=gpu),
+        precision_plugin=trainer.precision_plugin,
+    )
+    replay = FoundationTrainingCallback(replay_bucket=[24, 700])
+    replay.setup(ddp, wrapped, "fit")
+    assert replay._source is None and wrapped.model is model
+    with pytest.raises(ValueError, match="default DDP reducer"):
+        replay.on_fit_start(ddp, wrapped)
+    for option in (
+        {"init_sync": False},
+        {"static_graph": True},
+        {"ddp_comm_hook": lambda *_: None},
+    ):
+        ddp.strategy = DDPStrategy(parallel_devices=gpu, **option)
+        with pytest.raises(ValueError, match="standard DDP synchronization"):
+            replay.setup(ddp, wrapped, "fit")
+    deferred.setup(simple, wrapped, "fit")
+    assert not deferred._load_hooks and wrapped.model is model
+    deferred.on_fit_start(simple, wrapped)
+    assert wrapped.model is not model and deferred._source is model
+    deferred.teardown(simple, wrapped, "fit")
+    assert wrapped.model is model
+
+    with pytest.raises(ValueError, match="backend must be"):
+        FoundationTrainingCallback("typo").setup(trainer, wrapped, "fit")
+    with pytest.raises(ValueError, match="without AMP"):
+        FoundationTrainingCallback().setup(
+            Mock(strategy=trainer.strategy, precision_plugin=object()), wrapped, "fit"
+        )
+    wrapped.model = CompileTensorModel(model.readout_fn)
+    with pytest.raises(ValueError, match="not XL-v2 or compile"):
+        FoundationTrainingCallback().setup(trainer, wrapped, "fit")
+    wrapped.model = model
+    batch = {
+        k: v.cpu() if torch.is_tensor(v) else v for k, v in model_batch(model).items()
+    }
+    batch.update(
+        energy=torch.tensor([0.4, -0.6], dtype=torch.float64),
+        forces=0.1 * batch["positions"],
+        stress=0.03 * batch["lattice"],
+        entropy=torch.ones(2),
+        energy_weight=torch.tensor([0.9, 0.7]),
+        forces_weight=torch.tensor([1.0, 0.4]),
+        stress_weight=torch.tensor([0.0, 1.0]),
+    )
+    data = DataLoader([batch, batch], batch_size=None)
+    trainer.fit(wrapped, train_dataloaders=data, val_dataloaders=data)
+    assert trainer.global_step == 2 and wrapped.model is model
+    raw = load_tace(path, device="cpu", use_ema=False)
+    averaged = load_tace(path, device="cpu", use_ema=True)
+    assert list(raw.state_dict()) == list(model.state_dict())
+    assert list(dict(raw.named_parameters())) == names
+    for k, v in raw.state_dict().items():
+        torch.testing.assert_close(v, model.state_dict()[k].cpu(), atol=0, rtol=0)
+    for p, v in zip(averaged.parameters(), ema.ema.shadow_params, strict=True):
+        torch.testing.assert_close(p, v.cpu(), atol=0, rtol=0)
+    if model.get_model_dtype() == torch.float32:
+
+        class Stop(L.Callback):
+            def on_train_start(self, trainer, mod):
+                assert mod.model is not model
+                raise RuntimeError("intentional interrupted fit")
+
+        callback = FoundationTrainingCallback()
+        interrupted = L.Trainer(
+            accelerator=device.type,
+            devices=1,
+            max_epochs=1,
+            callbacks=[callback, Stop()],
+            logger=False,
+            enable_checkpointing=False,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+        )
+        with pytest.raises(RuntimeError, match="intentional interrupted fit"):
+            interrupted.fit(wrapped, train_dataloaders=data)
+        assert (
+            wrapped.model is model
+            and callback._source is None
+            and not callback._load_hooks
+        )
+
+
 @pytest.mark.parametrize("all_atoms", [None, False, True])
 def test_scale_shift_additivity(caplog, all_atoms):
     assert DEFAULT_MODEL_CONFIG["scale_shift"]["all_atoms"] is False
@@ -820,7 +1407,9 @@ def evaluate(model, fidelity=0, numbers=(1, 1, 8)):
 
 @pytest.mark.parametrize("interaction", ["cgtp", "o2_cgtp", "co3", "nonlinear_ictd"])
 @pytest.mark.parametrize("embedding", ["element", "element2"])
-def test_element_edge_convolution(interaction, embedding, double_precision, monkeypatch):
+def test_element_edge_convolution(
+    interaction, embedding, double_precision, monkeypatch
+):
     torch.manual_seed(19)
     reference = make_model(interaction, edge_embedding="identity").train()
     torch.manual_seed(19)
@@ -844,8 +1433,11 @@ def test_element_edge_convolution(interaction, embedding, double_precision, monk
     grad = gradient(expected)
     assert all(g.abs().max() > 0 for g in grad)
     selected = select_elements(model, [1, 8])
-    for name,table in zip(embed.table_names,tables):
-        torch.testing.assert_close(getattr(selected.readout_fn.representation.edge_embedding,name).weight,table[[0,2]])
+    for name, table in zip(embed.table_names, tables):
+        torch.testing.assert_close(
+            getattr(selected.readout_fn.representation.edge_embedding, name).weight,
+            table[[0, 2]],
+        )
     monkeypatch.setenv("TACE_USE_EQX", "1")
     for memory_first in ("0", "1"):
         monkeypatch.setenv("TACE_MEMORY_FIRST", memory_first)
@@ -1056,12 +1648,18 @@ def test_interaction_product_bias(
     removed = original.keys() - kept.keys()
     assert all(
         name.startswith(
-            ("readout_fn.representation.interactions.", "readout_fn.representation.products.")
+            (
+                "readout_fn.representation.interactions.",
+                "readout_fn.representation.products.",
+            )
         )
         and name.endswith(".bias")
         for name in removed
     )
-    for name, enabled in (("interactions", interaction_bias), ("products", product_bias)):
+    for name, enabled in (
+        ("interactions", interaction_bias),
+        ("products", product_bias),
+    ):
         assert any(f".{name}." in key for key in removed) == (not enabled)
     with torch.no_grad():
         for name, param in kept.items():

@@ -148,8 +148,47 @@ such as ASE or TorchSim and modify the BEC-related parameters within the module.
 Compatibility in TACE
 ---------------------
 
-* ``TACE_USE_COMPILE`` and current AOTI export paths do not support LES because
-  the external global solver is not part of the flattened TACE graph.
+Frozen graph inference is supported for the charge-only LES 0.2.0 solver on
+standard nonmagnetic ``SphericalTACE`` and ``CartesianTACE`` models.
+Set ``is_periodic: true`` in the LES
+arguments and use energy, optionally with forces and/or stress. For example:
+
+.. code-block:: console
+
+   tace-export-eval -m model.pt --backend aoti --device cpu -o periodic.pt2
+
+Every input structure must have all three PBC flags set and a finite,
+right-handed cell with positive volume. The cells may differ between
+structures or calls; they are not frozen to the export sample. Do not supply
+external electric/magnetic fields or atomic spins. TACE's graph loader checks
+the cell and PBC on CPU or asynchronously on CUDA. Direct callers of the raw
+CUDA package must enforce these preconditions themselves. Loading the
+resulting CPU or CUDA package does not require LES. With the default dynamic
+export, atom and edge counts can vary (at least two atoms and one edge per
+batch). The default two-graph export sample also permits the graph count to
+vary, including one graph. Exporting with a single-graph sample fixes the
+graph count at one; ``--fixed-shapes`` fixes all input shapes.
+
+``energy`` includes the long-range contribution, with forces and stress
+derived from that total. As in eager TACE, ``node_energy`` contains only the
+short-range contributions and need not sum to ``energy``.
+
+Foundation's explicit-gradient ``targets.aoti.export_training`` supports the
+same solver on **spherical** models for **single-rank CUDA** E/F/S
+training. Cartesian LES support is frozen inference only. Use a training-mode
+model and a supported TACE loss; the package takes live parameters and buffers
+and returns the full loss gradients, including derivatives through forces and
+stress. By default it uses fixed shapes; with ``dynamic_shapes=True`` the atom
+and edge counts may change while the number of graphs stays fixed. Load it
+through ``targets.aoti.load_training`` to enforce the physical input contract
+before launching CUDA kernels; a bare AOTInductor binary assumes valid
+periodic inputs. Distributed execution and replay are not supported for this
+solver.
+
+Neither graph export path enables LES for live ``TACE_USE_COMPILE``
+or LAMMPS deployment. BECs, induced or higher multipoles,
+field/spin embeddings, and other long-range solver configurations remain
+outside the frozen graph contract.
 
 
 How LES works

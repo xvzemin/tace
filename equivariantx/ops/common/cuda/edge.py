@@ -166,7 +166,11 @@ def evaluate(
             inputs[slot].dtype != inputs[0].dtype
             or inputs[slot].numel() != rows * width
         ):
-            raise ValueError("Input shape does not match the fused expression layout.")
+            raise ValueError(
+                f"Edge program input {slot} ({kind}) expects {rows} rows of width "
+                f"{width} and dtype {inputs[0].dtype}; got {tuple(inputs[slot].shape)} "
+                f"with dtype {inputs[slot].dtype}."
+            )
     inputs = [x.contiguous() for x in inputs]
     outputs = edge_outputs(metadata, inputs, source, target, num_nodes)
     slots = sorted({slot for _, slot, _ in descriptions})

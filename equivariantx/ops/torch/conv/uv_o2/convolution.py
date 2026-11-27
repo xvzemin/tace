@@ -79,8 +79,12 @@ def evaluate(
     edge_index,
     vectors,
     radial_network,
+    target_features=None,
 ):
     """Execute ordinary Torch or the differentiated expression schedule."""
+    receivers = (
+        features.shape[0] if target_features is None else target_features.shape[0]
+    )
     edge_features, conv_weights, radial_network, expanded = prepare(
         module,
         features,
@@ -106,10 +110,11 @@ def evaluate(
             vectors,
             radial_network,
             True,
+            target_features=target_features,
         )
-        return evaluate_torch(
-            metadata, inputs, *edge_index, features.shape[0], optimized=True
-        )[0]
+        return evaluate_torch(metadata, inputs, *edge_index, receivers, optimized=True)[
+            0
+        ]
     execute = get_kernel("edge_program", "torch")
     if module.radial_mode == "full" and not config.TORCH_REFERENCE:
         from equivariantx.ops.common.torch.edge import evaluate_recomputed
@@ -141,8 +146,9 @@ def evaluate(
                 vectors,
                 radial_network,
                 True,
+                target_features=target_features,
             )
-            return execute(metadata, inputs, *edge_index, features.shape[0])[0]
+            return execute(metadata, inputs, *edge_index, receivers)[0]
     return staged(
         module,
         features,
@@ -156,6 +162,7 @@ def evaluate(
         vectors,
         radial_network,
         execute,
+        target_features,
     )
 
 
@@ -172,9 +179,14 @@ def staged(
     vectors,
     radial_network,
     execute,
+    target_features,
 ):
     """Evaluate channel maps and gates with ordinary Torch autograd."""
     source, target = edge_index
+    receivers = (
+        features.shape[0] if target_features is None else target_features.shape[0]
+    )
+    target_slot = 0
     transverse = vectors is not None
     if transverse:
         if any(
@@ -197,7 +209,13 @@ def staged(
             return frame(features, direction, source, target, count, inverse=inverse)
 
         projected_source = project(node_frame, features, source, edge_ids, edges)
-        projected_target = project(node_frame, features, target, edge_ids, edges)
+        projected_target = project(
+            node_frame,
+            features if target_features is None else target_features,
+            target,
+            edge_ids,
+            edges,
+        )
         projected_edge = (
             project(edge_frame, edge_features, edge_ids, edge_ids, edges)
             if edge_frame is not None
@@ -219,20 +237,27 @@ def staged(
         if packed:
             wigner_inv = wigner
         local_inputs = [features, edge_features, conv_weights, wigner]
+        if target_features is not None:
+            target_slot = len(local_inputs)
+            local_inputs.append(target_features)
         linears = module.linears
     separate = not config.TORCH_REFERENCE and not transverse
     input_blocks = separate and bool(linears[0][0])
     output_blocks = separate and bool(linears[-1][1])
     metadata = module.prepare_program(
-        local_dim, global_dim, packed, transverse, input_blocks
+        local_dim, global_dim, packed, transverse, input_blocks, target_slot
     )
     if radial_network is not None:
         from equivariantx.ops.common.radial import compose_radial
 
         metadata, local_inputs = compose_radial(
-            metadata, local_inputs, 3 if transverse else 2, radial_network
+            metadata,
+            local_inputs,
+            3 if transverse else 2,
+            radial_network,
+            num_targets=None if target_features is None else receivers,
         )
-    local = execute(metadata, local_inputs, source, target, features.shape[0])
+    local = execute(metadata, local_inputs, source, target, receivers)
     pieces = (
         local
         if input_blocks
@@ -270,7 +295,7 @@ def staged(
                     (layout, linears[layer][1]),
                     True,
                     gates[layer],
-                    features.shape[0],
+                    receivers,
                     source,
                     target,
                     *(value.flatten(-2) for value in values),
@@ -282,7 +307,7 @@ def staged(
                     + ([direction] if transverse else []),
                     source,
                     target,
-                    features.shape[0],
+                    receivers,
                 )
             values = [
                 value.reshape(source.shape[0], dim, mul)
@@ -301,7 +326,7 @@ def staged(
         ],
         source,
         target,
-        features.shape[0],
+        receivers,
     )
     output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, -1)
     if transverse:
@@ -310,7 +335,7 @@ def staged(
             output,
             edge_ids,
             target,
-            features.shape[0],
+            receivers,
             inverse=True,
         )
     return output

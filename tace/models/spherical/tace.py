@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Union
 
 import torch
 from e3nn import o3
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from tace.dataset.quantity import PROPERTIES
 from tace.utils.torch_scatter import scatter_sum
@@ -26,6 +27,17 @@ from .readout import (
     build_tensor_readout,
 )
 from .representation import NodeRepresentation, PairRepresentation
+
+
+def sum_node_energy(
+    energy: torch.Tensor, batch: torch.Tensor, num_graphs: int
+) -> torch.Tensor:
+    """Sum scalar node energies for each structure in a batch."""
+    # A symbolic graph count can be one on a later call. Keep the general
+    # scatter then; specializing this branch would introduce a shape guard.
+    if statically_known_true(num_graphs == 1):
+        return energy.sum().reshape(1)
+    return scatter_sum(energy, batch, dim=0, dim_size=num_graphs)
 
 
 class SphericalTACE(torch.nn.Module):
@@ -92,9 +104,7 @@ class SphericalTACE(torch.nn.Module):
         self.embedding_property = (
             cfg["invariant_property"] + cfg["equivariant_property"]
         )
-        self.register_buffer(
-            "cutoff", torch.tensor(cfg["cutoff"], dtype=torch.float64)
-        )
+        self.register_buffer("cutoff", torch.tensor(cfg["cutoff"], dtype=torch.float64))
         self.register_buffer(
             "atomic_numbers", torch.tensor(cfg["atomic_numbers"], dtype=torch.int64)
         )
@@ -381,7 +391,7 @@ class SphericalTACE(torch.nn.Module):
             e_base_node = self.atomic_energy_layer(graph.node_type)[
                 num_atoms_arange, node_fidelity
             ]
-            e_base_graph = scatter_sum(e_base_node, batch, dim=-1, dim_size=num_graphs)
+            e_base_graph = sum_node_energy(e_base_node, batch, num_graphs)
             e_list = []
             for ii, energy_readout in enumerate(self.energy_readouts):
                 if not self.use_alllayer:
@@ -416,18 +426,21 @@ class SphericalTACE(torch.nn.Module):
                 e_node = e_node + e_zbl_node
             if hasattr(self, "one_body_magmoms_readout"):
                 magnetic_radial_basis = from_representation["magnetic_radial_basis"]
-                e_node = e_node + self.one_body_magmoms_readout(
-                    torch.cat(
-                        (
-                            torch.ones_like(magnetic_radial_basis[..., :1]),
-                            magnetic_radial_basis,
+                e_node = (
+                    e_node
+                    + self.one_body_magmoms_readout(
+                        torch.cat(
+                            (
+                                torch.ones_like(magnetic_radial_basis[..., :1]),
+                                magnetic_radial_basis,
+                            ),
+                            dim=-1,
                         ),
-                        dim=-1,
-                    ),
-                    node_fidelity=node_fidelity,
-                    node_type=graph.node_type,
-                )[num_atoms_arange, node_fidelity]
-            e_graph = scatter_sum(e_node, batch, dim=-1, dim_size=num_graphs)
+                        node_fidelity=node_fidelity,
+                        node_type=graph.node_type,
+                    )[num_atoms_arange, node_fidelity]
+                )
+            e_graph = sum_node_energy(e_node, batch, num_graphs)
             e_node = e_base_node + e_node
             E = e_base_graph + e_graph
             # E = e_graph
@@ -614,7 +627,11 @@ class SphericalTACE(torch.nn.Module):
                 positions=data["positions"],
                 lattice=graph.lattice,
                 batch=batch,
-                atomic_numbers=data["atomic_numbers"],
+                atomic_numbers=(
+                    data["atomic_numbers"]
+                    if "atomic_numbers" in data
+                    else self.atomic_numbers[graph.node_type]
+                ),
                 external_field=data.get("electric_field"),
                 pbc=data.get("pbc"),
             )

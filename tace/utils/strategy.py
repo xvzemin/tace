@@ -1,8 +1,15 @@
+################################################################################
+# Authors: Zemin Xu
+# License: MIT, see LICENSE.md
+################################################################################
+
 """Gradient synchronization for models with coordinate derivatives."""
 
 import os
+from contextlib import contextmanager
 
 import torch
+from lightning.pytorch.overrides.distributed import _sync_module_states
 from lightning.pytorch.strategies import DDPStrategy
 
 
@@ -27,7 +34,9 @@ def is_rank_0():
 class SimpleDDPStrategy(DDPStrategy):
     """Average parameter gradients after backward without wrapping the model.
 
-    Gradients are grouped by device and dtype for asynchronous reduction.
+    Rank zero supplies the initial parameters and buffers. Dense gradients
+    are averaged by device and dtype at the end of each accumulation window.
+    Forward passes do not broadcast buffers.
     Based on NequIP 0.15.0's manual synchronization strategy.
 
     Examples
@@ -41,22 +50,44 @@ class SimpleDDPStrategy(DDPStrategy):
           _target_: tace.utils.strategy.SimpleDDPStrategy
     """
 
+    _sync_gradients = True
+
     def configure_ddp(self) -> None:
-        pass
+        if torch.distributed.get_world_size() > 1:
+            _sync_module_states(self.model)
+
+    @contextmanager
+    def block_backward_sync(self):
+        previous = self._sync_gradients
+        self._sync_gradients = False
+        try:
+            yield
+        finally:
+            self._sync_gradients = previous
 
     def post_backward(self, closure_loss: torch.Tensor) -> None:
-        """Reduce coalesced gradients without wrapping the force forward pass."""
+        """Average gradients across replicas, preserving globally unused parameters."""
+        if not self._sync_gradients or torch.distributed.get_world_size() == 1:
+            return
         groups = {}
         for param in self.model.parameters():
-            if param.requires_grad and param.grad is not None:
-                grad = param.grad.detach()
-                groups.setdefault((grad.device, grad.dtype), []).append(grad)
-        if not groups:
-            return
+            if param.requires_grad:
+                groups.setdefault((param.device, param.dtype), []).append(param)
         summed = torch.distributed.get_backend() == "gloo"
         pending = []
-        for gradients in groups.values():
-            flat = torch.cat([grad.reshape(-1) for grad in gradients])
+        for params in groups.values():
+            present = [p.grad is not None for p in params]
+            if all(present):
+                chunks = [p.grad.detach().reshape(-1) for p in params]
+                flags = params[0].new_ones(1).expand(len(params))
+            else:
+                zero = params[0].new_zeros(1)
+                chunks = [
+                    p.grad.detach().reshape(-1) if used else zero.expand(p.numel())
+                    for p, used in zip(params, present)
+                ]
+                flags = params[0].new_tensor(present)
+            flat = torch.cat([*chunks, flags])
             work = torch.distributed.all_reduce(
                 flat,
                 op=torch.distributed.ReduceOp.SUM
@@ -64,12 +95,22 @@ class SimpleDDPStrategy(DDPStrategy):
                 else torch.distributed.ReduceOp.AVG,
                 async_op=True,
             )
-            pending.append((work, flat, gradients))
-        for work, flat, gradients in pending:
+            pending.append((work, flat, params, present))
+        for work, flat, params, present in pending:
             work.wait()
             if summed:
                 flat.div_(torch.distributed.get_world_size())
-            views = flat.split([grad.numel() for grad in gradients])
-            torch._foreach_copy_(
-                gradients, [view.view_as(grad) for view, grad in zip(views, gradients)]
-            )
+            *values, flags = flat.split([*(p.numel() for p in params), len(params)])
+            # No host read on the dense path. A missing local gradient needs
+            # storage only when another replica contributed to this parameter.
+            if not all(present):
+                for p, used, used_anywhere in zip(params, present, flags.tolist()):
+                    if not used and used_anywhere:
+                        p.grad = torch.empty_like(p)
+            out, src = [], []
+            for p, value in zip(params, values):
+                if p.grad is not None:
+                    out.append(p.grad)
+                    src.append(value.view_as(p))
+            if out:
+                torch._foreach_copy_(out, src)

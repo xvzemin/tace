@@ -68,6 +68,7 @@ def program_inputs(
     radial_network,
     expanded,
     normalized=False,
+    target_features=None,
 ):
     """Construct the local convolution program and its tensor operands."""
     transverse = vectors is not None
@@ -96,6 +97,12 @@ def program_inputs(
             wigner,
             features.new_empty((1, 0)) if packed else wigner_inv,
         )
+    inputs = [features, edge_features, conv_weights, geometry, inverse, cutoff]
+    inputs.extend(value.reshape(1, -1) for value in parameters)
+    target_slot = 0
+    if target_features is not None:
+        target_slot = len(inputs)
+        inputs.append(target_features)
     metadata = module.convolution_program(
         local_dim,
         global_dim,
@@ -103,11 +110,16 @@ def program_inputs(
         transverse,
         native=not expanded,
         normalized=normalized,
+        target_slot=target_slot,
     )
-    inputs = [features, edge_features, conv_weights, geometry, inverse, cutoff]
-    inputs.extend((value.reshape(1, -1) for value in parameters))
     if radial_network is not None:
         from .radial import compose_radial
 
-        metadata, inputs = compose_radial(metadata, inputs, 2, radial_network)
+        metadata, inputs = compose_radial(
+            metadata,
+            inputs,
+            2,
+            radial_network,
+            num_targets=None if target_features is None else target_features.shape[0],
+        )
     return (metadata, inputs)

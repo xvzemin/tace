@@ -4,6 +4,7 @@ from functools import wraps
 from weakref import WeakKeyDictionary
 
 import torch
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from ...o2.layout import irrep_layout
 from ...o2.wigner import WignerD
@@ -204,7 +205,13 @@ class UvO2TensorProductConv(torch.nn.Module):
 
     @cached_program
     def prepare_program(
-        self, local_dim, global_dim, packed=False, transverse=False, blocks=False
+        self,
+        local_dim,
+        global_dim,
+        packed=False,
+        transverse=False,
+        blocks=False,
+        target_slot=0,
     ):
         program = Program()
         if transverse:
@@ -221,7 +228,7 @@ class UvO2TensorProductConv(torch.nn.Module):
             weight = program.input(3, "edge", self.weight_numel)
         else:
             node = program.input(0, "source", self.input_dim)
-            target = program.input(0, "target", self.input_dim)
+            target = program.input(target_slot, "target", self.input_dim)
             edge = program.input(1, "edge", self.edge_dim)
             weight = program.input(2, "edge", self.weight_numel)
             wigner = program.input(3, "edge", local_dim * global_dim)
@@ -340,13 +347,20 @@ class UvO2TensorProductConv(torch.nn.Module):
 
     @cached_program
     def convolution_program(
-        self, local_dim, global_dim, packed, transverse, native=True, normalized=False
+        self,
+        local_dim,
+        global_dim,
+        packed,
+        transverse,
+        native=True,
+        normalized=False,
+        target_slot=0,
     ):
         """Encode radial weighting, the local MLP and node aggregation."""
         if transverse:
             program = Program()
             features = program.input(0, "source", self.input_dim)
-            target = program.input(0, "target", self.input_dim)
+            target = program.input(target_slot, "target", self.input_dim)
             edge = program.input(1, "edge", self.edge_dim)
             radial = program.input(2, "edge", self.weight_numel)
             geometry = program.input(3, "edge", 3)
@@ -366,7 +380,9 @@ class UvO2TensorProductConv(torch.nn.Module):
             )
         else:
             nodes, outputs = parse_metadata(
-                self.prepare_program(local_dim, global_dim, packed, False, True)
+                self.prepare_program(
+                    local_dim, global_dim, packed, False, True, target_slot
+                )
             )
             program, values = Program(nodes), [root for root, _, _ in outputs]
             linears = self.linears
@@ -421,6 +437,7 @@ class UvO2TensorProductConv(torch.nn.Module):
         vectors=None,
         radial_network=None,
         edge_pairs=None,
+        num_nodes=None,
     ):
         """Evaluate the radially weighted local MLP and sum at target nodes.
 
@@ -456,6 +473,10 @@ class UvO2TensorProductConv(torch.nn.Module):
             ``radial_mode`` selects final-projection or full-network fusion.
         edge_pairs : equivariantx.conv.EdgePairs, optional
             Supply invariant radial inputs per undirected pair. Geometry and messages remain directed.
+        num_nodes : int, optional
+            Number of output receivers. Targets index this prefix of ``features``;
+            sources may index every row, including source-only ghost nodes.
+            The default uses all feature rows as receivers.
 
         Returns
         -------
@@ -515,6 +536,14 @@ class UvO2TensorProductConv(torch.nn.Module):
             wigner = wigner.to(features)
         if wigner_inv is not None:
             wigner_inv = wigner_inv.to(features)
+        # Distinct slots let the edge program reduce source and target
+        # adjoints into their own row domains. Narrow's backward returns the
+        # target contribution to the original full source table.
+        target_features = None
+        if num_nodes is not None and not statically_known_true(
+            num_nodes == features.shape[0]
+        ):
+            target_features = features.narrow(0, 0, num_nodes)
         if self.backend == "cuda" and features.is_cuda:
             from ...ops.cuda.conv.uv_o2 import convolution as cuda_kernel
 
@@ -530,6 +559,7 @@ class UvO2TensorProductConv(torch.nn.Module):
                 edge_index,
                 vectors,
                 radial_network,
+                target_features,
             )
         return torch_kernel.evaluate(
             self,
@@ -543,4 +573,5 @@ class UvO2TensorProductConv(torch.nn.Module):
             edge_index,
             vectors,
             radial_network,
+            target_features,
         )
